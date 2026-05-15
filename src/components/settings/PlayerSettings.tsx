@@ -39,7 +39,6 @@ const PlayerSettings = () => {
     proxy_auto_optimized: true,
     proxy_optimized_once: false,
     enhanced_codecs: true,
-    use_twitch_auth: false,
   };
 
   const streamlink = settings.streamlink || streamlinkDefaults;
@@ -348,23 +347,6 @@ const PlayerSettings = () => {
               updateSettings({
                 ...settings,
                 streamlink: { ...streamlink, enhanced_codecs: !(streamlink.enhanced_codecs ?? true) },
-              })
-            }
-          />
-        </div>
-
-        {/* Twitch login passthrough for 1440p / 2160p */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Use Twitch login for 1440p / Source</span>
-            <p className="text-xs text-textSecondary">Adds 1440p / 2160p to the quality menu on streams that broadcast in those tiers. When TTVLOL Proxy Routing is also on, both run together — 1080p and below come from the ad-free proxy, 1440p comes from your authenticated session.</p>
-          </div>
-          <Toggle
-            enabled={streamlink.use_twitch_auth ?? false}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, use_twitch_auth: !(streamlink.use_twitch_auth ?? false) },
               })
             }
           />

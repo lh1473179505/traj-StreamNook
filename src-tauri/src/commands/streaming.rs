@@ -182,11 +182,13 @@ pub async fn start_stream(
 
     debug!("[Streaming] Final args to be used: '{}'", streamlink_args);
 
-    // Splice mode: proxy on + auth on → spin up our local splice server and
+    // Splice mode: TTVLOL proxy on → spin up our local splice server and
     // replace streamlink's proxy URL with it. The server fetches both TTVLOL
     // (ad-free, 1080p ceiling) and authed (with 1440p) masters and merges
-    // them — see services/auth_proxy.rs.
-    let splice_active = streamlink_settings.use_proxy && streamlink_settings.use_twitch_auth;
+    // them. See services/auth_proxy.rs. Twitch auth is always-on now, so
+    // splice mode is purely a function of whether the user wants the
+    // ad-blocking proxy.
+    let splice_active = streamlink_settings.use_proxy;
     let is_vod_or_clip =
         url.contains("/videos/") || url.contains("/clip/") || url.contains("clips.twitch.tv");
     let twitch_auth = state.twitch_auth.clone();
@@ -216,7 +218,7 @@ pub async fn start_stream(
     // Direct auth-only mode (no proxy): pass the cookie to streamlink itself.
     // In splice mode the server handles auth internally, so streamlink doesn't
     // need the header (and the proxy URL would strip it anyway).
-    let oauth_token = if streamlink_settings.use_twitch_auth && !splice_active {
+    let oauth_token = if !splice_active {
         match twitch_auth.get_token().await {
             Ok(t) => {
                 log::info!(
@@ -295,23 +297,18 @@ pub async fn get_stream_qualities(
     url: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let (custom_path, enhanced_codecs, use_twitch_auth) = {
+    let (custom_path, enhanced_codecs) = {
         let settings = state.settings.lock().unwrap();
         (
             settings.streamlink.custom_streamlink_path.clone(),
             settings.streamlink.enhanced_codecs,
-            settings.streamlink.use_twitch_auth,
         )
     };
     let streamlink_path = StreamlinkManager::get_effective_path(custom_path.as_deref());
 
-    // Mirror start_stream's auth source so the in-player quality menu
-    // probe sees the same expanded variant list start_stream can serve.
-    let oauth_token = if use_twitch_auth {
-        state.twitch_auth.get_token().await.ok()
-    } else {
-        None
-    };
+    // Twitch auth is always-on so the quality menu probe sees the same
+    // expanded variant list start_stream can serve (1440p / 2160p tiers).
+    let oauth_token = state.twitch_auth.get_token().await.ok();
 
     StreamlinkManager::get_qualities_authed(
         &url,

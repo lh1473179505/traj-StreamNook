@@ -89,20 +89,10 @@ pub struct StreamlinkSettings {
     pub proxy_optimized_once: bool,
     /// Request Twitch's Enhanced Broadcasting variants (h265 + AV1 in addition
     /// to h264). On channels using Enhanced Broadcasting this unlocks 1440p60
-    /// (AV1) and 720p60 (HEVC) tiers that are otherwise hidden — h264-only
+    /// (AV1) and 720p60 (HEVC) tiers that are otherwise hidden. h264-only
     /// requests are served just the 480p fallback there. Default on.
-    /// See [[Brain/references/Streamlink_Enhanced_Broadcasting]].
     #[serde(default = "default_true")]
     pub enhanced_codecs: bool,
-    /// Pass the viewer's Twitch OAuth token to Streamlink so the master
-    /// playlist returns QUAD_HD / ULTRA_HD tiers (1440p / 2160p). Opt-in
-    /// because Streamlink's client-integrity fallback can hang on bad tokens.
-    /// We pre-validate against `id.twitch.tv/oauth2/validate` and skip the
-    /// header if the check fails. NOTE: TTVLOL `--twitch-proxy-playlist`
-    /// silently ignores this header — turn off proxy routing for the auth
-    /// to take effect (loses ad-blocking).
-    #[serde(default)]
-    pub use_twitch_auth: bool,
 }
 
 impl Default for StreamlinkSettings {
@@ -121,7 +111,6 @@ impl Default for StreamlinkSettings {
             proxy_auto_optimized: true,
             proxy_optimized_once: false,
             enhanced_codecs: true,
-            use_twitch_auth: false,
         }
     }
 }
