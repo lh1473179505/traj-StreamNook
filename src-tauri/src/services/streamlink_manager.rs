@@ -702,9 +702,7 @@ impl StreamlinkManager {
                 // failure wasn't "quality unavailable"; it was something else
                 // (transient network, manifest fetch, etc.). Don't silently
                 // downgrade — surface the real error.
-                let already_offered = available
-                    .iter()
-                    .any(|q| q.eq_ignore_ascii_case(quality));
+                let already_offered = available.iter().any(|q| q.eq_ignore_ascii_case(quality));
                 if already_offered {
                     return Err(err);
                 }

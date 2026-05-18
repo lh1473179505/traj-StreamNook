@@ -1043,19 +1043,37 @@ export const useAppStore = create<AppState>((set, get) => ({
       Logger.warn('[Stream] Cannot restart: no current stream');
       return;
     }
-    
+
     if (currentMediaType && currentMediaType !== 'live') {
       Logger.warn('[Stream] Cannot restart non-live media (clips/videos).');
       return;
     }
-    
+
     Logger.info(`[Stream] Restarting stream for ${currentStream.user_login}...`);
     trackActivity('Restarted stream');
-    
+
     // Save current stream info
     const channel = currentStream.user_login;
     const streamInfo = { ...currentStream };
     const quality = settings.quality;
+
+    // If we somehow landed here with an empty user_id (e.g. a previous startStream
+    // hit a transient get_channel_info failure during a raid), repair it before
+    // restarting — otherwise the Follow / Subscribe buttons stay broken across refresh.
+    if (!streamInfo.user_id) {
+      try {
+        const rawInfo = await invoke<{ broadcaster_id?: string; broadcaster_name?: string; title?: string; game_name?: string }>('get_channel_info', { channelName: channel });
+        if (rawInfo.broadcaster_id) {
+          streamInfo.user_id = rawInfo.broadcaster_id;
+          if (rawInfo.broadcaster_name) streamInfo.user_name = rawInfo.broadcaster_name;
+          if (rawInfo.title) streamInfo.title = rawInfo.title;
+          if (rawInfo.game_name) streamInfo.game_name = rawInfo.game_name;
+          Logger.debug(`[Stream] Repaired missing user_id for ${channel} -> ${streamInfo.user_id}`);
+        }
+      } catch (e) {
+        Logger.warn(`[Stream] Could not repair missing user_id for ${channel}:`, e);
+      }
+    }
     
     try {
       // Stop the current stream (but don't clean up everything)
@@ -1333,9 +1351,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
           // Set up event listeners for Rust-emitted events
           // Listen for raid events
-          const unlistenRaid = await listen<{ to_broadcaster_user_login: string; viewers: number }>('eventsub://raid', async (event) => {
+          const unlistenRaid = await listen<{
+            from_broadcaster_user_id: string;
+            from_broadcaster_user_login: string;
+            from_broadcaster_user_name: string;
+            to_broadcaster_user_id: string;
+            to_broadcaster_user_login: string;
+            to_broadcaster_user_name: string;
+            viewers: number;
+          }>('eventsub://raid', async (event) => {
             if (!autoRedirectOnRaid) return;
-            
+
             const raidData = event.payload;
             Logger.debug(`[EventSub] Raid detected! Redirecting to ${raidData.to_broadcaster_user_login} (${raidData.viewers} viewers)`);
 
@@ -1348,8 +1374,24 @@ export const useAppStore = create<AppState>((set, get) => ({
             // Small delay to let user see the notification
             await new Promise(resolve => setTimeout(resolve, 1500));
 
+            // Seed startStream with the user_id Twitch already gave us on the raid event.
+            // Without this, startStream falls back to get_channel_info; if that one Helix call
+            // hiccups, currentStream.user_id ends up empty and the Follow button no-ops until
+            // the user closes the stream and re-opens it via search.
+            const raidedStreamInfo: TwitchStream = {
+              id: '',
+              user_id: raidData.to_broadcaster_user_id,
+              user_login: raidData.to_broadcaster_user_login,
+              user_name: raidData.to_broadcaster_user_name || raidData.to_broadcaster_user_login,
+              title: '',
+              viewer_count: raidData.viewers,
+              game_name: '',
+              thumbnail_url: '',
+              started_at: new Date().toISOString(),
+            };
+
             // Start the new stream (this will also set up new EventSub subscription)
-            await get().startStream(raidData.to_broadcaster_user_login);
+            await get().startStream(raidData.to_broadcaster_user_login, raidedStreamInfo);
           });
           
           if (currentConnectionId === eventSubConnectionId) {
