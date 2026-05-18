@@ -1,3 +1,10 @@
+## [7.3.3] - 2026-05-18
+### 🐛 Bug Fixes
+- Fixed an issue where the Follow and Subscribe buttons could become unresponsive after restarting a stream or being automatically redirected to a new channel by a raid. StreamNook now ensures all necessary channel information is always correctly loaded to keep these features working seamlessly. Thanks to <@rainyyay> for the report!.
+
+### 🔧 Maintenance
+- Minor internal code improvements for the streamlink manager.
+
 ## [7.3.2] - 2026-05-15
 ### ✨ Features
 - **Enhanced Streaming Options**: You can now enable support for h265 and AV1 codecs, unlocking higher quality tiers (like 1440p and 2160p) on compatible streams!
@@ -1174,6 +1181,7 @@ ATTENTION: ALL USERS LOG OUT OF TWITCH THEN LOG BACK IN FOR SOME CHANGES OT TAKE
 
 ### Fixed
 - Issue in calculating window aspect ratio when resizing with different chat placements.
+
 
 
 
