@@ -65,12 +65,42 @@ env_logger = "0.11"
 tauri-plugin-deep-link = "2.4.7"
 tauri-plugin-clipboard-manager = "2.3.2"
 
-# Used by services/twitch_auth_service.rs to fetch the twitch.tv auth-token
-# cookie via WebView2's official cookie manager API (no SQLite scraping).
-# Versions pinned to Tauri 2.10's resolved transitive graph.
+# Screen capture for the Profile share feature. xcap grabs real WebView pixels
+# (post compositor) so backdrop-filter / paint gradients / custom fonts render
+# faithfully — DOM-clone libs like html-to-image can't see those. `image` is
+# used to crop the monitor capture down to the profile card's region and
+# encode the result as PNG bytes (static path) or as raw RGBA frames fed to
+# the WebP animation encoder (animated path).
+#
+# webp-animation wraps libwebp's WebPAnimEncoder. Animated WebP is not bound
+# by GIF's 256-color palette, so 7TV paint gradients and neon badge glows
+# survive encoding without quantization banding. libwebp itself is built from
+# vendored C source by libwebp-sys2 via the cc crate — no CMake required, just
+# the MSVC toolchain that StreamNook already needs for its other native deps.
+xcap = "0.0.14"
+# png for the static-paint capture path (capture_screen_region). The
+# animated path uses direct DXGI Output Duplication and feeds raw RGBA
+# straight to the WebP encoder, no decode step needed.
+image = { version = "0.25", default-features = false, features = ["png"] }
+webp-animation = "0.9"
+
+# webview2-com powers services/twitch_auth_service.rs (CookieManager).
+# The windows crate features cover both that and the DXGI Output
+# Duplication pipeline that backs commands/screen_capture.rs's animated
+# WebP capture. DXGI gives us hardware-accelerated region-aware capture
+# at the monitor's full refresh rate (60+ fps), with the crop happening
+# GPU-side via CopySubresourceRegion into a staging texture sized
+# exactly to the card — no full-monitor readback, no third-party binary.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = "0.61"
+windows = { version = "0.61", features = [
+    "Win32_System_Com",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
 
 
 [features]

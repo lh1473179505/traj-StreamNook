@@ -9,6 +9,7 @@ import {
   RESERVED_TRIGGERS,
   type TemplateContext,
 } from './chatCommands';
+import { parseNukeArgs, executeNuke, executeUndo, isUserModeratorOf } from './nukeEngine';
 
 // Build a TemplateContext from the current AppStore + supplied args. Centralized
 // so plain-text expansions (ChatWidget) and slash-command expansions (this
@@ -649,6 +650,69 @@ export const handleSlashCommand = async (
         window.dispatchEvent(new CustomEvent('streamnook-open-user-card', {
           detail: { userId: user.id, username: user.login, displayName: user.display_name },
         }));
+        return true;
+      }
+      case 'refresh': {
+        if (!broadcasterLogin || !broadcasterId) {
+          addToast('/refresh: no active channel', 'error');
+          return true;
+        }
+        try {
+          const mod = await import('../stores/chatConnectionStore');
+          const set = await mod.refreshChannelEmotes(broadcasterLogin, broadcasterId);
+          const total = set
+            ? set.twitch.length + set.bttv.length + set['7tv'].length + set.ffz.length
+            : 0;
+          emitSystemMessage(`Emotes refreshed (${total} loaded).`);
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          addToast(`/refresh failed: ${errMsg}`, 'error');
+        }
+        return true;
+      }
+      case 'nuke': {
+        if (!broadcasterLogin) {
+          addToast('/nuke: no active channel', 'error');
+          return true;
+        }
+        if (!isUserModeratorOf(broadcasterLogin)) {
+          addToast('/nuke is a moderator-only command', 'error');
+          return true;
+        }
+        const raw = argsWithoutCommand.join(' ');
+        const parsed = parseNukeArgs(raw);
+        if ('error' in parsed) {
+          addToast(parsed.error, 'error');
+          return true;
+        }
+        try {
+          const { matchedMessages, affectedUsers } = await executeNuke(
+            broadcasterLogin,
+            broadcasterId,
+            parsed,
+          );
+          addToast(`/nuke: ${matchedMessages} message(s), ${affectedUsers} user(s)`, 'success');
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          addToast(`/nuke failed: ${errMsg}`, 'error');
+        }
+        return true;
+      }
+      case 'undo': {
+        if (!broadcasterLogin) {
+          addToast('/undo: no active channel', 'error');
+          return true;
+        }
+        if (!isUserModeratorOf(broadcasterLogin)) {
+          addToast('/undo is a moderator-only command', 'error');
+          return true;
+        }
+        try {
+          await executeUndo(broadcasterLogin);
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          addToast(`/undo failed: ${errMsg}`, 'error');
+        }
         return true;
       }
       case 'banid': {

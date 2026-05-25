@@ -127,6 +127,23 @@ export interface ChatDesignSettings {
   mention_animation: boolean; // Enable red-shift animation for mentions
   show_timestamps?: boolean; // Show timestamp next to each message
   show_timestamp_seconds?: boolean; // Include seconds in timestamps
+  emote_scale?: number; // Emote size multiplier (0.5x to 3x). Default 1.
+  emote_margin?: number; // Horizontal margin around emotes in rem. Negative values overlap. Default 0.125.
+  // How deleted/moderated messages render. 'strikethrough' is the prior
+  // default behavior. 'hidden' fully suppresses the row. 'dimmed' reduces
+  // opacity without strike. 'keep' leaves the message rendered as if nothing
+  // happened (useful for mods auditing what was said).
+  deleted_message_style?: 'strikethrough' | 'hidden' | 'dimmed' | 'keep';
+  // Suppress messages flagged as originating from another room in a Twitch
+  // shared-chat session. Default false (keep them visible).
+  hide_shared_chat?: boolean;
+  // Toggle the inline paint render on @mentions in message bodies. Default
+  // true (preserves prior always-painted behavior). Off renders the mention
+  // chip in the mentioned user's flat color only.
+  paint_mentions_in_body?: boolean;
+  // Use compact emote tooltips (just the name) instead of the upscaled
+  // emote preview. Default false (preview tooltip is the current behavior).
+  compact_emote_tooltips?: boolean;
 }
 
 export interface HighlightPhrase {
@@ -145,6 +162,70 @@ export interface HighlightPhrase {
 
 export interface ChatHighlightSettings {
   phrases: HighlightPhrase[];
+  built_in?: BuiltInHighlightSettings;
+  users?: HighlightUser[];
+  badges?: HighlightBadge[];
+  // Global appearance controls applied to every match (phrase / user / badge /
+  // built-in event). Sound and title-flash still fire under 'none' — this only
+  // governs the in-row visual.
+  appearance?: HighlightAppearanceSettings;
+}
+
+export type HighlightDisplayStyle = 'standard' | 'minimal' | 'none';
+
+export interface HighlightAppearanceSettings {
+  display_style?: HighlightDisplayStyle; // default 'standard'
+  opacity?: number; // 0-100, default 20. Modulates the row tint alpha only.
+  // When true, any highlight match that arrives while the window is blurred
+  // will flash document.title until the window regains focus. Default off.
+  flash_title_when_unfocused?: boolean;
+}
+
+// Always-highlight specific users. Match by login (case-insensitive). The
+// login is what we have at parse time without an extra Helix call, and it's
+// stable enough for this UI use (users who change their name infrequently
+// will just need the rule updated). User-id binding could be added later.
+export interface HighlightUser {
+  id: string; // rule id (UUID), not the Twitch user id
+  enabled: boolean;
+  username: string; // Twitch login, lowercased on save
+  color: string;
+  sound_id?: string | null;
+  cooldown_seconds?: number;
+}
+
+// Highlight all messages from users carrying a specific badge. badge_key is
+// the IRC tag format `name/version` (e.g. "moderator/1", "subscriber/12").
+// A trailing /* matches any version (e.g. "subscriber/*" highlights every
+// tier-1 sub regardless of tenure).
+export interface HighlightBadge {
+  id: string;
+  enabled: boolean;
+  badge_key: string;
+  label?: string; // optional display name for the settings UI
+  color: string;
+  sound_id?: string | null;
+  cooldown_seconds?: number;
+}
+
+// Built-in (flag-driven) message highlights. Each event is OFF by default to
+// preserve the prior baseline; turning a row on applies a tinted background +
+// left border in the configured color whenever the IRC tag is present.
+export interface BuiltInHighlightRule {
+  enabled: boolean;
+  color: string;
+}
+
+export interface BuiltInHighlightSettings {
+  // first-msg=1 IRC tag. Already shipped pre-2026-05-24 with a hardcoded
+  // purple gradient; this entry lets the user re-color (or disable) it.
+  first_time_chatter?: BuiltInHighlightRule;
+  // returning-chatter=1 IRC tag.
+  returning_chatter?: BuiltInHighlightRule;
+  // Messages where parsed.user_id === currentUser.user_id.
+  self_message?: BuiltInHighlightRule;
+  // USERNOTICE msg-id=raid (the raid announcement row itself).
+  raider?: BuiltInHighlightRule;
 }
 
 // Per-user customization. nickname and color are independent: either can be set
@@ -184,6 +265,35 @@ export interface UserSlashCommand {
 
 export interface ChatCommandsSettings {
   user_commands: UserSlashCommand[];
+}
+
+// Chat input QoL options. Both default off — preserve prior behavior.
+// 7TV / cosmetic visual controls. Today: paint drop-shadow render mode.
+// Default 'all' preserves the prior behavior (whatever shadows the paint
+// artist defined render in full). 'one' = first shadow only (faster + less
+// busy). 'none' = no shadows (cleanest, best on busy backgrounds).
+export interface CosmeticsSettings {
+  paint_shadows?: 'all' | 'one' | 'none';
+}
+
+// Render / perf controls. All optional with defaults preserving prior behavior.
+export interface ChatRenderSettings {
+  // Animate the scroll when the user clicks the "Resume" button at the
+  // bottom of the chat. Auto-scroll on new messages stays instant either
+  // way — smooth-scrolling on every PRIVMSG would fight itself in fast chats.
+  smooth_scroll_on_resume?: boolean;
+  // Max messages held in the local buffer per channel. Default 100.
+  // Range 50-1000. Larger = more scrollback at memory cost.
+  message_buffer_cap?: number;
+}
+
+export interface ChatInputSettings {
+  // Append an invisible suffix when sending the same message twice in a row,
+  // so Twitch's duplicate-message rejection doesn't eat the second send.
+  bypass_duplicate?: boolean;
+  // Ctrl+Enter sends the message AND keeps it in the input box. Plain Enter
+  // still sends + clears like normal.
+  quick_send?: boolean;
 }
 
 export interface LiveNotificationSettings {
@@ -333,18 +443,30 @@ export interface Settings {
   chat_highlights?: ChatHighlightSettings;
   chat_customization?: ChatCustomizationSettings;
   chat_commands?: ChatCommandsSettings;
+  chat_input?: ChatInputSettings;
+  chat_render?: ChatRenderSettings;
+  cosmetics?: CosmeticsSettings;
   live_notifications?: LiveNotificationSettings;
   last_seen_version?: string;
   auto_switch?: AutoSwitchSettings;
   theme?: string; // Theme ID (e.g., 'winters-glass', 'dracula', 'nord')
   error_reporting_enabled?: boolean; // Opt-in error reporting (default: true)
   setup_complete?: boolean; // Whether the first-time setup wizard has been completed
-  auto_update_on_start?: boolean; // Automatically update when app starts if update available
   compact_view?: CompactViewSettings; // Compact view preset settings
   custom_themes?: CustomTheme[]; // User-created custom themes
   multi_nook_slots?: MultiNookSlot[]; // Persisted multi-nook grid configurations
   multi_nook_chat_hidden?: boolean; // Whether the chat panel is globally hidden in MultiNook
   show_mod_logs?: boolean; // Whether to display the Mod Logs pane
+  moderation?: ModerationSettings;
+}
+
+export interface ModerationSettings {
+  // Surface CLEARCHAT / CLEARMSG IRC events as system rows even for non-mods.
+  // Mods see them by default; this lets curious viewers see "X was timed out".
+  show_mod_messages?: boolean;
+  // When a mod runs /clear, suppress the local visual wipe so the user's
+  // backlog stays readable. Inverse of the /clearmessages user command.
+  ignore_clear_chat?: boolean;
 }
 
 export interface ModLogEvent {

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, Plus, Trash2, Volume2 } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
 import { validateHighlightPhrase } from '../../utils/chatHighlightMatcher';
 import { SOUND_LABELS, playSound, type SoundId } from '../../utils/notificationSound';
+import { SettingsSection } from './_primitives';
 import type { HighlightPhrase } from '../../types';
 
 const DEFAULT_PHRASE_COLOR = '#fbbf24';
@@ -62,12 +63,11 @@ const HighlightPhrasesSettings = () => {
   };
 
   return (
-    <div className="pt-4 border-t border-borderSubtle">
-      <h3 className="text-lg font-semibold text-textPrimary mb-1">Highlight Phrases</h3>
-      <p className="text-xs text-textSecondary mb-4">
-        Flash chat messages that match specific words, names, or patterns. Mentions of your own name and replies to you are always highlighted; these are extra.
-      </p>
-
+    <SettingsSection
+      label="Highlight Phrases"
+      description="Flash chat messages that match specific words, names, or patterns. Mentions of your own name and replies to you are always highlighted; these are extra."
+      bare
+    >
       <div className="space-y-3">
         {phrases.length === 0 && (
           <div className="bg-glass/30 rounded-lg px-4 py-6 text-center">
@@ -254,7 +254,7 @@ const HighlightPhrasesSettings = () => {
           </button>
         )}
       </div>
-    </div>
+    </SettingsSection>
   );
 };
 

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronUp, Plus, Trash2, AlertTriangle, BookOpen } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
 import { RESERVED_TRIGGERS } from '../../utils/chatCommands';
+import { SettingsSection } from './_primitives';
 import type { UserSlashCommand } from '../../types';
 
 function makeDefaultCommand(): UserSlashCommand {
@@ -26,7 +27,7 @@ function sanitizeTrigger(raw: string): string {
   return raw.replace(/^\//, '').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
 }
 
-// Inline code chip — used throughout the docs panel for placeholder names
+// Inline code chip used throughout the docs panel for placeholder names
 // and short snippets. Single visual treatment, no decoration.
 const Tag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <code className="px-1 py-0.5 bg-background/40 rounded text-textPrimary font-mono text-[11px]">{children}</code>
@@ -69,7 +70,7 @@ const UserCommandsSettings = () => {
     writeCommands([...commands, makeDefaultCommand()]);
   };
 
-  // Detect duplicates among user triggers — only the first instance fires.
+  // Detect duplicates among user triggers (only the first instance fires).
   const duplicateTriggers = useMemo(() => {
     const seen = new Set<string>();
     const dups = new Set<string>();
@@ -83,9 +84,11 @@ const UserCommandsSettings = () => {
   }, [commands]);
 
   return (
-    <div className="pt-4 border-t border-borderSubtle">
-      <div className="flex items-start justify-between gap-3 mb-1">
-        <h3 className="text-lg font-semibold text-textPrimary">Custom Commands</h3>
+    <SettingsSection label="Custom Commands" bare>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs text-textSecondary flex-1">
+          Define your own commands. A trigger of <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">lurk</code> with expansion <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">I&apos;m lurking, BRB</code> means typing <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">/lurk</code> sends that message instead.
+        </p>
         <button
           onClick={() => setShowDocs((v) => !v)}
           className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-textSecondary hover:text-textPrimary transition-colors flex-shrink-0"
@@ -94,9 +97,6 @@ const UserCommandsSettings = () => {
           <span>{showDocs ? 'Hide reference' : 'Show reference'}</span>
         </button>
       </div>
-      <p className="text-xs text-textSecondary mb-3">
-        Define your own commands. A trigger of <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">lurk</code> with expansion <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">I&apos;m lurking, BRB</code> means typing <code className="px-1 py-0.5 bg-glass/40 rounded text-textPrimary">/lurk</code> sends that message instead.
-      </p>
 
       {showDocs && (
         <div className="mb-4 bg-glass/30 rounded-lg p-5 text-xs leading-relaxed space-y-6">
@@ -347,7 +347,7 @@ const UserCommandsSettings = () => {
           </button>
         )}
       </div>
-    </div>
+    </SettingsSection>
   );
 };
 

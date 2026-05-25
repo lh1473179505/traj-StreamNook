@@ -1,12 +1,12 @@
 import { useAppStore } from '../../stores/AppStore';
 import { useState, useEffect } from 'react';
+import { SettingsSection, SettingsRow } from './_primitives';
 
 import { Logger } from '../../utils/logger';
 const IntegrationsSettings = () => {
   const { settings, updateSettings } = useAppStore();
   const [ttvlolInstalledVersion, setTtvlolInstalledVersion] = useState<string | null>(null);
 
-  // Toggle component for reuse
   const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
     <button
       onClick={onChange}
@@ -20,7 +20,6 @@ const IntegrationsSettings = () => {
     </button>
   );
 
-  // Load TTV LOL plugin version
   useEffect(() => {
     const loadTtvlolVersion = async () => {
       if (!settings.ttvlol_plugin?.enabled) {
@@ -31,11 +30,9 @@ const IntegrationsSettings = () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
 
-        // Get installed version
         const installed = (await invoke('get_installed_ttvlol_version')) as string | null;
         setTtvlolInstalledVersion(installed);
 
-        // Update settings with the version if not already set
         if (installed && installed !== settings.ttvlol_plugin.installed_version) {
           updateSettings({
             ...settings,
@@ -54,7 +51,6 @@ const IntegrationsSettings = () => {
   const handleTtvlolToggle = async () => {
     const enabled = !(settings.ttvlol_plugin?.enabled ?? false);
 
-    // If enabling, check if plugin is installed
     if (enabled) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -63,7 +59,6 @@ const IntegrationsSettings = () => {
         )) as string | null;
 
         if (!installedVersion) {
-          // Plugin not installed, download it
           const { addToast } = useAppStore.getState();
           addToast('Downloading TTV LOL plugin...', 'info');
 
@@ -99,48 +94,36 @@ const IntegrationsSettings = () => {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Discord Rich Presence */}
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <span className="text-sm font-medium text-textPrimary">
-            Enable Discord Rich Presence
-          </span>
-          <p className="text-xs text-textSecondary">Show what you're watching on Discord</p>
-        </div>
-        <Toggle
-          enabled={settings.discord_rpc_enabled}
-          onChange={() => updateSettings({ ...settings, discord_rpc_enabled: !settings.discord_rpc_enabled })}
+    <div className="space-y-8">
+      <SettingsSection label="Discord">
+        <SettingsRow
+          title="Discord Rich Presence"
+          description="Show what you're watching on Discord"
+          control={
+            <Toggle
+              enabled={settings.discord_rpc_enabled}
+              onChange={() => updateSettings({ ...settings, discord_rpc_enabled: !settings.discord_rpc_enabled })}
+            />
+          }
         />
-      </div>
+      </SettingsSection>
 
-      {/* TTV LOL Plugin Section */}
-      <div className="pt-4 border-t border-borderSubtle">
-        <h3 className="text-lg font-semibold text-textPrimary mb-4">TTV LOL Ad Blocker Plugin</h3>
-
-        <div className="space-y-4">
-          {/* Enable Plugin */}
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Enable TTV LOL Plugin</span>
-              <p className="text-xs text-textSecondary">
-                Block ads on Twitch streams using the TTV LOL plugin
-              </p>
-            </div>
+      <SettingsSection label="TTV LOL Ad Blocker Plugin">
+        <SettingsRow
+          title="Enable TTV LOL Plugin"
+          description={
+            settings.ttvlol_plugin?.enabled && ttvlolInstalledVersion
+              ? `Block ads on Twitch streams using the TTV LOL plugin. Installed version: ${ttvlolInstalledVersion}`
+              : 'Block ads on Twitch streams using the TTV LOL plugin'
+          }
+          control={
             <Toggle
               enabled={settings.ttvlol_plugin?.enabled ?? false}
               onChange={handleTtvlolToggle}
             />
-          </div>
-
-          {/* Plugin Version Info */}
-          {settings.ttvlol_plugin?.enabled && ttvlolInstalledVersion && (
-            <p className="text-xs text-textSecondary">
-              Installed version: <span className="text-textPrimary font-medium">{ttvlolInstalledVersion}</span>
-            </p>
-          )}
-        </div>
-      </div>
+          }
+        />
+      </SettingsSection>
     </div>
   );
 };

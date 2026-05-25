@@ -338,6 +338,195 @@ pub async fn get_streamlink_diagnostics() -> Result<StreamlinkDiagnostics, Strin
     Ok(StreamlinkManager::get_diagnostics_with_version().await)
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct StreamlinkValidation {
+    /// The full executable path the resolver landed on for the given input.
+    pub resolved_path: String,
+    /// Whether `resolved_path` points at a file on disk.
+    pub exists: bool,
+    /// `streamlink --version` stdout (e.g. "streamlink 7.5.0"). None on probe failure.
+    pub version: Option<String>,
+    /// Set when the path doesn't exist or `--version` failed.
+    pub error: Option<String>,
+}
+
+/// Validate a streamlink installation by running --version against it.
+/// Pass `path = None` to validate whatever the effective resolver would pick
+/// (bundled / dev tree). Pass `path = Some(custom_folder_or_file)` to validate
+/// a user-supplied selection, including paths that the smart resolver would
+/// rewrite (folder pointing at the streamlink root, the bin dir, or the exe
+/// directly are all accepted).
+#[tauri::command]
+pub async fn validate_streamlink_install(
+    path: Option<String>,
+) -> Result<StreamlinkValidation, String> {
+    let resolved_path = StreamlinkManager::get_effective_path(path.as_deref());
+    let exists = std::path::Path::new(&resolved_path).exists();
+
+    if !exists {
+        return Ok(StreamlinkValidation {
+            resolved_path,
+            exists: false,
+            version: None,
+            error: Some("No Streamlink executable found at this location.".to_string()),
+        });
+    }
+
+    match tokio::process::Command::new(&resolved_path)
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => Ok(StreamlinkValidation {
+            resolved_path,
+            exists: true,
+            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            error: None,
+        }),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if stderr.is_empty() {
+                "Streamlink found but --version failed with no output.".to_string()
+            } else {
+                stderr
+            };
+            Ok(StreamlinkValidation {
+                resolved_path,
+                exists: true,
+                version: None,
+                error: Some(msg),
+            })
+        }
+        Err(e) => Ok(StreamlinkValidation {
+            resolved_path,
+            exists: true,
+            version: None,
+            error: Some(format!("Failed to execute Streamlink: {}", e)),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct DetectedStreamlinkInstall {
+    /// Human-friendly source label, e.g. "Bundled with StreamNook" or "Program Files".
+    pub label: String,
+    /// Full path to the streamlinkw.exe (or streamlink.exe) found at this source.
+    pub path: String,
+    /// `--version` output if probing succeeded.
+    pub version: Option<String>,
+    /// True for the install that ships inside the StreamNook app folder.
+    pub is_bundled: bool,
+}
+
+/// Scan well-known Windows locations for existing Streamlink installs so the
+/// settings UI can offer them as one-click chips instead of asking the user to
+/// hunt through the filesystem. Each candidate is probed with --version; entries
+/// that don't respond are dropped.
+#[tauri::command]
+pub async fn detect_streamlink_installs() -> Result<Vec<DetectedStreamlinkInstall>, String> {
+    use std::path::PathBuf;
+
+    let mut candidates: Vec<(String, PathBuf, bool)> = Vec::new();
+
+    // Bundled (whatever the resolver would pick with no custom path)
+    let bundled = StreamlinkManager::get_effective_path(None);
+    candidates.push((
+        "Bundled with StreamNook".to_string(),
+        PathBuf::from(bundled),
+        true,
+    ));
+
+    // Standard installer (machine-wide)
+    candidates.push((
+        "Program Files".to_string(),
+        PathBuf::from("C:\\Program Files\\Streamlink\\bin\\streamlinkw.exe"),
+        false,
+    ));
+
+    // Standard installer (per-user) + winget default install
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        candidates.push((
+            "User install".to_string(),
+            PathBuf::from(&local_app_data)
+                .join("Programs")
+                .join("Streamlink")
+                .join("bin")
+                .join("streamlinkw.exe"),
+            false,
+        ));
+    }
+
+    // Scoop
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        candidates.push((
+            "Scoop".to_string(),
+            PathBuf::from(&user_profile)
+                .join("scoop")
+                .join("apps")
+                .join("streamlink")
+                .join("current")
+                .join("bin")
+                .join("streamlinkw.exe"),
+            false,
+        ));
+    }
+
+    // Chocolatey shim
+    candidates.push((
+        "Chocolatey".to_string(),
+        PathBuf::from("C:\\ProgramData\\chocolatey\\bin\\streamlink.exe"),
+        false,
+    ));
+
+    // pip user-site install
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        candidates.push((
+            "Python user-site".to_string(),
+            PathBuf::from(&app_data)
+                .join("Python")
+                .join("Scripts")
+                .join("streamlink.exe"),
+            false,
+        ));
+    }
+
+    let mut detected: Vec<DetectedStreamlinkInstall> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (label, path, is_bundled) in candidates {
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        // Dedup in case multiple labels resolve to the same install (e.g. when bundled lives in user_install path)
+        if !seen_paths.insert(path_str.clone()) {
+            continue;
+        }
+        let version = match tokio::process::Command::new(&path)
+            .arg("--version")
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            }
+            _ => None,
+        };
+        // Drop entries that don't respond to --version (probably not actually streamlink)
+        if version.is_none() && !is_bundled {
+            continue;
+        }
+        detected.push(DetectedStreamlinkInstall {
+            label,
+            path: path_str,
+            version,
+            is_bundled,
+        });
+    }
+
+    Ok(detected)
+}
+
 /// Quick check if streamlink is available
 /// Returns true if streamlink.exe is found at the expected location
 /// Checks custom path from settings first, then bundled/dev paths

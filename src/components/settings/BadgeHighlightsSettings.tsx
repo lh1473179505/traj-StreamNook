@@ -1,0 +1,151 @@
+import { Plus, Trash2 } from 'lucide-react';
+import { useAppStore } from '../../stores/AppStore';
+import { SettingsSection } from './_primitives';
+import type { HighlightBadge } from '../../types';
+
+function newRuleId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `b-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Quick-add presets — saves the user from typing exact badge keys.
+const BADGE_PRESETS: Array<{ label: string; key: string; color: string }> = [
+  { label: 'Broadcaster', key: 'broadcaster/1', color: '#ef4444' },
+  { label: 'Moderator', key: 'moderator/1', color: '#22c55e' },
+  { label: 'VIP', key: 'vip/1', color: '#ec4899' },
+  { label: 'Any subscriber', key: 'subscriber/*', color: '#a855f7' },
+  { label: 'Twitch staff', key: 'staff/1', color: '#f59e0b' },
+  { label: 'Twitch admin', key: 'admin/1', color: '#f97316' },
+  { label: 'Partner', key: 'partner/1', color: '#06b6d4' },
+];
+
+const BadgeHighlightsSettings = () => {
+  const { settings, updateSettings } = useAppStore();
+  const badges: HighlightBadge[] = settings.chat_highlights?.badges ?? [];
+
+  const writeBadges = (next: HighlightBadge[]) =>
+    updateSettings({
+      ...settings,
+      chat_highlights: {
+        phrases: settings.chat_highlights?.phrases ?? [],
+        ...settings.chat_highlights,
+        badges: next,
+      },
+    });
+
+  const addBadge = (preset?: typeof BADGE_PRESETS[number]) => {
+    const seed = preset
+      ? { badge_key: preset.key, color: preset.color, label: preset.label }
+      : { badge_key: '', color: '#a855f7', label: '' };
+    writeBadges([
+      ...badges,
+      { id: newRuleId(), enabled: true, ...seed },
+    ]);
+  };
+
+  const patchBadge = (id: string, patch: Partial<HighlightBadge>) =>
+    writeBadges(badges.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+
+  const removeBadge = (id: string) => writeBadges(badges.filter((b) => b.id !== id));
+
+  return (
+    <SettingsSection
+      label="Badge Highlights"
+      description="Highlight every message from users carrying a specific Twitch badge. Use name/version (e.g. moderator/1) or name/* to match any version."
+      bare
+    >
+      <div className="space-y-3">
+        {/* Quick presets */}
+        <div className="flex flex-wrap gap-1.5">
+          {BADGE_PRESETS.map((p) => {
+            const already = badges.some((b) => b.badge_key.toLowerCase() === p.key.toLowerCase());
+            return (
+              <button
+                key={p.key}
+                onClick={() => addBadge(p)}
+                disabled={already}
+                className="text-[11px] px-2 py-1 rounded-md bg-glass/40 border border-borderSubtle text-textSecondary hover:text-textPrimary hover:bg-glass/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title={p.key}
+              >
+                <Plus size={10} className="inline mr-1 -mt-0.5" />
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {badges.length === 0 && (
+          <div className="bg-glass/30 rounded-lg px-4 py-6 text-center">
+            <p className="text-sm text-textSecondary mb-3">No badge highlights yet.</p>
+            <button
+              onClick={() => addBadge()}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-accent hover:bg-accent/80 text-white text-sm font-medium rounded transition-colors"
+            >
+              <Plus size={14} />
+              Add a custom badge
+            </button>
+          </div>
+        )}
+
+        {badges.map((b) => (
+          <div key={b.id} className="bg-glass/30 rounded-lg p-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => patchBadge(b.id, { enabled: !b.enabled })}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors flex-shrink-0 ${
+                  b.enabled ? 'bg-accent' : 'bg-gray-600'
+                }`}
+                aria-label={b.enabled ? 'Disable badge highlight' : 'Enable badge highlight'}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    b.enabled ? 'translate-x-5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+
+              <input
+                type="text"
+                value={b.badge_key}
+                onChange={(e) => patchBadge(b.id, { badge_key: e.target.value.trim() })}
+                placeholder="moderator/1 or subscriber/*"
+                className="flex-1 glass-input text-textPrimary text-sm px-2.5 py-1.5 font-mono"
+                spellCheck={false}
+              />
+
+              <input
+                type="color"
+                value={b.color}
+                onChange={(e) => patchBadge(b.id, { color: e.target.value })}
+                className="w-8 h-8 rounded cursor-pointer bg-transparent border border-borderSubtle"
+                aria-label="Highlight color"
+              />
+
+              <button
+                onClick={() => removeBadge(b.id)}
+                className="p-1 text-textSecondary hover:text-red-400 transition-colors"
+                aria-label="Delete badge highlight"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {badges.length > 0 && (
+          <button
+            onClick={() => addBadge()}
+            className="inline-flex items-center gap-2 px-3 py-1.5 text-textSecondary hover:text-textPrimary text-sm transition-colors"
+          >
+            <Plus size={14} />
+            Add custom badge
+          </button>
+        )}
+      </div>
+    </SettingsSection>
+  );
+};
+
+export default BadgeHighlightsSettings;

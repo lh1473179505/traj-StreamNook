@@ -105,7 +105,7 @@ interface ChatConnectionState {
   revision: number;
 }
 
-const useChatConnectionStore = create<ChatConnectionState>(() => ({
+export const useChatConnectionStore = create<ChatConnectionState>(() => ({
   channels: new Map(),
   wsPort: null,
   revision: 0,
@@ -178,6 +178,23 @@ export function getChannelEmotes(channel: string): EmoteSet | null {
 /** Fetch the channel's emote set if not already cached. Coalesces concurrent
  *  callers via inflight tracking so 3 ChatWidget instances mounting the same
  *  channel all share one network round-trip. */
+/**
+ * Force re-fetch emotes for a channel by busting the frontend cache and
+ * re-running the fetch pipeline. Used by /refresh. The Rust-side emote cache
+ * has its own 5-minute TTL, so very-recent re-fetches may return cached data
+ * from the backend; the frontend bust still triggers a fresh re-render of the
+ * picker so the user sees the latest state.
+ */
+export async function refreshChannelEmotes(
+  channel: string,
+  channelId: string,
+): Promise<EmoteSet | null> {
+  const key = channel.toLowerCase();
+  emoteCache.delete(key);
+  inflightEmoteFetches.delete(key);
+  return ensureChannelEmotes(key, channelId);
+}
+
 export async function ensureChannelEmotes(
   channel: string,
   channelId: string,
@@ -258,8 +275,18 @@ function removeSlice(channel: string) {
   });
 }
 
+// Resolve the active per-channel buffer cap. Settings can override the
+// hardcoded 100 default within [50, 1000]. Out-of-range values fall back
+// to the default rather than crashing.
+function getActiveHistoryMax(): number {
+  const setting = useAppStore.getState().settings.chat_render?.message_buffer_cap;
+  if (typeof setting !== 'number' || !Number.isFinite(setting)) return CHAT_HISTORY_MAX;
+  return Math.max(50, Math.min(1000, Math.round(setting)));
+}
+
 function pushMessage(slice: ChannelSlice, msg: any) {
-  const limit = slice.isPausedForBuffer ? CHAT_MAX_WITH_BUFFER : CHAT_HISTORY_MAX;
+  const historyMax = getActiveHistoryMax();
+  const limit = slice.isPausedForBuffer ? historyMax + CHAT_BUFFER_SIZE : historyMax;
   slice.messages.push(msg);
   if (slice.messages.length > limit) {
     slice.messages = slice.messages.slice(slice.messages.length - limit);
@@ -545,7 +572,8 @@ async function preloadChannel(channel: string, channelId: string | null): Promis
 
       // Prepend so recent history appears before live messages
       slice.messages = [...filtered, ...slice.messages];
-      const limit = slice.isPausedForBuffer ? CHAT_MAX_WITH_BUFFER : CHAT_HISTORY_MAX;
+      const historyMax = getActiveHistoryMax();
+      const limit = slice.isPausedForBuffer ? historyMax + CHAT_BUFFER_SIZE : historyMax;
       if (slice.messages.length > limit) {
         slice.messages = slice.messages.slice(slice.messages.length - limit);
       }
@@ -639,18 +667,29 @@ function handleWsMessage(raw: string) {
       const parsed = JSON.parse(raw);
       if (parsed.type === 'CLEARMSG' && parsed.target_msg_id) {
         const ch = (parsed.channel as string | undefined)?.toLowerCase();
+        const modSettings = useAppStore.getState().settings.moderation;
+        const ignoreClear = modSettings?.ignore_clear_chat ?? false;
+        const showModMsgs = modSettings?.show_mod_messages ?? false;
         const apply = (slice: ChannelSlice) => {
-          slice.deletedMessageIds.add(parsed.target_msg_id);
+          if (!ignoreClear) slice.deletedMessageIds.add(parsed.target_msg_id);
         };
         if (ch) withSlice(ch, apply);
         else for (const s of useChatConnectionStore.getState().channels.values()) apply(s);
+        if (showModMsgs && ch) {
+          const who = parsed.target_user ?? 'a user';
+          injectSystemMessage(ch, `${who}'s message was deleted by a moderator.`);
+        }
         bumpRevision();
         return;
       }
       if (parsed.type === 'CLEARCHAT') {
         const ch = (parsed.channel as string | undefined)?.toLowerCase();
+        const modSettings = useAppStore.getState().settings.moderation;
+        const ignoreClear = modSettings?.ignore_clear_chat ?? false;
+        const showModMsgs = modSettings?.show_mod_messages ?? false;
         const apply = (slice: ChannelSlice) => {
           if (!parsed.target_user_id) return; // full chat clear — UI doesn't track this today
+          if (ignoreClear) return; // user opted out of moderation strikethrough overlays
           const modType: 'timeout' | 'ban' =
             parsed.ban_duration !== undefined && parsed.ban_duration !== null
               ? 'timeout'
@@ -676,6 +715,24 @@ function handleWsMessage(raw: string) {
         };
         if (ch) withSlice(ch, apply);
         else for (const s of useChatConnectionStore.getState().channels.values()) apply(s);
+        if (showModMsgs && ch && parsed.target_user_id) {
+          const who = parsed.target_user ?? 'A user';
+          let line: string;
+          if (parsed.ban_duration !== undefined && parsed.ban_duration !== null) {
+            const secs = parsed.ban_duration as number;
+            const human =
+              secs >= 86400 ? `${Math.round(secs / 86400)}d` :
+              secs >= 3600  ? `${Math.round(secs / 3600)}h` :
+              secs >= 60    ? `${Math.round(secs / 60)}m` :
+              `${secs}s`;
+            line = `${who} was timed out for ${human}.`;
+          } else {
+            line = `${who} was banned.`;
+          }
+          injectSystemMessage(ch, line);
+        } else if (showModMsgs && ch && !parsed.target_user_id) {
+          injectSystemMessage(ch, 'Chat was cleared by a moderator.');
+        }
         bumpRevision();
         return;
       }
@@ -872,6 +929,14 @@ function appendStructuredMessage(slice: ChannelSlice, parsed: any) {
   }
   slice.seenMessageIds.add(messageId);
   pushMessage(slice, parsed);
+
+  // Active /nuke future-window check. No-op if no nukes are armed for this
+  // channel. Fire-and-forget; nuke action errors are logged inside the engine.
+  if (slice.channel) {
+    void import('../utils/nukeEngine').then((mod) => {
+      void mod.checkActiveNukesForMessage(slice.channel, parsed);
+    });
+  }
 }
 
 function handleRawIrcString(raw: string) {
@@ -1169,8 +1234,9 @@ export function injectSystemMessage(channel: string, message: string): void {
 export function setChannelPaused(channel: string, paused: boolean): void {
   withSlice(channel, (slice) => {
     slice.isPausedForBuffer = paused;
-    if (!paused && slice.messages.length > CHAT_HISTORY_MAX) {
-      slice.messages = slice.messages.slice(slice.messages.length - CHAT_HISTORY_MAX);
+    const historyMax = getActiveHistoryMax();
+    if (!paused && slice.messages.length > historyMax) {
+      slice.messages = slice.messages.slice(slice.messages.length - historyMax);
     }
   });
 }

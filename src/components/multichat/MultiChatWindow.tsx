@@ -21,6 +21,9 @@ import { Minus, X, CornersOut, CornersIn, ArrowLineLeft } from 'phosphor-react';
 import { Settings } from 'lucide-react';
 import MultiChatPane from './MultiChatPane';
 import ChatOnlySettingsModal from './ChatOnlySettingsModal';
+import CommandPalette from '../CommandPalette';
+import { useCommandPaletteHotkey } from '../../hooks/useCommandPaletteHotkey';
+import { startSnippetSync } from '../../stores/snippetStore';
 import { TooltipManager } from '../ui/TooltipManager';
 import {
   acquireChannel,
@@ -166,6 +169,22 @@ async function minimizeWindow(): Promise<void> {
 }
 
 export default function MultiChatWindow() {
+  useCommandPaletteHotkey();
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void startSnippetSync().then((u) => {
+      if (cancelled) {
+        u?.();
+        return;
+      }
+      unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
   const [params] = useState<ParsedMultiChatParams>(() => parseMultiChatParams());
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   // Badge picker / paint detail surfaces deliberately do NOT live here. Chat
@@ -630,6 +649,7 @@ export default function MultiChatWindow() {
           hovering a chat badge or any other tooltip-bearing element in the
           popout produces no UI. */}
       <TooltipManager />
+      <CommandPalette />
     </div>
   );
 }

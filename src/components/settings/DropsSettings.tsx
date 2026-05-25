@@ -1,6 +1,7 @@
 import { useAppStore } from '../../stores/AppStore';
 import { useState, useEffect } from 'react';
 import { FarmChannel } from '../../types';
+import { SettingsSection, SettingsRow } from './_primitives';
 
 import { Logger } from '../../utils/logger';
 const DropsSettings = () => {
@@ -11,7 +12,6 @@ const DropsSettings = () => {
   const [showRecoverySettings, setShowRecoverySettings] = useState(false);
   const [showFarmChannels, setShowFarmChannels] = useState(false);
 
-  // Toggle component for reuse
   const Toggle = ({ enabled, onChange, disabled = false }: { enabled: boolean; onChange: () => void; disabled?: boolean }) => (
     <button
       onClick={onChange}
@@ -26,7 +26,6 @@ const DropsSettings = () => {
     </button>
   );
 
-  // Check mining status on mount and listen for updates
   useEffect(() => {
     const checkMiningStatus = async () => {
       try {
@@ -39,7 +38,6 @@ const DropsSettings = () => {
     };
     checkMiningStatus();
 
-    // Listen for mining status updates from backend
     let unlisten: (() => void) | undefined;
     let isMounted = true;
     const setupListener = async () => {
@@ -48,10 +46,8 @@ const DropsSettings = () => {
         const status = event.payload;
         Logger.debug('Mining status update received:', status);
 
-        // Update mining state based on actual status
         setIsMining(status.is_mining);
 
-        // Clear initializing state when we get confirmation
         if (status.is_mining && isInitializing) {
           setIsInitializing(false);
         }
@@ -78,20 +74,10 @@ const DropsSettings = () => {
       const { invoke } = await import('@tauri-apps/api/core');
 
       if (enabled) {
-        // Show loading state when turning on
         setIsInitializing(true);
-
-        // First update the setting
         await updateDropsSettings({ auto_mining_enabled: enabled });
-
-        // Start the mining service (this spawns a background task)
-        // The mining-status-update event will tell us when it's actually running
         await invoke('start_auto_mining');
-
-        // Note: Don't set isMining or clear isInitializing here
-        // Wait for the mining-status-update event to confirm it started
       } else {
-        // Stopping is more immediate
         await updateDropsSettings({ auto_mining_enabled: enabled });
         await invoke('stop_auto_mining');
         setIsMining(false);
@@ -119,7 +105,6 @@ const DropsSettings = () => {
         excluded_games: settings.drops?.excluded_games ?? [],
         priority_mode: settings.drops?.priority_mode ?? 'PriorityOnly',
         watch_interval_seconds: settings.drops?.watch_interval_seconds ?? 20,
-        // Watch token allocation settings (default ON)
         reserve_token_for_current_stream: settings.drops?.reserve_token_for_current_stream ?? true,
         auto_reserve_on_watch: settings.drops?.auto_reserve_on_watch ?? true,
         priority_farm_channels: settings.drops?.priority_farm_channels ?? [],
@@ -136,83 +121,41 @@ const DropsSettings = () => {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Auto Mining Section */}
-      <div className="border-b border-border pb-6">
-        <h3 className="text-lg font-semibold text-textPrimary mb-4">Automated Mining</h3>
-
-        {/* Enable Auto Mining */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="relative flex items-center gap-3">
-              {isInitializing && (
-                <div className="flex items-center justify-center">
-                  <svg
-                    className="animate-spin h-4 w-4 text-accent"
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    ></circle>
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    ></path>
-                  </svg>
-                </div>
-              )}
-              <div>
-                <span className="text-sm font-medium text-textPrimary">
-                  Enable Auto Mining
-                  {isInitializing && <span className="ml-2 text-xs text-accent">(Initializing...)</span>}
-                </span>
-                <p className="text-xs text-textSecondary">
-                  Automatically watch streams to earn drops
-                </p>
-              </div>
-            </div>
+    <div className="space-y-8">
+      <SettingsSection label="Automated Mining">
+        <SettingsRow
+          title={`Enable Auto Mining${isInitializing ? ' (Initializing...)' : ''}`}
+          description="Automatically watch streams to earn drops"
+          control={
             <Toggle
               enabled={isMining}
               onChange={handleMiningToggle}
               disabled={isInitializing}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Priority Mode */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Priority Mode
-          </label>
+        <SettingsRow
+          title="Priority Mode"
+          description="How to select which campaigns to mine"
+        >
           <select
             value={settings.drops?.priority_mode ?? 'PriorityOnly'}
             onChange={(e) => updateDropsSettings({
               priority_mode: e.target.value as 'PriorityOnly' | 'EndingSoonest' | 'LowAvailFirst'
             })}
-            className="w-full px-3 py-2 bg-background border border-border rounded-md text-textPrimary text-sm"
+            className="w-full glass-input text-textPrimary text-sm px-3 py-2"
           >
             <option value="PriorityOnly">Priority Games Only</option>
             <option value="EndingSoonest">Campaigns Ending Soonest</option>
             <option value="LowAvailFirst">Low Availability First</option>
           </select>
-          <p className="text-xs text-textSecondary mt-1">
-            How to select which campaigns to mine
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Watch Interval */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Watch Interval: {settings.drops?.watch_interval_seconds ?? 20} seconds
-          </label>
+        <SettingsRow
+          title={`Watch Interval: ${settings.drops?.watch_interval_seconds ?? 20} seconds`}
+          description="How often to update mining progress (lower = more frequent updates)"
+        >
           <input
             type="range"
             min="10"
@@ -222,60 +165,70 @@ const DropsSettings = () => {
             onChange={(e) => updateDropsSettings({ watch_interval_seconds: parseInt(e.target.value) })}
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            How often to update mining progress (lower = more frequent updates)
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Priority Settings Button */}
-        <button
-          onClick={() => setShowPrioritySettings(!showPrioritySettings)}
-          className="w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm font-medium transition-colors"
+        <SettingsRow
+          title="Priority Games"
+          description="Configure which games to prefer and which to skip"
         >
-          {showPrioritySettings ? 'Hide' : 'Configure'} Priority Games
-        </button>
+          <button
+            onClick={() => setShowPrioritySettings(!showPrioritySettings)}
+            className="w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm font-medium transition-colors"
+          >
+            {showPrioritySettings ? 'Hide' : 'Configure'} Priority Games
+          </button>
 
-        {/* Priority Settings Panel */}
-        {showPrioritySettings && (
-          <div className="mt-4 p-4 bg-background border border-border rounded-md">
-            <h4 className="text-sm font-semibold text-textPrimary mb-3">Priority Games</h4>
-            <p className="text-xs text-textSecondary mb-3">
-              Add games in order of priority. The miner will prefer these games when selecting channels.
-            </p>
+          {showPrioritySettings && (
+            <div className="mt-3 p-4 bg-glass rounded-md">
+              <h4 className="text-sm font-semibold text-textPrimary mb-3">Priority Games</h4>
+              <p className="text-xs text-textSecondary mb-3">
+                Add games in order of priority. The miner will prefer these games when selecting channels.
+              </p>
 
-            {/* Priority Games List */}
-            <div className="space-y-2 mb-3">
-              {(settings.drops?.priority_games ?? []).map((game, index) => (
-                <div key={index} className="flex items-center gap-2 bg-backgroundSecondary p-2 rounded">
-                  <span className="text-xs text-textSecondary w-6">{index + 1}.</span>
-                  <span className="text-sm text-textPrimary flex-1">{game}</span>
-                  <button
-                    onClick={() => {
-                      const newPriority = [...(settings.drops?.priority_games ?? [])];
-                      newPriority.splice(index, 1);
-                      updateDropsSettings({ priority_games: newPriority });
-                    }}
-                    className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-              {(settings.drops?.priority_games ?? []).length === 0 && (
-                <p className="text-xs text-textSecondary italic">No priority games set</p>
-              )}
-            </div>
+              <div className="space-y-2 mb-3">
+                {(settings.drops?.priority_games ?? []).map((game, index) => (
+                  <div key={index} className="flex items-center gap-2 bg-background/40 p-2 rounded">
+                    <span className="text-xs text-textSecondary w-6">{index + 1}.</span>
+                    <span className="text-sm text-textPrimary flex-1">{game}</span>
+                    <button
+                      onClick={() => {
+                        const newPriority = [...(settings.drops?.priority_games ?? [])];
+                        newPriority.splice(index, 1);
+                        updateDropsSettings({ priority_games: newPriority });
+                      }}
+                      className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {(settings.drops?.priority_games ?? []).length === 0 && (
+                  <p className="text-xs text-textSecondary italic">No priority games set</p>
+                )}
+              </div>
 
-            {/* Add Priority Game */}
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Enter game name..."
-                id="priority-game-input"
-                className="flex-1 px-3 py-2 bg-background border border-border rounded-md text-textPrimary text-sm"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    const input = e.currentTarget;
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Enter game name..."
+                  id="priority-game-input"
+                  className="flex-1 glass-input text-textPrimary text-sm px-3 py-2"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const input = e.currentTarget;
+                      const gameName = input.value.trim();
+                      if (gameName && !(settings.drops?.priority_games ?? []).includes(gameName)) {
+                        updateDropsSettings({
+                          priority_games: [...(settings.drops?.priority_games ?? []), gameName]
+                        });
+                        input.value = '';
+                      }
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    const input = document.getElementById('priority-game-input') as HTMLInputElement;
                     const gameName = input.value.trim();
                     if (gameName && !(settings.drops?.priority_games ?? []).includes(gameName)) {
                       updateDropsSettings({
@@ -283,62 +236,61 @@ const DropsSettings = () => {
                       });
                       input.value = '';
                     }
-                  }
-                }}
-              />
-              <button
-                onClick={() => {
-                  const input = document.getElementById('priority-game-input') as HTMLInputElement;
-                  const gameName = input.value.trim();
-                  if (gameName && !(settings.drops?.priority_games ?? []).includes(gameName)) {
-                    updateDropsSettings({
-                      priority_games: [...(settings.drops?.priority_games ?? []), gameName]
-                    });
-                    input.value = '';
-                  }
-                }}
-                className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
-              >
-                Add
-              </button>
-            </div>
+                  }}
+                  className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
+                >
+                  Add
+                </button>
+              </div>
 
-            {/* Excluded Games */}
-            <h4 className="text-sm font-semibold text-textPrimary mt-6 mb-3">Excluded Games</h4>
-            <p className="text-xs text-textSecondary mb-3">
-              Games to never mine, even if they have active campaigns.
-            </p>
+              <h4 className="text-sm font-semibold text-textPrimary mt-6 mb-3">Excluded Games</h4>
+              <p className="text-xs text-textSecondary mb-3">
+                Games to never mine, even if they have active campaigns.
+              </p>
 
-            <div className="space-y-2 mb-3">
-              {(settings.drops?.excluded_games ?? []).map((game, index) => (
-                <div key={index} className="flex items-center gap-2 bg-backgroundSecondary p-2 rounded">
-                  <span className="text-sm text-textPrimary flex-1">{game}</span>
-                  <button
-                    onClick={() => {
-                      const newExcluded = [...(settings.drops?.excluded_games ?? [])];
-                      newExcluded.splice(index, 1);
-                      updateDropsSettings({ excluded_games: newExcluded });
-                    }}
-                    className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-              {(settings.drops?.excluded_games ?? []).length === 0 && (
-                <p className="text-xs text-textSecondary italic">No excluded games</p>
-              )}
-            </div>
+              <div className="space-y-2 mb-3">
+                {(settings.drops?.excluded_games ?? []).map((game, index) => (
+                  <div key={index} className="flex items-center gap-2 bg-background/40 p-2 rounded">
+                    <span className="text-sm text-textPrimary flex-1">{game}</span>
+                    <button
+                      onClick={() => {
+                        const newExcluded = [...(settings.drops?.excluded_games ?? [])];
+                        newExcluded.splice(index, 1);
+                        updateDropsSettings({ excluded_games: newExcluded });
+                      }}
+                      className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {(settings.drops?.excluded_games ?? []).length === 0 && (
+                  <p className="text-xs text-textSecondary italic">No excluded games</p>
+                )}
+              </div>
 
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Enter game name to exclude..."
-                id="excluded-game-input"
-                className="flex-1 px-3 py-2 bg-background border border-border rounded-md text-textPrimary text-sm"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    const input = e.currentTarget;
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Enter game name to exclude..."
+                  id="excluded-game-input"
+                  className="flex-1 glass-input text-textPrimary text-sm px-3 py-2"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const input = e.currentTarget;
+                      const gameName = input.value.trim();
+                      if (gameName && !(settings.drops?.excluded_games ?? []).includes(gameName)) {
+                        updateDropsSettings({
+                          excluded_games: [...(settings.drops?.excluded_games ?? []), gameName]
+                        });
+                        input.value = '';
+                      }
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    const input = document.getElementById('excluded-game-input') as HTMLInputElement;
                     const gameName = input.value.trim();
                     if (gameName && !(settings.drops?.excluded_games ?? []).includes(gameName)) {
                       updateDropsSettings({
@@ -346,145 +298,121 @@ const DropsSettings = () => {
                       });
                       input.value = '';
                     }
-                  }
-                }}
-              />
-              <button
-                onClick={() => {
-                  const input = document.getElementById('excluded-game-input') as HTMLInputElement;
-                  const gameName = input.value.trim();
-                  if (gameName && !(settings.drops?.excluded_games ?? []).includes(gameName)) {
-                    updateDropsSettings({
-                      excluded_games: [...(settings.drops?.excluded_games ?? []), gameName]
-                    });
-                    input.value = '';
-                  }
-                }}
-                className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
-              >
-                Add
-              </button>
+                  }}
+                  className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
+                >
+                  Add
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </SettingsRow>
 
-        {/* Recovery Settings Button */}
-        <button
-          onClick={() => setShowRecoverySettings(!showRecoverySettings)}
-          className="w-full mt-3 px-4 py-2 bg-backgroundSecondary hover:bg-backgroundSecondary/80 border border-border text-textPrimary rounded-md text-sm font-medium transition-colors"
+        <SettingsRow
+          title="Recovery Settings"
+          description="Configure how StreamNook handles stuck mining sessions, offline streamers, and stale progress"
         >
-          {showRecoverySettings ? 'Hide' : 'Configure'} Recovery Settings
-        </button>
+          <button
+            onClick={() => setShowRecoverySettings(!showRecoverySettings)}
+            className="w-full px-4 py-2 glass-button text-textPrimary rounded-md text-sm font-medium transition-colors"
+          >
+            {showRecoverySettings ? 'Hide' : 'Configure'} Recovery Settings
+          </button>
 
-        {/* Recovery Settings Panel */}
-        {showRecoverySettings && (
-          <div className="mt-4 p-4 bg-background border border-border rounded-md">
-            <h4 className="text-sm font-semibold text-textPrimary mb-3 flex items-center gap-2">
-              <span className="text-lg">🛡️</span>
-              Mining Recovery System
-            </h4>
-            <p className="text-xs text-textSecondary mb-4">
-              Configure how StreamNook handles stuck mining sessions, offline streamers, and stale progress.
-            </p>
+          {showRecoverySettings && (
+            <div className="mt-3 p-4 bg-glass rounded-md space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-textPrimary mb-2">
+                  Recovery Mode
+                </label>
+                <select
+                  value={settings.drops?.recovery_settings?.recovery_mode ?? 'Automatic'}
+                  onChange={(e) => updateDropsSettings({
+                    recovery_settings: {
+                      ...(settings.drops?.recovery_settings ?? {}),
+                      recovery_mode: e.target.value as 'Automatic' | 'Relaxed' | 'ManualOnly'
+                    }
+                  })}
+                  className="w-full glass-input text-textPrimary text-sm px-3 py-2"
+                >
+                  <option value="Automatic">Automatic (7 min threshold)</option>
+                  <option value="Relaxed">Relaxed (15 min threshold)</option>
+                  <option value="ManualOnly">Manual Only (notify but don't switch)</option>
+                </select>
+                <p className="text-xs text-textSecondary mt-1">
+                  How aggressively to handle stuck mining sessions
+                </p>
+              </div>
 
-            {/* Recovery Mode */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-textPrimary mb-2">
-                Recovery Mode
-              </label>
-              <select
-                value={settings.drops?.recovery_settings?.recovery_mode ?? 'Automatic'}
-                onChange={(e) => updateDropsSettings({
-                  recovery_settings: {
-                    ...(settings.drops?.recovery_settings ?? {}),
-                    recovery_mode: e.target.value as 'Automatic' | 'Relaxed' | 'ManualOnly'
-                  }
-                })}
-                className="w-full px-3 py-2 bg-background border border-border rounded-md text-textPrimary text-sm"
-              >
-                <option value="Automatic">Automatic (7 min threshold)</option>
-                <option value="Relaxed">Relaxed (15 min threshold)</option>
-                <option value="ManualOnly">Manual Only (notify but don't switch)</option>
-              </select>
-              <p className="text-xs text-textSecondary mt-1">
-                How aggressively to handle stuck mining sessions
-              </p>
-            </div>
+              <div>
+                <label className="block text-sm font-medium text-textPrimary mb-2">
+                  Stale Progress Threshold: {Math.round((settings.drops?.recovery_settings?.stale_progress_threshold_seconds ?? 420) / 60)} minutes
+                </label>
+                <input
+                  type="range"
+                  min="180"
+                  max="900"
+                  step="60"
+                  value={settings.drops?.recovery_settings?.stale_progress_threshold_seconds ?? 420}
+                  onChange={(e) => updateDropsSettings({
+                    recovery_settings: {
+                      ...(settings.drops?.recovery_settings ?? {}),
+                      stale_progress_threshold_seconds: parseInt(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-accent cursor-pointer"
+                />
+                <p className="text-xs text-textSecondary mt-1">
+                  Switch streamers if no progress increase for this long (3-15 minutes)
+                </p>
+              </div>
 
-            {/* Stale Progress Threshold */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-textPrimary mb-2">
-                Stale Progress Threshold: {Math.round((settings.drops?.recovery_settings?.stale_progress_threshold_seconds ?? 420) / 60)} minutes
-              </label>
-              <input
-                type="range"
-                min="180"
-                max="900"
-                step="60"
-                value={settings.drops?.recovery_settings?.stale_progress_threshold_seconds ?? 420}
-                onChange={(e) => updateDropsSettings({
-                  recovery_settings: {
-                    ...(settings.drops?.recovery_settings ?? {}),
-                    stale_progress_threshold_seconds: parseInt(e.target.value)
-                  }
-                })}
-                className="w-full accent-accent cursor-pointer"
-              />
-              <p className="text-xs text-textSecondary mt-1">
-                Switch streamers if no progress increase for this long (3-15 minutes)
-              </p>
-            </div>
+              <div>
+                <label className="block text-sm font-medium text-textPrimary mb-2">
+                  Streamer Blacklist Duration: {Math.round((settings.drops?.recovery_settings?.streamer_blacklist_duration_seconds ?? 600) / 60)} minutes
+                </label>
+                <input
+                  type="range"
+                  min="300"
+                  max="1800"
+                  step="60"
+                  value={settings.drops?.recovery_settings?.streamer_blacklist_duration_seconds ?? 600}
+                  onChange={(e) => updateDropsSettings({
+                    recovery_settings: {
+                      ...(settings.drops?.recovery_settings ?? {}),
+                      streamer_blacklist_duration_seconds: parseInt(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-accent cursor-pointer"
+                />
+                <p className="text-xs text-textSecondary mt-1">
+                  How long to avoid a streamer after they fail (5-30 minutes)
+                </p>
+              </div>
 
-            {/* Streamer Blacklist Duration */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-textPrimary mb-2">
-                Streamer Blacklist Duration: {Math.round((settings.drops?.recovery_settings?.streamer_blacklist_duration_seconds ?? 600) / 60)} minutes
-              </label>
-              <input
-                type="range"
-                min="300"
-                max="1800"
-                step="60"
-                value={settings.drops?.recovery_settings?.streamer_blacklist_duration_seconds ?? 600}
-                onChange={(e) => updateDropsSettings({
-                  recovery_settings: {
-                    ...(settings.drops?.recovery_settings ?? {}),
-                    streamer_blacklist_duration_seconds: parseInt(e.target.value)
-                  }
-                })}
-                className="w-full accent-accent cursor-pointer"
-              />
-              <p className="text-xs text-textSecondary mt-1">
-                How long to avoid a streamer after they fail (5-30 minutes)
-              </p>
-            </div>
+              <div>
+                <label className="block text-sm font-medium text-textPrimary mb-2">
+                  Campaign Deprioritize Duration: {Math.round((settings.drops?.recovery_settings?.campaign_deprioritize_duration_seconds ?? 1800) / 60)} minutes
+                </label>
+                <input
+                  type="range"
+                  min="600"
+                  max="3600"
+                  step="300"
+                  value={settings.drops?.recovery_settings?.campaign_deprioritize_duration_seconds ?? 1800}
+                  onChange={(e) => updateDropsSettings({
+                    recovery_settings: {
+                      ...(settings.drops?.recovery_settings ?? {}),
+                      campaign_deprioritize_duration_seconds: parseInt(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-accent cursor-pointer"
+                />
+                <p className="text-xs text-textSecondary mt-1">
+                  How long to deprioritize a campaign with no working streamers (10-60 minutes)
+                </p>
+              </div>
 
-            {/* Campaign Deprioritize Duration */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-textPrimary mb-2">
-                Campaign Deprioritize Duration: {Math.round((settings.drops?.recovery_settings?.campaign_deprioritize_duration_seconds ?? 1800) / 60)} minutes
-              </label>
-              <input
-                type="range"
-                min="600"
-                max="3600"
-                step="300"
-                value={settings.drops?.recovery_settings?.campaign_deprioritize_duration_seconds ?? 1800}
-                onChange={(e) => updateDropsSettings({
-                  recovery_settings: {
-                    ...(settings.drops?.recovery_settings ?? {}),
-                    campaign_deprioritize_duration_seconds: parseInt(e.target.value)
-                  }
-                })}
-                className="w-full accent-accent cursor-pointer"
-              />
-              <p className="text-xs text-textSecondary mt-1">
-                How long to deprioritize a campaign with no working streamers (10-60 minutes)
-              </p>
-            </div>
-
-            {/* Detect Game Category Change */}
-            <div className="mb-4">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <span className="text-sm font-medium text-textPrimary">Detect Game Category Changes</span>
@@ -504,10 +432,7 @@ const DropsSettings = () => {
                   }}
                 />
               </div>
-            </div>
 
-            {/* Notify on Recovery Actions */}
-            <div className="mb-4">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <span className="text-sm font-medium text-textPrimary">Notify on Recovery Actions</span>
@@ -527,111 +452,84 @@ const DropsSettings = () => {
                   }}
                 />
               </div>
-            </div>
 
-            {/* Max Recovery Attempts */}
-            <div className="mb-2">
-              <label className="block text-sm font-medium text-textPrimary mb-2">
-                Max Recovery Attempts: {settings.drops?.recovery_settings?.max_recovery_attempts ?? 5}
-              </label>
-              <input
-                type="range"
-                min="3"
-                max="10"
-                step="1"
-                value={settings.drops?.recovery_settings?.max_recovery_attempts ?? 5}
-                onChange={(e) => updateDropsSettings({
-                  recovery_settings: {
-                    ...(settings.drops?.recovery_settings ?? {}),
-                    max_recovery_attempts: parseInt(e.target.value)
-                  }
-                })}
-                className="w-full accent-accent cursor-pointer"
-              />
-              <p className="text-xs text-textSecondary mt-1">
-                Stop mining after this many consecutive failures (3-10)
-              </p>
+              <div>
+                <label className="block text-sm font-medium text-textPrimary mb-2">
+                  Max Recovery Attempts: {settings.drops?.recovery_settings?.max_recovery_attempts ?? 5}
+                </label>
+                <input
+                  type="range"
+                  min="3"
+                  max="10"
+                  step="1"
+                  value={settings.drops?.recovery_settings?.max_recovery_attempts ?? 5}
+                  onChange={(e) => updateDropsSettings({
+                    recovery_settings: {
+                      ...(settings.drops?.recovery_settings ?? {}),
+                      max_recovery_attempts: parseInt(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-accent cursor-pointer"
+                />
+                <p className="text-xs text-textSecondary mt-1">
+                  Stop mining after this many consecutive failures (3-10)
+                </p>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </SettingsRow>
+      </SettingsSection>
 
-      {/* Auto-claim Section */}
-      <div className="border-b border-border pb-6">
-        <h3 className="text-lg font-semibold text-textPrimary mb-4">Auto-claim</h3>
-
-        {/* Auto-claim Drops */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Auto-claim Drops</span>
-              <p className="text-xs text-textSecondary">
-                Automatically claim drops when they're ready
-              </p>
-            </div>
+      <SettingsSection label="Auto-claim">
+        <SettingsRow
+          title="Auto-claim Drops"
+          description="Automatically claim drops when they're ready"
+          control={
             <Toggle
               enabled={settings.drops?.auto_claim_drops ?? true}
               onChange={async () => {
                 await updateDropsSettings({ auto_claim_drops: !(settings.drops?.auto_claim_drops ?? true) });
               }}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Auto-claim Channel Points */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Auto-claim Channel Points</span>
-              <p className="text-xs text-textSecondary">
-                Automatically claim channel point bonuses
-              </p>
-            </div>
+        <SettingsRow
+          title="Auto-claim Channel Points"
+          description="Automatically claim channel point bonuses"
+          control={
             <Toggle
               enabled={settings.drops?.auto_claim_channel_points ?? true}
               onChange={async () => {
                 await updateDropsSettings({ auto_claim_channel_points: !(settings.drops?.auto_claim_channel_points ?? true) });
               }}
             />
-          </div>
-        </div>
-      </div>
+          }
+        />
+      </SettingsSection>
 
-      {/* Watch Token Allocation Section (Advanced) */}
-      <div className="border-b border-border pb-6">
-        <h3 className="text-lg font-semibold text-textPrimary mb-2">Watch Token Allocation</h3>
-        <p className="text-xs text-textSecondary mb-4">
-          Twitch allows earning channel points on up to 2 concurrent streams. Reserving one token for your current stream
-          increases your chance of receiving gifted subs by maintaining consistent presence. Power users can disable this for more aggressive farming.
-        </p>
-
-        {/* Reserve Token for Current Stream */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Reserve Token for Current Stream</span>
-              <p className="text-xs text-textSecondary">
-                Keep one token on the stream you're watching (matches Twitch behavior)
-              </p>
-            </div>
+      <SettingsSection
+        label="Watch Token Allocation"
+        description="Twitch allows earning channel points on up to 2 concurrent streams. Reserving one token for your current stream increases your chance of receiving gifted subs by maintaining consistent presence. Power users can disable this for more aggressive farming."
+      >
+        <SettingsRow
+          title="Reserve Token for Current Stream"
+          description="Keep one token on the stream you're watching (matches Twitch behavior)"
+          control={
             <Toggle
               enabled={settings.drops?.reserve_token_for_current_stream ?? true}
               onChange={async () => {
                 await updateDropsSettings({ reserve_token_for_current_stream: !(settings.drops?.reserve_token_for_current_stream ?? true) });
               }}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Auto-reserve on Watch */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Auto-reserve When Starting Stream</span>
-              <p className="text-xs text-textSecondary">
-                Automatically reserve token when you start watching
-              </p>
-            </div>
+        <SettingsRow
+          title="Auto-reserve When Starting Stream"
+          description="Automatically reserve token when you start watching"
+          disabled={!(settings.drops?.reserve_token_for_current_stream ?? true)}
+          control={
             <Toggle
               enabled={settings.drops?.auto_reserve_on_watch ?? true}
               onChange={async () => {
@@ -639,60 +537,86 @@ const DropsSettings = () => {
               }}
               disabled={!(settings.drops?.reserve_token_for_current_stream ?? true)}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Configure Farm Channels */}
-        <button
-          onClick={() => setShowFarmChannels(!showFarmChannels)}
-          className="w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm font-medium transition-colors"
+        <SettingsRow
+          title="Farm Channels"
+          description="Configure which channels to prioritize for points farming"
         >
-          {showFarmChannels ? 'Hide' : 'Configure'} Farm Channels
-        </button>
+          <button
+            onClick={() => setShowFarmChannels(!showFarmChannels)}
+            className="w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm font-medium transition-colors"
+          >
+            {showFarmChannels ? 'Hide' : 'Configure'} Farm Channels
+          </button>
 
-        {showFarmChannels && (
-          <div className="mt-4 p-4 bg-background border border-border rounded-md">
-            <h4 className="text-sm font-semibold text-textPrimary mb-3">Priority Farm Channels</h4>
-            <p className="text-xs text-textSecondary mb-3">
-              Add channels you want to prioritize for channel points farming. When set, the rotation slot will only cycle through these channels instead of all followed streams. If none are live, it falls back to all followed.
-            </p>
+          {showFarmChannels && (
+            <div className="mt-3 p-4 bg-glass rounded-md">
+              <h4 className="text-sm font-semibold text-textPrimary mb-3">Priority Farm Channels</h4>
+              <p className="text-xs text-textSecondary mb-3">
+                Add channels you want to prioritize for channel points farming. When set, the rotation slot will only cycle through these channels instead of all followed streams. If none are live, it falls back to all followed.
+              </p>
 
-            {/* Farm Channels List */}
-            <div className="space-y-2 mb-3">
-              {(settings.drops?.priority_farm_channels ?? []).map((channel: FarmChannel, index: number) => (
-                <div key={channel.channel_id} className="flex items-center gap-2 bg-backgroundSecondary p-2 rounded">
-                  <span className="text-xs text-textSecondary w-6">{index + 1}.</span>
-                  <div className="flex-1">
-                    <span className="text-sm text-textPrimary">{channel.display_name}</span>
-                    <span className="text-xs text-textSecondary ml-1">({channel.channel_login})</span>
+              <div className="space-y-2 mb-3">
+                {(settings.drops?.priority_farm_channels ?? []).map((channel: FarmChannel, index: number) => (
+                  <div key={channel.channel_id} className="flex items-center gap-2 bg-background/40 p-2 rounded">
+                    <span className="text-xs text-textSecondary w-6">{index + 1}.</span>
+                    <div className="flex-1">
+                      <span className="text-sm text-textPrimary">{channel.display_name}</span>
+                      <span className="text-xs text-textSecondary ml-1">({channel.channel_login})</span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const newChannels = [...(settings.drops?.priority_farm_channels ?? [])];
+                        newChannels.splice(index, 1);
+                        updateDropsSettings({ priority_farm_channels: newChannels });
+                      }}
+                      className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
+                    >
+                      Remove
+                    </button>
                   </div>
-                  <button
-                    onClick={() => {
-                      const newChannels = [...(settings.drops?.priority_farm_channels ?? [])];
-                      newChannels.splice(index, 1);
-                      updateDropsSettings({ priority_farm_channels: newChannels });
-                    }}
-                    className="text-red-500 hover:text-red-400 text-xs px-2 py-1"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-              {(settings.drops?.priority_farm_channels ?? []).length === 0 && (
-                <p className="text-xs text-textSecondary italic">No priority channels — rotation uses all followed streams</p>
-              )}
-            </div>
+                ))}
+                {(settings.drops?.priority_farm_channels ?? []).length === 0 && (
+                  <p className="text-xs text-textSecondary italic">No priority channels. Rotation uses all followed streams.</p>
+                )}
+              </div>
 
-            {/* Add Farm Channel */}
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Enter channel name..."
-                id="farm-channel-input"
-                className="flex-1 px-3 py-2 bg-background border border-border rounded-md text-textPrimary text-sm"
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter') {
-                    const input = e.currentTarget;
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Enter channel name..."
+                  id="farm-channel-input"
+                  className="flex-1 glass-input text-textPrimary text-sm px-3 py-2"
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter') {
+                      const input = e.currentTarget;
+                      const channelName = input.value.trim().toLowerCase();
+                      if (!channelName) return;
+                      const existing = (settings.drops?.priority_farm_channels ?? []);
+                      if (existing.some((c: FarmChannel) => c.channel_login === channelName)) return;
+                      try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        const info = await invoke('get_user_by_login', { login: channelName }) as { id: string; login: string; display_name: string };
+                        const newChannel = {
+                          channel_id: info.id,
+                          channel_login: info.login,
+                          display_name: info.display_name,
+                        };
+                        await updateDropsSettings({
+                          priority_farm_channels: [...existing, newChannel]
+                        });
+                        input.value = '';
+                      } catch (err) {
+                        Logger.error('Could not find channel:', err);
+                      }
+                    }
+                  }}
+                />
+                <button
+                  onClick={async () => {
+                    const input = document.getElementById('farm-channel-input') as HTMLInputElement;
                     const channelName = input.value.trim().toLowerCase();
                     if (!channelName) return;
                     const existing = (settings.drops?.priority_farm_channels ?? []);
@@ -712,120 +636,74 @@ const DropsSettings = () => {
                     } catch (err) {
                       Logger.error('Could not find channel:', err);
                     }
-                  }
-                }}
-              />
-              <button
-                onClick={async () => {
-                  const input = document.getElementById('farm-channel-input') as HTMLInputElement;
-                  const channelName = input.value.trim().toLowerCase();
-                  if (!channelName) return;
-                  const existing = (settings.drops?.priority_farm_channels ?? []);
-                  if (existing.some((c: FarmChannel) => c.channel_login === channelName)) return;
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core');
-                    const info = await invoke('get_user_by_login', { login: channelName }) as { id: string; login: string; display_name: string };
-                    const newChannel = {
-                      channel_id: info.id,
-                      channel_login: info.login,
-                      display_name: info.display_name,
-                    };
-                    await updateDropsSettings({
-                      priority_farm_channels: [...existing, newChannel]
-                    });
-                    input.value = '';
-                  } catch (err) {
-                    Logger.error('Could not find channel:', err);
-                  }
-                }}
-                className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
-              >
-                Add
-              </button>
+                  }}
+                  className="px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-md text-sm"
+                >
+                  Add
+                </button>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </SettingsRow>
+      </SettingsSection>
 
-      {/* Notifications Section */}
-      <div className="border-b border-border pb-6">
-        <h3 className="text-lg font-semibold text-textPrimary mb-4">Notifications</h3>
-
-        {/* Notify on Drop Available */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Notify When Drop Ready</span>
-              <p className="text-xs text-textSecondary">
-                Show notification when a drop is ready to claim
-              </p>
-            </div>
+      <SettingsSection label="Notifications">
+        <SettingsRow
+          title="Notify When Drop Ready"
+          description="Show notification when a drop is ready to claim"
+          control={
             <Toggle
               enabled={settings.drops?.notify_on_drop_available ?? true}
               onChange={async () => {
                 await updateDropsSettings({ notify_on_drop_available: !(settings.drops?.notify_on_drop_available ?? true) });
               }}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Notify on Drop Claimed */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Notify When Drop Claimed</span>
-              <p className="text-xs text-textSecondary">
-                Show notification when a drop has been claimed
-              </p>
-            </div>
+        <SettingsRow
+          title="Notify When Drop Claimed"
+          description="Show notification when a drop has been claimed"
+          control={
             <Toggle
               enabled={settings.drops?.notify_on_drop_claimed ?? true}
               onChange={async () => {
                 await updateDropsSettings({ notify_on_drop_claimed: !(settings.drops?.notify_on_drop_claimed ?? true) });
               }}
             />
-          </div>
-        </div>
+          }
+        />
 
-        {/* Notify on Points Claimed */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Notify When Points Claimed</span>
-              <p className="text-xs text-textSecondary">
-                Show notification when channel points are claimed
-              </p>
-            </div>
+        <SettingsRow
+          title="Notify When Points Claimed"
+          description="Show notification when channel points are claimed"
+          control={
             <Toggle
               enabled={settings.drops?.notify_on_points_claimed ?? false}
               onChange={async () => {
                 await updateDropsSettings({ notify_on_points_claimed: !(settings.drops?.notify_on_points_claimed ?? false) });
               }}
             />
-          </div>
-        </div>
-      </div>
-
-      {/* Check Interval */}
-      <div>
-        <label className="block text-sm font-medium text-textPrimary mb-2">
-          Check Interval: {settings.drops?.check_interval_seconds ?? 60} seconds
-        </label>
-        <input
-          type="range"
-          min="30"
-          max="300"
-          step="30"
-          value={settings.drops?.check_interval_seconds ?? 60}
-          onChange={async (e) => {
-            await updateDropsSettings({ check_interval_seconds: parseInt(e.target.value) });
-          }}
-          className="w-full accent-accent cursor-pointer"
+          }
         />
-        <p className="text-xs text-textSecondary mt-1">
-          How often to check for drops and channel points (lower = more frequent checks)
-        </p>
-      </div>
+
+        <SettingsRow
+          title={`Check Interval: ${settings.drops?.check_interval_seconds ?? 60} seconds`}
+          description="How often to check for drops and channel points (lower = more frequent checks)"
+        >
+          <input
+            type="range"
+            min="30"
+            max="300"
+            step="30"
+            value={settings.drops?.check_interval_seconds ?? 60}
+            onChange={async (e) => {
+              await updateDropsSettings({ check_interval_seconds: parseInt(e.target.value) });
+            }}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
+      </SettingsSection>
     </div>
   );
 };

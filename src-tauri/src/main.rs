@@ -31,8 +31,9 @@ use commands::{
     channel_panels::*, chat::*, chat_identity::*, components::*, cosmetics_cache::*,
     diagnostic_logging::*, discord::*, drops::*, emoji::*, emotes::*, eventsub::*, hype_train::*,
     layout::*, logs::*, magne::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
-    settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*, streaming::*,
-    twitch::*, universal_cache::*, user_profile::*, watch_streak::*, whisper_storage::*,
+    screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
+    streaming::*, twitch::*, universal_cache::*, user_profile::*, watch_streak::*,
+    whisper_storage::*,
 };
 use log::{debug, error};
 use models::settings::{AppState, Settings};
@@ -448,6 +449,8 @@ fn main() {
             change_stream_quality,
             get_streamlink_diagnostics,
             is_streamlink_available,
+            validate_streamlink_install,
+            detect_streamlink_installs,
             // Multi-stream commands
             start_multi_nook,
             stop_multi_nook,
@@ -715,6 +718,9 @@ fn main() {
             get_proxy_list,
             check_proxy_health,
             generate_optimal_proxy_args,
+            // Screen capture (Profile share)
+            capture_screen_region,
+            capture_animated_webp,
         ])
         // Window-event handler. Two behaviors:
         //

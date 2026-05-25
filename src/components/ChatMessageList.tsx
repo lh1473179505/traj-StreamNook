@@ -255,16 +255,28 @@ const ChatMessageList = memo(function ChatMessageList({
     }
   }, [onScroll]);
 
-  // Scroll to bottom (for resume button)
+  // Scroll to bottom (for resume button). Optionally animates when the user
+  // has opted in — auto-scroll on new messages (the other 4 scrollTop sites
+  // above) intentionally stays instant; animating those would fight itself
+  // in fast chats.
+  const smoothScrollOnResume =
+    useAppStore((s) => s.settings.chat_render?.smooth_scroll_on_resume) ?? false;
   const scrollToBottom = useCallback(() => {
     if (!containerRef.current) return;
     isScrollingProgrammatically.current = true;
     wasAtBottomRef.current = true;
-    containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    if (smoothScrollOnResume && typeof containerRef.current.scrollTo === 'function') {
+      containerRef.current.scrollTo({
+        top: containerRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+    } else {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    }
     requestAnimationFrame(() => {
       isScrollingProgrammatically.current = false;
     });
-  }, []);
+  }, [smoothScrollOnResume]);
 
   // Expose scrollToBottom to parent via ref callback pattern
   useEffect(() => {
@@ -275,6 +287,11 @@ const ChatMessageList = memo(function ChatMessageList({
     };
   }, [scrollToBottom]);
 
+  const emoteScale = chatDesign?.emote_scale ?? 1;
+  const emoteMargin = chatDesign?.emote_margin ?? 0.125;
+  const deletedStyle = chatDesign?.deleted_message_style ?? 'strikethrough';
+  const hideSharedChat = chatDesign?.hide_shared_chat ?? false;
+
   return (
     <div
       ref={containerRef}
@@ -283,7 +300,11 @@ const ChatMessageList = memo(function ChatMessageList({
       onWheel={handleWheel}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
-      style={{ overflowAnchor: 'auto' }} // Ensure browser helps anchor to bottom
+      style={{
+        overflowAnchor: 'auto',
+        ['--sn-emote-scale' as string]: emoteScale,
+        ['--sn-emote-margin' as string]: `${emoteMargin}rem`,
+      }}
     >
       {/* Messages container with native virtualization - pt-10 for header */}
       <div ref={contentRef} className="flex flex-col min-h-full justify-end pt-10">
@@ -313,6 +334,25 @@ const ChatMessageList = memo(function ChatMessageList({
                 moderationContext = entry.context;
               }
             }
+          }
+
+          // Deleted message style: 'hidden' suppresses the row entirely.
+          // Other styles (strikethrough/dimmed/keep) fall through to ChatMessage.
+          if (moderationContext && deletedStyle === 'hidden') {
+            return null;
+          }
+          // Hide shared-chat-flagged messages if the user opted in.
+          if (hideSharedChat && typeof message !== 'string') {
+            const srcRoom = message.tags?.['source-room-id'] as string | undefined;
+            const curRoom = message.tags?.['room-id'] as string | undefined;
+            if (srcRoom && curRoom && srcRoom !== curRoom) {
+              return null;
+            }
+          }
+          // 'keep' style nukes the moderation context so ChatMessage renders
+          // as if nothing happened.
+          if (moderationContext && deletedStyle === 'keep') {
+            moderationContext = null;
           }
 
           return (

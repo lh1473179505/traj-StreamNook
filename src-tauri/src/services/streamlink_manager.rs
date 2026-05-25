@@ -4,6 +4,39 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::process::Command;
 
+use crate::services::cache_service;
+
+/// Where Streamlink writes its --logfile output for the most recent invocation.
+/// streamlinkw.exe is GUI-subsystem (pythonw), so Python's sys.stderr is None and
+/// the `logging` module silently drops anything that would have gone to stderr.
+/// Routing through --logfile is the only way to recover diagnostic output.
+/// Truncated before each invocation so the file always reflects the last run.
+fn get_streamlink_log_path() -> Result<PathBuf> {
+    let logs_dir = cache_service::get_app_data_dir()?.join("logs");
+    if !logs_dir.exists() {
+        std::fs::create_dir_all(&logs_dir).context("Failed to create logs directory")?;
+    }
+    Ok(logs_dir.join("streamlink.log"))
+}
+
+/// Read the tail of the streamlink log file as a human-readable error message.
+/// Returns the trimmed file contents (or the last ~2KB if the file is bigger),
+/// suitable for surfacing in a UI toast when streamlinkw produced no stderr.
+fn read_streamlink_log_tail() -> Option<String> {
+    let path = get_streamlink_log_path().ok()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const MAX: usize = 2048;
+    if trimmed.len() <= MAX {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("...{}", &trimmed[trimmed.len() - MAX..]))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StreamMetadata {
     pub title: Option<String>,
@@ -542,6 +575,19 @@ impl StreamlinkManager {
             cmd.args(args.split_whitespace());
         }
 
+        // streamlinkw.exe (GUI subsystem) eats stderr because Python's sys.stderr
+        // is None in pythonw mode. Force a logfile so failures are recoverable.
+        // Truncate first; the file is meant to reflect only the most recent run.
+        let log_path = get_streamlink_log_path().ok();
+        if let Some(ref p) = log_path {
+            if let Err(e) = std::fs::write(p, "") {
+                debug!("[Streamlink] Could not truncate log file {:?}: {}", p, e);
+            } else {
+                cmd.arg("--loglevel").arg("info");
+                cmd.arg("--logfile").arg(p);
+            }
+        }
+
         debug!("[Streamlink] Executing command...");
 
         // Bound the wait so a hung Streamlink subprocess can't lock the UI. We
@@ -567,12 +613,20 @@ impl StreamlinkManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let trimmed_stderr = stderr.trim();
+            let message = if !trimmed_stderr.is_empty() {
+                trimmed_stderr.to_string()
+            } else {
+                // streamlinkw.exe path: stderr is always empty, the real error is in the logfile.
+                read_streamlink_log_tail()
+                    .unwrap_or_else(|| "no diagnostic output captured".to_string())
+            };
             return Err(anyhow::anyhow!(
                 "Streamlink failed (path: '{}', url: '{}', quality: '{}'): {}",
                 path,
                 url,
                 quality,
-                stderr
+                message
             ));
         }
 

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
 import { clearUserOverride } from '../../utils/userChatOverrides';
+import { SettingsSection } from './_primitives';
 import type { UserChatOverride } from '../../types';
 
 const UserOverridesSettings = () => {
@@ -17,12 +18,11 @@ const UserOverridesSettings = () => {
   }, [overrides]);
 
   return (
-    <div className="pt-4 border-t border-borderSubtle">
-      <h3 className="text-lg font-semibold text-textPrimary mb-1">User Overrides</h3>
-      <p className="text-xs text-textSecondary mb-4">
-        Nicknames you've set for individual chatters. Only visible to you. Set or clear a nickname from the user's profile card in chat.
-      </p>
-
+    <SettingsSection
+      label="User Overrides"
+      description="Nicknames you've set for individual chatters. Only visible to you. Set or clear a nickname from the user's profile card in chat."
+      bare
+    >
       {entries.length === 0 ? (
         <div className="bg-glass/30 rounded-lg px-4 py-6 text-center">
           <p className="text-sm text-textSecondary">
@@ -38,7 +38,7 @@ const UserOverridesSettings = () => {
             >
               <div className="flex-1 min-w-0">
                 <div className="text-sm text-textPrimary truncate">
-                  <span className="font-medium">{override.nickname || '—'}</span>
+                  <span className="font-medium">{override.nickname || '(no nickname)'}</span>
                   <span className="text-textSecondary"> · </span>
                   <span className="text-textSecondary text-xs">@{override.username ?? override.user_id}</span>
                 </div>
@@ -63,7 +63,7 @@ const UserOverridesSettings = () => {
           ))}
         </div>
       )}
-    </div>
+    </SettingsSection>
   );
 };
 

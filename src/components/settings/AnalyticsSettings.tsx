@@ -4,12 +4,19 @@ import { invoke } from '@tauri-apps/api/core';
 import { Logger } from '../../utils/logger';
 import {
     isSupabaseConfigured,
-    getOnlineCount,
-    subscribeToOnlineCount
+    subscribeToOnlinePresence,
+    isPresenceReady,
+    type OnlinePresenceSnapshot
 } from '../../services/supabaseService';
 
 export default function AnalyticsSettings() {
-    const [onlineCount, setOnlineCount] = useState(0);
+    const [snapshot, setSnapshot] = useState<OnlinePresenceSnapshot>({
+        authedUserIds: new Set(),
+        anonKeyCount: 0,
+        totalUnique: 0,
+        byUserId: new Map(),
+    });
+    const [presenceReady, setPresenceReady] = useState(isPresenceReady());
     const [isOpening, setIsOpening] = useState(false);
     const [isDev, setIsDev] = useState(false);
     const [isAdmin, setIsAdmin] = useState(false);
@@ -89,12 +96,13 @@ export default function AnalyticsSettings() {
 
         if (!configured) return;
 
-        // Subscribe to online count just to show liveness
-        const unsubOnline = subscribeToOnlineCount((count) => {
-            setOnlineCount(count);
+        // Subscribe to the deduped presence snapshot. Survives being called
+        // before the channel is ready and emits a real snapshot once sync arrives.
+        const unsubOnline = subscribeToOnlinePresence((snap) => {
+            setSnapshot(snap);
+            setPresenceReady(isPresenceReady());
         });
 
-        // Check dashboard status periodically
         const statusInterval = setInterval(checkDashboardStatus, 5000);
 
         return () => {
@@ -216,7 +224,15 @@ export default function AnalyticsSettings() {
                             </div>
                             <div>
                                 <div className="text-sm text-textMuted">Online Users</div>
-                                <div className="font-semibold text-textPrimary">{onlineCount}</div>
+                                <div className="font-semibold text-textPrimary">
+                                    {presenceReady ? snapshot.totalUnique : '...'}
+                                </div>
+                                {presenceReady && (snapshot.authedUserIds.size > 0 || snapshot.anonKeyCount > 0) && (
+                                    <div className="text-xs text-textMuted mt-0.5">
+                                        {snapshot.authedUserIds.size} signed in
+                                        {snapshot.anonKeyCount > 0 && `, ${snapshot.anonKeyCount} anonymous`}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

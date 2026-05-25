@@ -24,6 +24,7 @@ pub mod multi_nook;
 pub mod profile_cache;
 pub mod proxy_health;
 pub mod resub;
+pub mod screen_capture;
 pub mod settings;
 pub mod seventv;
 pub mod seventv_cosmetics;

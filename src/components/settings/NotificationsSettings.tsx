@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useAppStore } from '../../stores/AppStore';
 import { invoke } from '@tauri-apps/api/core';
-import { Bell, Radio, MessageCircle, Download, Smartphone, MessageSquare, Gift, Award, Zap } from 'lucide-react';
+import { Bell } from 'lucide-react';
+import { SettingsSection, SettingsRow } from './_primitives';
 
 import { Logger } from '../../utils/logger';
 const NotificationsSettings = () => {
@@ -43,7 +44,6 @@ const NotificationsSettings = () => {
     }
   };
 
-  // Toggle component for reuse
   const Toggle = ({ enabled, onChange, disabled = false }: { enabled: boolean; onChange: () => void; disabled?: boolean }) => (
     <button
       onClick={onChange}
@@ -59,309 +59,177 @@ const NotificationsSettings = () => {
   );
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-4">
-        {/* Enable Notifications (Master Toggle) */}
-        <div>
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-textPrimary">
-                Enable Notifications
-              </label>
-              <p className="text-xs text-textSecondary mt-1">
-                Master toggle for all notification types
-              </p>
-            </div>
+    <div className="space-y-8">
+      <SettingsSection label="Notifications">
+        <SettingsRow
+          title="Enable Notifications"
+          description="Master toggle for all notification types"
+          control={
             <Toggle
               enabled={liveNotifications.enabled}
               onChange={() => updateLiveNotifications({ enabled: !liveNotifications.enabled })}
             />
-          </div>
-        </div>
+          }
+        />
+      </SettingsSection>
 
-        {/* Notification Method Section */}
-        {liveNotifications.enabled && (
-          <>
-            <div className="pt-2 border-t border-borderSubtle">
-              <p className="text-xs font-medium text-textMuted uppercase tracking-wide mb-3">
-                Notification Methods
-              </p>
-              <div className="space-y-3">
-                {/* Dynamic Island Toggle */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-gray-500/20 flex items-center justify-center flex-shrink-0">
-                      <Smartphone size={16} className="text-gray-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Dynamic Island
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Show notifications in the notification center at the top
-                      </p>
-                    </div>
-                  </div>
+      {liveNotifications.enabled && (
+        <>
+          <SettingsSection label="Notification Methods">
+            <SettingsRow
+              title="Dynamic Island"
+              description="Show notifications in the notification center at the top"
+              control={
+                <Toggle
+                  enabled={liveNotifications.use_dynamic_island ?? true}
+                  onChange={() => updateLiveNotifications({
+                    use_dynamic_island: !(liveNotifications.use_dynamic_island ?? true)
+                  })}
+                />
+              }
+            />
+
+            <SettingsRow
+              title="Toast Notifications"
+              description="Show popup toasts at the bottom of the screen"
+              control={
+                <Toggle
+                  enabled={liveNotifications.use_toast ?? true}
+                  onChange={() => updateLiveNotifications({
+                    use_toast: !(liveNotifications.use_toast ?? true)
+                  })}
+                />
+              }
+            />
+          </SettingsSection>
+
+          <SettingsSection label="Notification Types">
+            <SettingsRow
+              title="Live Stream Notifications"
+              description="Get notified when followed streamers go live"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_live_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_live_notifications: !(liveNotifications.show_live_notifications ?? true)
+                  })}
+                />
+              }
+            />
+
+            <SettingsRow
+              title="Whisper Notifications"
+              description="Get notified when you receive whispers"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_whisper_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_whisper_notifications: !(liveNotifications.show_whisper_notifications ?? true)
+                  })}
+                />
+              }
+            />
+
+            <SettingsRow
+              title="Update Notifications"
+              description="Get notified when a new app update is available"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_update_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_update_notifications: !(liveNotifications.show_update_notifications ?? true)
+                  })}
+                />
+              }
+            />
+
+            {(liveNotifications.show_update_notifications ?? true) && (liveNotifications.use_toast ?? true) && (
+              <SettingsRow
+                title="Quick Update on Toast Click"
+                description="Clicking the update toast immediately starts the update"
+                control={
                   <Toggle
-                    enabled={liveNotifications.use_dynamic_island ?? true}
+                    enabled={liveNotifications.quick_update_on_toast ?? false}
                     onChange={() => updateLiveNotifications({
-                      use_dynamic_island: !(liveNotifications.use_dynamic_island ?? true)
+                      quick_update_on_toast: !(liveNotifications.quick_update_on_toast ?? false)
                     })}
                   />
-                </div>
+                }
+              />
+            )}
 
-                {/* Toast Toggle */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
-                      <MessageSquare size={16} className="text-blue-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Toast Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Show popup toasts at the bottom of the screen
-                      </p>
-                    </div>
-                  </div>
+            <SettingsRow
+              title="Drops Notifications"
+              description="Get notified when a drop is claimed"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_drops_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_drops_notifications: !(liveNotifications.show_drops_notifications ?? true)
+                  })}
+                />
+              }
+            />
+
+            {(liveNotifications.show_drops_notifications ?? true) && (
+              <SettingsRow
+                title="Favorite Category Drops"
+                description="Notify when favorited categories have new drops on startup"
+                control={
                   <Toggle
-                    enabled={liveNotifications.use_toast ?? true}
+                    enabled={liveNotifications.show_favorite_drops_notifications ?? true}
                     onChange={() => updateLiveNotifications({
-                      use_toast: !(liveNotifications.use_toast ?? true)
+                      show_favorite_drops_notifications: !(liveNotifications.show_favorite_drops_notifications ?? true)
                     })}
                   />
-                </div>
-              </div>
-            </div>
+                }
+              />
+            )}
 
-            {/* Notification Types Section */}
-            <div className="pt-2 border-t border-borderSubtle">
-              <p className="text-xs font-medium text-textMuted uppercase tracking-wide mb-3">
-                Notification Types
-              </p>
-              <div className="space-y-3">
-                {/* Live Stream Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center flex-shrink-0">
-                      <Radio size={16} className="text-red-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Live Stream Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when followed streamers go live
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_live_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_live_notifications: !(liveNotifications.show_live_notifications ?? true)
-                    })}
-                  />
-                </div>
+            <SettingsRow
+              title="Channel Points Notifications"
+              description="Get notified when channel points are claimed"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_channel_points_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_channel_points_notifications: !(liveNotifications.show_channel_points_notifications ?? true)
+                  })}
+                />
+              }
+            />
 
-                {/* Whisper Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                      <MessageCircle size={16} className="text-purple-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Whisper Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when you receive whispers
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_whisper_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_whisper_notifications: !(liveNotifications.show_whisper_notifications ?? true)
-                    })}
-                  />
-                </div>
+            <SettingsRow
+              title="Badge Notifications"
+              description="Get notified when new badges become available"
+              control={
+                <Toggle
+                  enabled={liveNotifications.show_badge_notifications ?? true}
+                  onChange={() => updateLiveNotifications({
+                    show_badge_notifications: !(liveNotifications.show_badge_notifications ?? true)
+                  })}
+                />
+              }
+            />
+          </SettingsSection>
 
-                {/* Update Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
-                      <Download size={16} className="text-yellow-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Update Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when a new app update is available
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_update_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_update_notifications: !(liveNotifications.show_update_notifications ?? true)
-                    })}
-                  />
-                </div>
-
-                {/* Quick Update Toggle (shown when update notifications and toast are enabled) */}
-                {(liveNotifications.show_update_notifications ?? true) && (liveNotifications.use_toast ?? true) && (
-                  <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg ml-4 border-l-2 border-yellow-500/30">
-                    <div className="flex items-center gap-3 flex-1">
-                      <div className="w-8 h-8 rounded-lg bg-yellow-500/10 flex items-center justify-center flex-shrink-0">
-                        <Zap size={16} className="text-yellow-400" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-textPrimary">
-                          Quick Update on Toast Click
-                        </label>
-                        <p className="text-xs text-textSecondary mt-0.5">
-                          Clicking the update toast immediately starts the update
-                        </p>
-                      </div>
-                    </div>
-                    <Toggle
-                      enabled={liveNotifications.quick_update_on_toast ?? false}
-                      onChange={() => updateLiveNotifications({
-                        quick_update_on_toast: !(liveNotifications.quick_update_on_toast ?? false)
-                      })}
-                    />
-                  </div>
-                )}
-
-                {/* Drops Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-green-500/20 flex items-center justify-center flex-shrink-0">
-                      <Gift size={16} className="text-green-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Drops Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when a drop is claimed
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_drops_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_drops_notifications: !(liveNotifications.show_drops_notifications ?? true)
-                    })}
-                  />
-                </div>
-
-                {/* Favorite Drops Notifications (shown when drops notifications are enabled) */}
-                {(liveNotifications.show_drops_notifications ?? true) && (
-                  <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg ml-4 border-l-2 border-green-500/30">
-                    <div className="flex items-center gap-3 flex-1">
-                      <div className="w-8 h-8 rounded-lg bg-green-500/10 flex items-center justify-center flex-shrink-0">
-                        <Gift size={16} className="text-green-400" />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-textPrimary">
-                          Favorite Category Drops
-                        </label>
-                        <p className="text-xs text-textSecondary mt-0.5">
-                          Notify when favorited categories have new drops on startup
-                        </p>
-                      </div>
-                    </div>
-                    <Toggle
-                      enabled={liveNotifications.show_favorite_drops_notifications ?? true}
-                      onChange={() => updateLiveNotifications({
-                        show_favorite_drops_notifications: !(liveNotifications.show_favorite_drops_notifications ?? true)
-                      })}
-                    />
-                  </div>
-                )}
-
-                {/* Channel Points Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-orange-500/20 flex items-center justify-center flex-shrink-0">
-                      <svg width="16" height="16" viewBox="0 0 24 24" className="text-orange-400" fill="currentColor">
-                        <path d="M12 5v2a5 5 0 0 1 5 5h2a7 7 0 0 0-7-7Z"></path>
-                        <path fillRule="evenodd" d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm11 9a9 9 0 1 1 0-18 9 9 0 0 1 0 18Z" clipRule="evenodd"></path>
-                      </svg>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Channel Points Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when channel points are claimed
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_channel_points_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_channel_points_notifications: !(liveNotifications.show_channel_points_notifications ?? true)
-                    })}
-                  />
-                </div>
-
-                {/* Badge Notifications */}
-                <div className="flex items-center justify-between gap-4 p-3 bg-glass/30 rounded-lg">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-cyan-500/20 flex items-center justify-center flex-shrink-0">
-                      <Award size={16} className="text-cyan-400" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-textPrimary">
-                        Badge Notifications
-                      </label>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Get notified when new badges become available
-                      </p>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={liveNotifications.show_badge_notifications ?? true}
-                    onChange={() => updateLiveNotifications({
-                      show_badge_notifications: !(liveNotifications.show_badge_notifications ?? true)
-                    })}
-                  />
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Sound Settings */}
-        {liveNotifications.enabled && (
-          <>
-            <div className="pt-2 border-t border-borderSubtle">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex-1">
-                  <label className="block text-sm font-medium text-textPrimary">
-                    Notification Sound
-                  </label>
-                  <p className="text-xs text-textSecondary mt-1">
-                    Play a subtle sound for notifications
-                  </p>
-                </div>
+          <SettingsSection label="Sound">
+            <SettingsRow
+              title="Notification Sound"
+              description="Play a subtle sound for notifications"
+              control={
                 <Toggle
                   enabled={liveNotifications.play_sound}
                   onChange={() => updateLiveNotifications({ play_sound: !liveNotifications.play_sound })}
                 />
-              </div>
-            </div>
+              }
+            />
 
-            {/* Sound Type Selector */}
             {liveNotifications.play_sound && (
-              <div>
-                <label className="block text-sm font-medium text-textPrimary mb-2">
-                  Sound Style
-                </label>
+              <SettingsRow
+                title="Sound Style"
+                description="All sounds are designed to be pleasant and non-intrusive"
+              >
                 <select
                   value={liveNotifications.sound_type || 'boop'}
                   onChange={(e) => updateLiveNotifications({ sound_type: e.target.value })}
@@ -373,58 +241,56 @@ const NotificationsSettings = () => {
                   <option value="whisper">Raindrop</option>
                   <option value="gentle">Wind Chime</option>
                 </select>
-                <p className="text-xs text-textSecondary mt-1.5">
-                  All sounds are designed to be pleasant and non-intrusive
-                </p>
-              </div>
+              </SettingsRow>
             )}
 
-            {/* Test Notification Button */}
-            <div className="pt-2">
-              <button
-                onClick={handleTestNotification}
-                disabled={isSending}
-                className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 disabled:bg-accent/50 text-white text-sm font-medium rounded transition-colors"
+            <SettingsRow
+              title="Test Notification"
+              description="Send a test notification to preview your settings"
+              control={
+                <button
+                  onClick={handleTestNotification}
+                  disabled={isSending}
+                  className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 disabled:bg-accent/50 text-white text-sm font-medium rounded transition-colors"
+                >
+                  <Bell size={16} />
+                  {isSending ? 'Sending...' : 'Test'}
+                </button>
+              }
+            />
+          </SettingsSection>
+        </>
+      )}
+
+      <SettingsSection label="About" bare>
+        <div className="glass-panel p-3 rounded-lg border border-accent/20">
+          <div className="flex items-start gap-3">
+            <div className="text-accent mt-0.5">
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
               >
-                <Bell size={16} />
-                {isSending ? 'Sending...' : 'Test Notification'}
-              </button>
-              <p className="text-xs text-textSecondary mt-2">
-                Send a test notification to preview your settings
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <p className="text-xs text-textPrimary font-medium mb-1">
+                About Notifications
+              </p>
+              <p className="text-xs text-textSecondary">
+                Choose how you receive notifications: the Dynamic Island (notification center at the top), Toast popups (bottom of screen), or both. Click on notifications to take action. Live notifications start the stream, whisper notifications open the conversation, and update notifications take you to the Updates page.
               </p>
             </div>
-          </>
-        )}
-      </div>
-
-      {/* Info Box */}
-      <div className="glass-panel p-3 rounded-lg border border-accent/20">
-        <div className="flex items-start gap-3">
-          <div className="text-accent mt-0.5">
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-          </div>
-          <div className="flex-1">
-            <p className="text-xs text-textPrimary font-medium mb-1">
-              About Notifications
-            </p>
-            <p className="text-xs text-textSecondary">
-              Choose how you receive notifications: the Dynamic Island (notification center at the top), Toast popups (bottom of screen), or both. Click on notifications to take action - live notifications start the stream, whisper notifications open the conversation, and update notifications take you to the Updates page.
-            </p>
           </div>
         </div>
-      </div>
+      </SettingsSection>
     </div>
   );
 };

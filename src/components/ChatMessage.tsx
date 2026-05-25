@@ -15,7 +15,8 @@ import { useChatUserStore } from '../stores/chatUserStore';
 import { queueBadgeForCaching, getCachedBadgeUrl } from '../services/badgeImageCacheService';
 import { isStreamNookUser, getStreamNookUserNumber, subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion } from '../services/supabaseService';
 import { StreamNookBadge } from './StreamNookBadge';
-import { matchHighlightPhrase, type HighlightMatch } from '../utils/chatHighlightMatcher';
+import { matchHighlightPhrase, matchHighlightUser, matchHighlightBadge, type HighlightMatch } from '../utils/chatHighlightMatcher';
+import { flashTitle } from '../utils/titleFlasher';
 import { playSoundThrottled } from '../utils/notificationSound';
 import { getDisplayedName, getColorOverride } from '../utils/userChatOverrides';
 
@@ -133,6 +134,7 @@ const MentionSpan: React.FC<{
   // If user is in chat store, use their data directly
   const userColor = cachedUser?.color || '#9147FF';
   const userPaint = cachedUser?.paint || apiUserPaint;
+  const paintShadowMode = useAppStore((s) => s.settings.cosmetics?.paint_shadows) ?? 'all';
   
   // Only do API lookup if user is NOT in the chat store
   useEffect(() => {
@@ -166,14 +168,17 @@ const MentionSpan: React.FC<{
     };
   }, [username, cachedUser]);
   
-  // Compute paint style - use user's Twitch color as fallback (not accent)
+  // Compute paint style - use user's Twitch color as fallback (not accent).
+  // When the user has turned off paint-on-mentions globally, fall back to the
+  // flat color even if the user has a paint set.
+  const paintMentionsInBody = useAppStore((s) => s.settings.chat_design?.paint_mentions_in_body) ?? true;
   const nameStyle = useMemo(() => {
-    if (userPaint) {
-      return computePaintStyle(userPaint, userColor);
+    if (userPaint && paintMentionsInBody) {
+      return computePaintStyle(userPaint, userColor, paintShadowMode);
     }
     // Use user's Twitch chat color as fallback
     return { color: userColor };
-  }, [userPaint, userColor]);
+  }, [userPaint, userColor, paintShadowMode, paintMentionsInBody]);
   
   const handleClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -466,6 +471,8 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
   const [isMentioned, setIsMentioned] = useState(false);
   const [isReplyToMe, setIsReplyToMe] = useState(false);
   const highlightPhrases = settings.chat_highlights?.phrases;
+  const highlightUsers = settings.chat_highlights?.users;
+  const highlightBadges = settings.chat_highlights?.badges;
 
   // PHASE 3.1d - OPTIMIZED: Check if this message mentions the current user or is a reply to them
   // NO REGEX - simple case-insensitive string check is much faster
@@ -505,12 +512,30 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
   // Pre-checks for own-mention / reply-to-me happen inline so this useMemo
   // doesn't have to wait for the async useState effect that fills those flags.
   const phraseMatch = useMemo<HighlightMatch | null>(() => {
-    if (!currentUser) return matchHighlightPhrase(parsed.content, highlightPhrases);
-    const mentionTarget = `@${currentUser.username.toLowerCase()}`;
-    if (parsed.content.toLowerCase().includes(mentionTarget)) return null;
-    if (parsed.replyInfo?.parentUserId === currentUser.user_id) return null;
-    return matchHighlightPhrase(parsed.content, highlightPhrases);
-  }, [parsed.content, parsed.replyInfo, currentUser, highlightPhrases]);
+    // Mention/reply animations win over highlight matches; suppress here so
+    // sound effects and animation don't double-fire.
+    const mentionTarget = currentUser ? `@${currentUser.username.toLowerCase()}` : null;
+    const isOwnMention = mentionTarget ? parsed.content.toLowerCase().includes(mentionTarget) : false;
+    const isReplyToMe = !!currentUser && parsed.replyInfo?.parentUserId === currentUser.user_id;
+    if (isOwnMention || isReplyToMe) return null;
+
+    // Try phrase, then user, then badge highlights. First non-null wins.
+    const phraseHit = matchHighlightPhrase(parsed.content, highlightPhrases);
+    if (phraseHit) return phraseHit;
+
+    const senderLogin = parsed.tags.get('display-name')?.toLowerCase() || parsed.tags.get('login') || null;
+    const userHit = matchHighlightUser(senderLogin, highlightUsers);
+    if (userHit) return userHit;
+
+    // Build badge-key list from the message's IRC badges tag (format
+    // "name1/v1,name2/v2"). Empty/missing tag → no badge match.
+    const badgesRaw = parsed.tags.get('badges');
+    const badgeKeys = badgesRaw ? badgesRaw.split(',').filter(Boolean) : null;
+    const badgeHit = matchHighlightBadge(badgeKeys, highlightBadges);
+    if (badgeHit) return badgeHit;
+
+    return null;
+  }, [parsed.content, parsed.replyInfo, parsed.tags, currentUser, highlightPhrases, highlightUsers, highlightBadges]);
 
   // Fire the phrase's sound on first render if one is configured. Cooldown +
   // backfill guard (see notificationSound.ts) make this safe to call on every
@@ -528,6 +553,23 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     });
     // Only fire once per mount per match — phraseMatch is memoized so this
     // effect only re-runs when the message itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phraseMatch]);
+
+  // Window-title flash. Fires on any highlight match (phrase/user/badge) when
+  // the user has opted in globally AND the window is currently blurred.
+  // Backfill-safe: skip messages older than 5s so loading history doesn't
+  // trigger a flash storm. Mention/reply path doesn't go through phraseMatch,
+  // so this only covers the highlight cases (mentions get their own animation
+  // and don't need title flash to attract attention).
+  useEffect(() => {
+    if (!phraseMatch) return;
+    if (!settings?.chat_highlights?.appearance?.flash_title_when_unfocused) return;
+    const sentTsRaw = parsed.tags.get('tmi-sent-ts');
+    const sentTs = sentTsRaw ? parseInt(sentTsRaw, 10) : NaN;
+    if (Number.isFinite(sentTs) && Date.now() - sentTs > 5000) return;
+    const who = parsed.tags.get('display-name') || parsed.tags.get('login') || 'chat';
+    flashTitle(`${who}: highlight`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phraseMatch]);
 
@@ -618,14 +660,16 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
   // Create username style with paint. effectiveColor is the override-aware
   // base color; the 7TV paint (if present) renders on top of it.
+  const paintShadowMode = settings?.cosmetics?.paint_shadows ?? 'all';
+
   const usernameStyle = useMemo(() => {
     if (!seventvPaint) {
       return { color: effectiveColor };
     }
 
     // Use the new computePaintStyle function
-    return computePaintStyle(seventvPaint, effectiveColor);
-  }, [seventvPaint, effectiveColor]);
+    return computePaintStyle(seventvPaint, effectiveColor, paintShadowMode);
+  }, [seventvPaint, effectiveColor, paintShadowMode]);
 
 
   const renderSegment = (segment: EmoteSegment, key: string, inGrid: boolean, isOverlay: boolean = false) => {
@@ -657,8 +701,13 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
           srcSet={srcSet}
           alt={segment.content}
           loading="lazy"
-          className={`inline-block h-7 w-auto max-w-[128px] cursor-pointer ${inGrid ? '' : 'align-middle'} ${marginClass} hover:scale-110 transition-transform ${isOverlay ? 'z-10 drop-shadow-[0_0_2px_rgba(0,0,0,0.5)] hover:drop-shadow-[0_0_4px_rgba(234,179,8,0.8)]' : ''}`}
-          style={gridStyle}
+          className={`inline-block w-auto cursor-pointer ${inGrid ? '' : 'align-middle'} hover:scale-110 transition-transform ${isOverlay ? 'z-10 drop-shadow-[0_0_2px_rgba(0,0,0,0.5)] hover:drop-shadow-[0_0_4px_rgba(234,179,8,0.8)]' : ''}`}
+          style={{
+            ...gridStyle,
+            height: 'calc(1.75rem * var(--sn-emote-scale, 1))',
+            maxWidth: 'calc(128px * var(--sn-emote-scale, 1))',
+            ...(inGrid ? {} : { marginLeft: 'var(--sn-emote-margin, 0.125rem)', marginRight: 'var(--sn-emote-margin, 0.125rem)' }),
+          }}
           referrerPolicy="no-referrer"
           onContextMenu={(e) => {
             e.preventDefault();
@@ -671,8 +720,11 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
         />
       );
 
+      const tooltipContent = settings?.chat_design?.compact_emote_tooltips
+        ? segment.content
+        : `Right-click to copy${segment.isZeroWidth ? ' (Zero-Width)' : ''}: ${segment.content}`;
       return (
-        <Tooltip key={key} content={`Right-click to copy${segment.isZeroWidth ? ' (Zero-Width)' : ''}: ${segment.content}`} side="top">
+        <Tooltip key={key} content={tooltipContent} side="top">
           {isOverlay && !inGrid ? (
             // Fallback for standalone zero-width emote (e.g., at the start of a message)
             <span className="inline-block w-0 align-middle pointer-events-none" style={gridStyle}>
@@ -905,8 +957,38 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
   // Get system message for subscriptions and donations
   const systemMessage = parsed.tags.get('system-msg')?.replace(/\\s/g, ' ');
 
-  // Check if this is a first-time message
+  // Built-in event highlights (configurable per-event in Chat settings).
+  // Defaults preserve prior behavior: first-time chatter ON (purple), all
+  // others OFF. When ON, applies a tinted background + left border in the
+  // configured color via the inline style stamp below.
+  const builtInHighlights = settings?.chat_highlights?.built_in;
   const isFirstMessage = parsed.tags.get('first-msg') === '1';
+  const isReturningChatter = parsed.tags.get('returning-chatter') === '1';
+  const isOwnMessage = !!currentUser?.user_id && parsed.tags.get('user-id') === currentUser.user_id;
+  const isRaidNotice = parsed.tags.get('msg-id') === 'raid';
+
+  // Resolve which built-in event (if any) should drive the row's tint. Order
+  // is intentional: raid > returning > first-time > self. Mention/reply flash
+  // animations still win over all of these via the existing animationClass
+  // cascade below.
+  let builtInEventColor: string | null = null;
+  let builtInEventLabel: string | null = null;
+  if (isRaidNotice && (builtInHighlights?.raider?.enabled ?? false)) {
+    builtInEventColor = builtInHighlights?.raider?.color ?? '#ef4444';
+    builtInEventLabel = 'Raid';
+  } else if (isReturningChatter && (builtInHighlights?.returning_chatter?.enabled ?? false)) {
+    builtInEventColor = builtInHighlights?.returning_chatter?.color ?? '#22d3ee';
+    builtInEventLabel = 'Returning chatter';
+  } else if (isFirstMessage && (builtInHighlights?.first_time_chatter?.enabled ?? true)) {
+    // Default ON for backwards compatibility — first-time chatter previously
+    // had a hardcoded purple gradient. When the user re-colors it via the
+    // settings panel, the new color flows through builtInEventColor.
+    builtInEventColor = builtInHighlights?.first_time_chatter?.color ?? '#a855f7';
+    builtInEventLabel = 'First message in chat';
+  } else if (isOwnMessage && (builtInHighlights?.self_message?.enabled ?? false)) {
+    builtInEventColor = builtInHighlights?.self_message?.color ?? '#facc15';
+    builtInEventLabel = 'You';
+  }
 
   // Extract source room info for shared chat (needed for all message types)
   const sourceRoomId = parsed.tags.get('source-room-id');
@@ -1058,7 +1140,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userNumber={getStreamNookUserNumber(senderUserId)} />}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             // Handle both old format (key/info) and new format (name/version)
             if (!badge.info) return null;
@@ -1223,7 +1305,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userNumber={getStreamNookUserNumber(senderUserId)} />}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1402,7 +1484,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userNumber={getStreamNookUserNumber(senderUserId)} />}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1537,7 +1619,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center align-middle gap-1 mr-1">
-          {isSN && <StreamNookBadge userNumber={getStreamNookUserNumber(senderUserId)} />}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1630,8 +1712,8 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
         if (!userPaint) {
           return { color: recipientBaseColor };
         }
-        return computePaintStyle(userPaint, recipientBaseColor);
-      }, [userPaint, recipientBaseColor]);
+        return computePaintStyle(userPaint, recipientBaseColor, paintShadowMode);
+      }, [userPaint, recipientBaseColor, paintShadowMode]);
 
       return (
         <span className="inline-flex items-center align-middle">
@@ -1941,26 +2023,71 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     }
   }
 
+  // Global highlight appearance — applies to BOTH built-in event highlights
+  // and the phrase/user/badge match (phraseMatch). Defaults preserve prior
+  // visual: standard display style with ~20% opacity background.
+  const appearance = settings?.chat_highlights?.appearance;
+  const displayStyle = appearance?.display_style ?? 'standard';
+  const tintOpacityPct = Math.max(0, Math.min(100, appearance?.opacity ?? 20));
+  // Hex alpha 00-ff. 20% → 0x33, 100% → 0xff, 0% → 0x00.
+  const tintAlphaHex = Math.round((tintOpacityPct / 100) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  const showHighlightBg = displayStyle === 'standard';
+  const showHighlightBorder = displayStyle !== 'none';
+
+  // Compose built-in event tint styles inline. The configurable color drives
+  // a gradient (alpha controlled by tintOpacityPct). Phrase/mention/reply
+  // flash still take precedence on the left border (their borderLeftColor
+  // overrides below).
+  const builtInEventBg =
+    builtInEventColor && showHighlightBg
+      ? `linear-gradient(to right, ${builtInEventColor}${tintAlphaHex}, ${builtInEventColor}${Math.round(
+          (tintOpacityPct / 100) * 128,
+        )
+          .toString(16)
+          .padStart(2, '0')}, transparent)`
+      : undefined;
+
   return (
     <div
       className={`group relative px-3 hover:bg-glass transition-colors ${borderClass} ${animationClass
         } ${isRedemption ? 'highlight-message-gradient' : ''
-        } ${isFirstMessage ? 'bg-gradient-to-r from-purple-500/20 via-purple-400/10 to-transparent' : ''} ${isFromSharedChat ? 'border-l-2 border-l-accent/50 bg-accent/5' : ''
-        } ${backgroundClass} ${moderationContext ? 'opacity-50' : ''}`}
+        } ${isFromSharedChat ? 'border-l-2 border-l-accent/50 bg-accent/5' : ''
+        } ${backgroundClass} ${moderationContext && (chatDesign?.deleted_message_style ?? 'strikethrough') !== 'keep' ? 'opacity-50' : ''}`}
       style={{
         ...messageStyle,
-        borderLeftColor: (isMentioned || isReplyToMe || phraseMatch) && borderLeftColor ? borderLeftColor : undefined,
-        borderLeftWidth: (isMentioned || isReplyToMe || phraseMatch) ? '4px' : undefined,
+        ...(builtInEventBg ? { backgroundImage: builtInEventBg } : {}),
+        borderLeftColor: (isMentioned || isReplyToMe)
+          ? borderLeftColor
+          : phraseMatch && showHighlightBorder
+            ? phraseMatch.color
+            : builtInEventColor && showHighlightBorder
+              ? builtInEventColor
+              : undefined,
+        borderLeftWidth:
+          isMentioned || isReplyToMe || ((phraseMatch || builtInEventColor) && showHighlightBorder)
+            ? '4px'
+            : undefined,
+        borderLeftStyle:
+          (builtInEventColor || phraseMatch) && showHighlightBorder && !(isMentioned || isReplyToMe)
+            ? 'solid'
+            : undefined,
         ...(phraseMatch
           ? ({ '--phrase-flash-color': phraseMatch.color } as React.CSSProperties)
           : {}),
       }}
     >
 
-      {/* First message indicator */}
-      {isFirstMessage && (
+      {/* Built-in event label (first-time chatter, returning, self, raid) */}
+      {builtInEventLabel && (
         <div className="flex items-center justify-end gap-1.5">
-          <span className="text-xs text-purple-400 font-normal opacity-60">First message in chat</span>
+          <span
+            className="text-xs font-normal opacity-60"
+            style={{ color: builtInEventColor ?? undefined }}
+          >
+            {builtInEventLabel}
+          </span>
         </div>
       )}
       {/* Channel points redemption indicator (highlight, gigantify, animate, skip-subs-mode, custom reward) */}
@@ -2002,7 +2129,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
           {isSN || (isFromSharedChat && channelProfileImage) || parsed.badges.length > 0 || seventvBadge || thirdPartyBadges.length > 0 ? (
             <span className="inline-flex items-center gap-1 mr-1.5 align-middle">
               {/* StreamNook user identity badge (only visible to other StreamNook users) */}
-              {isSN && <StreamNookBadge userNumber={getStreamNookUserNumber(senderUserId)} />}
+              {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
               {/* Shared chat channel profile image badge */}
               {isFromSharedChat && channelProfileImage && (
                 <Tooltip content={`Chatting from ${fetchedChannelName || 'shared channel'}`} side="top">
@@ -2171,10 +2298,18 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
                   </span>
                 </Tooltip>
                 <span style={{ fontWeight: 300 }} className="text-textPrimary break-words">
-                  {' '}{renderContent(contentWithEmotes)}
-                  {moderationContext && (
+                  <span
+                    style={
+                      moderationContext && (chatDesign?.deleted_message_style ?? 'strikethrough') === 'strikethrough'
+                        ? { textDecoration: 'line-through' }
+                        : undefined
+                    }
+                  >
+                    {' '}{renderContent(contentWithEmotes)}
+                  </span>
+                  {moderationContext && (chatDesign?.deleted_message_style ?? 'strikethrough') === 'strikethrough' && (
                     <span className="ml-1.5 text-xs text-red-400/70 font-medium">
-                      {moderationContext.type === 'timeout' 
+                      {moderationContext.type === 'timeout'
                         ? `[timed out for ${moderationContext.duration}s]`
                         : moderationContext.type === 'ban'
                           ? '[banned]'

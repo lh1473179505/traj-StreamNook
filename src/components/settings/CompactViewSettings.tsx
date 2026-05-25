@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Proportions, Plus, Trash2, Check, Pencil } from 'lucide-react';
+import { Plus, Trash2, Check, Pencil } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
 import { BUILT_IN_COMPACT_PRESETS, DEFAULT_COMPACT_PRESET_ID } from '../../constants/compactViewPresets';
 import { Tooltip } from '../ui/Tooltip';
+import { SettingsSection } from './_primitives';
 import type { CompactViewPreset } from '../../types';
 
 const CompactViewSettings = () => {
@@ -132,17 +133,11 @@ const CompactViewSettings = () => {
   };
 
   return (
-    <div className="space-y-4 pt-6 border-t border-borderSubtle">
-      <h4 className="text-sm font-medium text-textSecondary uppercase tracking-wider flex items-center gap-2">
-        <Proportions size={16} />
-        Compact View
-      </h4>
-      
-      <p className="text-xs text-textMuted">
-        Choose the window size when entering Compact View mode. Perfect for fitting the app on a second monitor.
-      </p>
-
-      {/* Built-in Presets */}
+    <SettingsSection
+      label="Compact View"
+      description="Choose the window size when entering Compact View mode. Perfect for fitting the app on a second monitor."
+      bare
+    >
       <div className="space-y-2">
         <label className="text-sm text-textPrimary font-medium">Preset Sizes</label>
         <div className="grid grid-cols-2 gap-2">
@@ -347,7 +342,7 @@ const CompactViewSettings = () => {
           For example, a 1080px preset results in a 1080px total window width, with the video area slightly smaller to account for borders.
         </p>
       </div>
-    </div>
+    </SettingsSection>
   );
 };
 

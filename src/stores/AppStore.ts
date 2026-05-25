@@ -30,7 +30,7 @@ function maybeToastQualityFallback(
 export interface Toast {
   id: number;
   message: string | React.ReactNode;
-  type: 'info' | 'success' | 'warning' | 'error' | 'live';
+  type: 'info' | 'success' | 'warning' | 'error' | 'live' | 'channel_points';
   action?: {
     label: string;
     onClick: () => void;
@@ -40,7 +40,7 @@ export interface Toast {
   createdAt: number;
 }
 
-export type SettingsTab = 'Interface' | 'Player' | 'Chat' | 'Theme' | 'Integrations' | 'Notifications' | 'Cache' | 'Support' | 'Updates' | 'Analytics';
+export type SettingsTab = 'Profile' | 'Interface' | 'Player' | 'Chat' | 'Moderation' | 'Theme' | 'Integrations' | 'Notifications' | 'Cache' | 'Command Palette' | 'Support' | "What's New" | 'Analytics';
 
 export type HomeTab = 'following' | 'recommended' | 'browse' | 'search' | 'category';
 
@@ -147,8 +147,9 @@ interface AppState {
   isLoading: boolean;
   isSettingsOpen: boolean;
   settingsInitialTab: SettingsTab | null;
+  isCommandPaletteOpen: boolean;
+  updateInfo: { current_version: string; latest_version: string } | null;
   showLiveStreamsOverlay: boolean;
-  showProfileOverlay: boolean;
   showDropsOverlay: boolean;
   showBadgesOverlay: boolean;
   badgesOverlayInitialPaintId: string | null;
@@ -207,7 +208,7 @@ interface AppState {
   activeHypeTrainChannels: Map<string, { level: number; isGolden: boolean }>;
   refreshHypeTrainStatuses: (channelIds: string[]) => Promise<void>;
   handleStreamOffline: () => Promise<void>;
-  addToast: (message: string | React.ReactNode, type: 'info' | 'success' | 'warning' | 'error' | 'live', action?: { label: string; onClick: () => void }) => void;
+  addToast: (message: string | React.ReactNode, type: 'info' | 'success' | 'warning' | 'error' | 'live' | 'channel_points', action?: { label: string; onClick: () => void }) => void;
   removeToast: (id: number) => void;
   loadSettings: () => Promise<void>;
   updateSettings: (newSettings: Settings) => Promise<void>;
@@ -224,8 +225,11 @@ interface AppState {
   changeStreamQuality: (quality: string) => Promise<void>;
   openSettings: (initialTab?: SettingsTab) => void;
   closeSettings: () => void;
+  openCommandPalette: () => void;
+  closeCommandPalette: () => void;
+  toggleCommandPalette: () => void;
+  setUpdateInfo: (info: { current_version: string; latest_version: string } | null) => void;
   setShowLiveStreamsOverlay: (show: boolean) => void;
-  setShowProfileOverlay: (show: boolean) => void;
   setShowDropsOverlay: (show: boolean) => void;
   setShowBadgesOverlay: (show: boolean) => void;
   openBadgesWithPaint: (paintId: string) => void;
@@ -325,8 +329,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   isLoading: false,
   isSettingsOpen: false,
   settingsInitialTab: null,
+  isCommandPaletteOpen: false,
+  updateInfo: null,
   showLiveStreamsOverlay: false,
-  showProfileOverlay: false,
   showDropsOverlay: false,
   showBadgesOverlay: false,
   badgesOverlayInitialPaintId: null,
@@ -1745,13 +1750,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     trackActivity('Closed Settings');
     set({ isSettingsOpen: false, settingsInitialTab: null });
   },
+  openCommandPalette: () => {
+    if (!get().isCommandPaletteOpen) trackActivity('Opened Command Palette');
+    set({ isCommandPaletteOpen: true });
+  },
+  closeCommandPalette: () => set({ isCommandPaletteOpen: false }),
+  toggleCommandPalette: () => {
+    const isOpen = get().isCommandPaletteOpen;
+    if (!isOpen) trackActivity('Opened Command Palette');
+    set({ isCommandPaletteOpen: !isOpen });
+  },
+  setUpdateInfo: (info) => set({ updateInfo: info }),
   setShowLiveStreamsOverlay: (show: boolean) => {
     if (show) trackActivity('Opened Live Streams');
     set({ showLiveStreamsOverlay: show });
-  },
-  setShowProfileOverlay: (show: boolean) => {
-    if (show) trackActivity('Opened Profile');
-    set({ showProfileOverlay: show });
   },
   setShowDropsOverlay: (show: boolean) => {
     if (show) trackActivity('Opened Drops');

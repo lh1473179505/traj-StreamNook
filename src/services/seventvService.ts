@@ -554,18 +554,28 @@ const computeSingleColorLayer = (layer: PaintLayer['ty'], opacity: number) => {
   };
 };
 
-const computeDropShadows = (shadows: PaintShadow[]) => {
-  if (shadows.length === 0) {
+// Paint shadow render mode. 'all' = render every shadow the artist defined
+// (default). 'one' = first shadow only (lighter visual). 'none' = no shadows
+// (cleanest, most readable on busy backgrounds).
+export type PaintShadowMode = 'all' | 'one' | 'none';
+
+const computeDropShadows = (shadows: PaintShadow[], mode: PaintShadowMode = 'all') => {
+  if (shadows.length === 0 || mode === 'none') {
     return undefined;
   }
 
-  return shadows
+  const picked = mode === 'one' ? shadows.slice(0, 1) : shadows;
+  return picked
     .map((s) => `drop-shadow(${s.color.hex} ${s.offsetX}px ${s.offsetY}px ${s.blur}px)`)
     .join(' ');
 };
 
 // Compute the full CSS style for a paint
-export const computePaintStyle = (paint: PaintV4, userColor?: string): React.CSSProperties => {
+export const computePaintStyle = (
+  paint: PaintV4,
+  userColor?: string,
+  shadowMode: PaintShadowMode = 'all',
+): React.CSSProperties => {
   const layers = paint.data.layers
     .map((layer) => {
       switch (layer.ty.__typename) {
@@ -590,7 +600,7 @@ export const computePaintStyle = (paint: PaintV4, userColor?: string): React.CSS
   const backgroundImage = backgroundImages.length > 0 ? backgroundImages.join(', ') : undefined;
   const backgroundColor = backgroundColors.length > 0 ? backgroundColors[0] : (userColor || 'var(--user-color)');
 
-  const filter = computeDropShadows(paint.data.shadows);
+  const filter = computeDropShadows(paint.data.shadows, shadowMode);
 
   const opacities = layers.map((l) => l.opacity).filter((o) => o < 1);
   const minOpacity = opacities.length > 0 ? Math.min(...opacities) : 1;

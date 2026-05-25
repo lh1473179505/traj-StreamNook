@@ -858,7 +858,7 @@ const UserProfileCard = ({
                       StreamNook <span className="text-textSecondary/50 tabular-nums">1</span>
                     </p>
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <StreamNookBadge userNumber={streamNookUserNumber} />
+                      <StreamNookBadge userId={userId} userNumber={streamNookUserNumber} />
                     </div>
                   </div>
                 )}

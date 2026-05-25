@@ -474,3 +474,106 @@ jobs:
           echo "Release v$version created!"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Discord
+        if: steps.check_release.outputs.RELEASE_EXISTS == 'false' && env.DISCORD_RELEASE_WEBHOOK_URL != ''
+        shell: pwsh
+        env:
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $bundleName = "${{ steps.bundle.outputs.BUNDLE_NAME }}"
+          $streamlinkVersion = "${{ steps.streamlink.outputs.STREAMLINK_VERSION }}"
+          $ttvlolVersion = "${{ steps.ttvlol.outputs.TTVLOL_VERSION }}"
+          $releaseUrl = "https://github.com/winters27/StreamNook/releases/tag/v$version"
+
+          # --- Custom server emote substitution ---
+          # Format: '<:name:snowflake_id>' for static, '<a:name:id>' for animated.
+          # Get IDs by typing \:emote_name: in any Discord channel (Discord echoes the raw form).
+          # IMPORTANT: custom emotes render in `content`, embed `description`, and embed
+          # `fields[].name/value`. They do NOT render in embed `title`, `author.name`, or
+          # `footer.text` (those fields show literal text). Leave a value empty to keep
+          # the unicode fallback.
+          $emoteMap = @{
+            feature     = '<a:alert:1380653449305391104>'    # animated red exclamation
+            bugfix      = '<a:check:1380653692000407572>'    # animated checkmark
+            maintenance = '<:invoice:1384683220901167104>'   # document
+            streamlink  = ''                                 # no matching emote yet
+            ttvlol      = ''                                 # no matching emote yet
+            logo        = ''                                 # thumbnail already shows the Penrose logo
+            rocket      = '<:bu_tg:1380653917452632064>'     # paper airplane ("shipped")
+          }
+
+          # Use the changelog body produced earlier (without the appended Bundle Components / Installation block)
+          $body = Get-Content ./changelog_section.md -Raw
+
+          # Strip the leading "## [version] - date" header — version is already the embed title
+          $body = $body -replace '(?ms)^\s*##\s*\[?\d[\d\.]*\]?.*?\r?\n', ''
+          $body = $body.Trim()
+
+          # Promote section headers from H3 (### Features) to H2 (## Features). H2 renders
+          # noticeably bigger and bolder in Discord, giving stronger visual hierarchy than
+          # GitHub's default H3 style. Only matches lines that start with exactly three #.
+          $body = $body -replace '(?m)^###\s+', '## '
+
+          # Add a thin separator + GitHub link at the bottom of the description using subtext
+          # styling (-# prefix renders smaller and dimmer in Discord, perfect for metadata).
+          $body = $body.TrimEnd() + "`n`n-# [View release on GitHub →]($releaseUrl)"
+
+          # Replace the changelog section-marker emojis with custom server emotes when configured.
+          # release_manager.ps1 generates sections using ✨ / 🐛 / 🔧 (see Brain/projects/StreamNook.md).
+          # Use ConvertFromUtf32 because 🐛 / 🔧 are above U+FFFF and don't fit in a single [char].
+          $featureMarker     = [char]::ConvertFromUtf32(0x2728)   # ✨
+          $bugfixMarker      = [char]::ConvertFromUtf32(0x1F41B)  # 🐛
+          $maintenanceMarker = [char]::ConvertFromUtf32(0x1F527)  # 🔧
+          if ($emoteMap.feature)     { $body = $body.Replace($featureMarker, $emoteMap.feature) }
+          if ($emoteMap.bugfix)      { $body = $body.Replace($bugfixMarker, $emoteMap.bugfix) }
+          if ($emoteMap.maintenance) { $body = $body.Replace($maintenanceMarker, $emoteMap.maintenance) }
+
+          # Discord embed description cap is 4096 chars. Leave headroom for the "read more" link.
+          # Custom emote strings are ~24 chars each vs ~4 for the unicode equivalent, so the
+          # post-substitution body can grow noticeably on changelogs with many bullets.
+          $maxLen = 3800
+          if ($body.Length -gt $maxLen) {
+            $body = $body.Substring(0, $maxLen).TrimEnd() + "`n`n[Read the full changelog on GitHub]($releaseUrl)"
+          }
+
+          # Field-name prefixes for the inline bundle-component fields
+          $streamlinkLabel = if ($emoteMap.streamlink) { "$($emoteMap.streamlink) Streamlink" } else { 'Streamlink' }
+          $ttvlolLabel     = if ($emoteMap.ttvlol)     { "$($emoteMap.ttvlol) TTV LOL"       } else { 'TTV LOL' }
+
+          # Optional content line above the embed — this is the one place custom emotes
+          # render alongside large bold text. Stays empty (and the field is omitted) until
+          # at least one of the logo/rocket emotes is configured.
+          $contentParts = @()
+          if ($emoteMap.logo)   { $contentParts += $emoteMap.logo }
+          if ($emoteMap.rocket) { $contentParts += $emoteMap.rocket }
+          $contentLine = if ($contentParts.Count -gt 0) {
+            ($contentParts -join ' ') + " **StreamNook v$version is live!**"
+          } else { $null }
+
+          $payloadObj = @{
+            embeds = @(@{
+              title = "StreamNook v$version is out"
+              url = $releaseUrl
+              description = $body
+              color = 9941177  # #97B1B9 StreamNook accent
+              thumbnail = @{ url = "https://raw.githubusercontent.com/winters27/StreamNook/main/src-tauri/icons/icon.png" }
+              fields = @(
+                @{ name = $streamlinkLabel; value = $streamlinkVersion; inline = $true }
+                @{ name = $ttvlolLabel;     value = $ttvlolVersion;     inline = $true }
+              )
+              footer = @{ text = "Download $bundleName from the release page" }
+              timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            })
+          }
+          if ($contentLine) { $payloadObj.content = $contentLine }
+          $payload = $payloadObj | ConvertTo-Json -Depth 10 -Compress
+
+          try {
+            Invoke-RestMethod -Uri $env:DISCORD_RELEASE_WEBHOOK_URL -Method Post -ContentType 'application/json' -Body $payload | Out-Null
+            echo "Discord notification sent for v$version"
+          } catch {
+            # Don't fail the workflow if Discord is down — release is already on GitHub.
+            echo "::warning::Discord webhook post failed: $_"
+          }

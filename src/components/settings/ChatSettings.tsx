@@ -1,10 +1,14 @@
 import { useAppStore } from '../../stores/AppStore';
 import ColorWheelPicker from '../ColorWheelPicker';
 import HighlightPhrasesSettings from './HighlightPhrasesSettings';
+import BuiltInHighlightsSettings from './BuiltInHighlightsSettings';
+import UserHighlightsSettings from './UserHighlightsSettings';
+import BadgeHighlightsSettings from './BadgeHighlightsSettings';
+import HighlightAppearanceSettings from './HighlightAppearanceSettings';
 import UserOverridesSettings from './UserOverridesSettings';
 import UserCommandsSettings from './UserCommandsSettings';
+import { SettingsSection, SettingsRow, SegmentedSelect } from './_primitives';
 
-// Toggle component for reuse
 const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
   <button
     onClick={onChange}
@@ -21,333 +25,367 @@ const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void 
 const ChatSettings = () => {
   const { settings, updateSettings } = useAppStore();
 
+  const stored = settings.chat_design;
+  const cd = {
+    show_dividers: stored?.show_dividers ?? true,
+    alternating_backgrounds: stored?.alternating_backgrounds ?? false,
+    message_spacing: stored?.message_spacing ?? 2,
+    font_size: stored?.font_size ?? 14,
+    font_weight: stored?.font_weight ?? 400,
+    mention_color: stored?.mention_color ?? '#ff4444',
+    reply_color: stored?.reply_color ?? '#ff6b6b',
+    mention_animation: stored?.mention_animation ?? true,
+    show_timestamps: stored?.show_timestamps ?? false,
+    show_timestamp_seconds: stored?.show_timestamp_seconds ?? false,
+    emote_scale: stored?.emote_scale ?? 1,
+    emote_margin: stored?.emote_margin ?? 0.125,
+    deleted_message_style: stored?.deleted_message_style ?? 'strikethrough',
+    hide_shared_chat: stored?.hide_shared_chat ?? false,
+    paint_mentions_in_body: stored?.paint_mentions_in_body ?? true,
+    compact_emote_tooltips: stored?.compact_emote_tooltips ?? false,
+  };
+
+  const setDesign = (patch: Partial<typeof cd>) => {
+    updateSettings({
+      ...settings,
+      chat_design: { ...cd, ...patch },
+    });
+  };
+
+  const setInput = (patch: Partial<NonNullable<typeof settings.chat_input>>) =>
+    updateSettings({
+      ...settings,
+      chat_input: { ...settings.chat_input, ...patch },
+    });
+
+  const setRender = (patch: Partial<NonNullable<typeof settings.chat_render>>) =>
+    updateSettings({
+      ...settings,
+      chat_render: { ...settings.chat_render, ...patch },
+    });
+
+  const setCosmetics = (patch: Partial<NonNullable<typeof settings.cosmetics>>) =>
+    updateSettings({
+      ...settings,
+      cosmetics: { ...settings.cosmetics, ...patch },
+    });
+
   return (
-    <div className="space-y-6">
-      {/* Chat Placement */}
-      <div>
-        <label className="block text-sm font-medium text-textPrimary mb-2">
-          Chat Placement
-        </label>
-        <div className="flex gap-2">
-          {['right', 'bottom', 'hidden'].map((placement) => (
-            <button
-              key={placement}
-              onClick={() => updateSettings({ ...settings, chat_placement: placement as any })}
-              className={`flex-1 px-4 py-2 text-sm font-medium rounded transition-all ${settings.chat_placement === placement
-                ? 'glass-button text-white'
-                : 'bg-glass text-textSecondary hover:bg-glass-hover'
-                }`}
-            >
-              {placement.charAt(0).toUpperCase() + placement.slice(1)}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs text-textSecondary mt-2">
-          Choose where to display the chat window or hide it completely
-        </p>
-      </div>
+    <div className="space-y-8">
+      <SettingsSection label="Chat Placement">
+        <SettingsRow
+          title="Placement"
+          description="Choose where to display the chat window or hide it completely"
+        >
+          <SegmentedSelect<'right' | 'bottom' | 'hidden'>
+            value={settings.chat_placement as 'right' | 'bottom' | 'hidden'}
+            onChange={(placement) => updateSettings({ ...settings, chat_placement: placement })}
+            options={[
+              { value: 'hidden', label: 'Hidden' },
+              { value: 'bottom', label: 'Bottom' },
+              { value: 'right', label: 'Right' },
+            ]}
+          />
+        </SettingsRow>
+      </SettingsSection>
 
-      {/* Chat Design Section */}
-      <div className="pt-4 border-t border-borderSubtle">
-        <h3 className="text-lg font-semibold text-textPrimary mb-4">Chat Design</h3>
-
-        <div className="space-y-4">
-          {/* Show Dividers */}
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Show Message Dividers</span>
-              <p className="text-xs text-textSecondary">
-                Display subtle lines between chat messages
-              </p>
-            </div>
+      <SettingsSection label="Chat Design">
+        <SettingsRow
+          title="Show Message Dividers"
+          description="Display subtle lines between chat messages"
+          control={
             <Toggle
-              enabled={settings.chat_design?.show_dividers ?? true}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: !(settings.chat_design?.show_dividers ?? true),
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                  },
-                })
-              }
+              enabled={cd.show_dividers ?? true}
+              onChange={() => setDesign({ show_dividers: !(cd.show_dividers ?? true) })}
             />
-          </div>
+          }
+        />
 
-          {/* Alternating Backgrounds */}
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">
-                Alternating Backgrounds
-              </span>
-              <p className="text-xs text-textSecondary">
-                Alternate message background colors using your theme palette
-              </p>
-            </div>
+        <SettingsRow
+          title="Alternating Backgrounds"
+          description="Alternate message background colors using your theme palette"
+          control={
             <Toggle
-              enabled={settings.chat_design?.alternating_backgrounds ?? false}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: !(settings.chat_design?.alternating_backgrounds ?? false),
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                  },
-                })
-              }
+              enabled={cd.alternating_backgrounds ?? false}
+              onChange={() => setDesign({ alternating_backgrounds: !(cd.alternating_backgrounds ?? false) })}
             />
-          </div>
+          }
+        />
 
-          {/* Message Spacing */}
-          <div>
-            <label className="block text-sm font-medium text-textPrimary mb-2">
-              Message Spacing: {settings.chat_design?.message_spacing ?? 2}px
-            </label>
-            <input
-              type="range"
-              min="0"
-              max="20"
-              step="1"
-              value={settings.chat_design?.message_spacing ?? 2}
-              onChange={(e) =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: parseInt(e.target.value),
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                  },
-                })
-              }
-              className="w-full accent-accent cursor-pointer"
-            />
-            <p className="text-xs text-textSecondary mt-1">Space between chat messages</p>
-          </div>
+        <SettingsRow
+          title={`Message Spacing: ${cd.message_spacing ?? 2}px`}
+          description="Space between chat messages"
+        >
+          <input
+            type="range"
+            min="0"
+            max="20"
+            step="1"
+            value={cd.message_spacing ?? 2}
+            onChange={(e) => setDesign({ message_spacing: parseInt(e.target.value) })}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
 
-          {/* Font Size */}
-          <div>
-            <label className="block text-sm font-medium text-textPrimary mb-2">
-              Font Size: {settings.chat_design?.font_size ?? 14}px
-            </label>
-            <input
-              type="range"
-              min="10"
-              max="20"
-              step="1"
-              value={settings.chat_design?.font_size ?? 14}
-              onChange={(e) =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: parseInt(e.target.value),
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                  },
-                })
-              }
-              className="w-full accent-accent cursor-pointer"
-            />
-            <p className="text-xs text-textSecondary mt-1">Chat message text size</p>
-          </div>
+        <SettingsRow
+          title={`Font Size: ${cd.font_size ?? 14}px`}
+          description="Chat message text size"
+        >
+          <input
+            type="range"
+            min="10"
+            max="20"
+            step="1"
+            value={cd.font_size ?? 14}
+            onChange={(e) => setDesign({ font_size: parseInt(e.target.value) })}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
 
-          {/* Font Weight */}
-          <div>
-            <label className="block text-sm font-medium text-textPrimary mb-2">Font Weight</label>
-            <select
-              value={settings.chat_design?.font_weight ?? 400}
-              onChange={(e) =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: parseInt(e.target.value),
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                  },
-                })
-              }
-              className="w-full glass-input text-textPrimary text-sm px-3 py-2"
-            >
-              <option value="300">Light (300)</option>
-              <option value="400">Normal (400)</option>
-              <option value="500">Medium (500)</option>
-              <option value="600">Semi-Bold (600)</option>
-              <option value="700">Bold (700)</option>
-            </select>
-          </div>
+        <SettingsRow
+          title="Font Weight"
+          description="Boldness of chat message text"
+        >
+          <select
+            value={cd.font_weight ?? 400}
+            onChange={(e) => setDesign({ font_weight: parseInt(e.target.value) })}
+            className="w-full glass-input text-textPrimary text-sm px-3 py-2"
+          >
+            <option value="300">Light (300)</option>
+            <option value="400">Normal (400)</option>
+            <option value="500">Medium (500)</option>
+            <option value="600">Semi-Bold (600)</option>
+            <option value="700">Bold (700)</option>
+          </select>
+        </SettingsRow>
 
-          {/* Mention Animation */}
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Mention Animation</span>
-              <p className="text-xs text-textSecondary">
-                Flash animation when you're mentioned or replied to
-              </p>
-            </div>
+        <SettingsRow
+          title="Mention Animation"
+          description="Flash animation when you're mentioned or replied to"
+          control={
             <Toggle
-              enabled={settings.chat_design?.mention_animation ?? true}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: !(settings.chat_design?.mention_animation ?? true),
-                    show_timestamps: settings.chat_design?.show_timestamps ?? false,
-                  },
-                })
-              }
+              enabled={cd.mention_animation ?? true}
+              onChange={() => setDesign({ mention_animation: !(cd.mention_animation ?? true) })}
             />
-          </div>
+          }
+        />
 
-          {/* Show Timestamps */}
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <span className="text-sm font-medium text-textPrimary">Show Timestamps</span>
-              <p className="text-xs text-textSecondary">
-                Display the time each message was sent next to the username
-              </p>
-            </div>
+        <SettingsRow
+          title="Show Timestamps"
+          description="Display the time each message was sent next to the username"
+          control={
             <Toggle
-              enabled={settings.chat_design?.show_timestamps ?? false}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  chat_design: {
-                    ...settings.chat_design,
-                    show_dividers: settings.chat_design?.show_dividers ?? true,
-                    alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                    message_spacing: settings.chat_design?.message_spacing ?? 2,
-                    font_size: settings.chat_design?.font_size ?? 14,
-                    font_weight: settings.chat_design?.font_weight ?? 400,
-                    mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                    reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                    mention_animation: settings.chat_design?.mention_animation ?? true,
-                    show_timestamps: !(settings.chat_design?.show_timestamps ?? false),
-                    show_timestamp_seconds: settings.chat_design?.show_timestamp_seconds ?? false,
-                  },
-                })
+              enabled={cd.show_timestamps ?? false}
+              onChange={() => setDesign({ show_timestamps: !(cd.show_timestamps ?? false) })}
+            />
+          }
+        >
+          {cd.show_timestamps && (
+            <SettingsRow
+              title="Include Seconds"
+              description="Show seconds in timestamps (e.g., 7:42:30 PM instead of 7:42 PM)"
+              control={
+                <Toggle
+                  enabled={cd.show_timestamp_seconds ?? false}
+                  onChange={() => setDesign({ show_timestamp_seconds: !(cd.show_timestamp_seconds ?? false) })}
+                />
               }
             />
-          </div>
-
-          {/* Show Seconds (sub-option, only when timestamps enabled) */}
-          {settings.chat_design?.show_timestamps && (
-            <div className="flex items-center justify-between gap-4 ml-8 border-l-2 border-borderSubtle pl-4">
-              <div>
-                <span className="text-sm font-medium text-textPrimary">Include Seconds</span>
-                <p className="text-xs text-textSecondary">
-                  Show seconds in timestamps (e.g., 7:42:30 PM instead of 7:42 PM)
-                </p>
-              </div>
-              <Toggle
-                enabled={settings.chat_design?.show_timestamp_seconds ?? false}
-                onChange={() =>
-                  updateSettings({
-                    ...settings,
-                    chat_design: {
-                      ...settings.chat_design,
-                      show_dividers: settings.chat_design?.show_dividers ?? true,
-                      alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                      message_spacing: settings.chat_design?.message_spacing ?? 2,
-                      font_size: settings.chat_design?.font_size ?? 14,
-                      font_weight: settings.chat_design?.font_weight ?? 400,
-                      mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                      reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                      mention_animation: settings.chat_design?.mention_animation ?? true,
-                      show_timestamps: settings.chat_design?.show_timestamps ?? false,
-                      show_timestamp_seconds: !(settings.chat_design?.show_timestamp_seconds ?? false),
-                    },
-                  })
-                }
-              />
-            </div>
           )}
+        </SettingsRow>
 
-          {/* Mention Color */}
+        <SettingsRow
+          title="@ Mention Color"
+          description="Color used for messages that mention you"
+        >
           <ColorWheelPicker
-            label="@ Mention Color"
-            color={settings.chat_design?.mention_color ?? '#ff4444'}
-            onChange={(color) =>
-              updateSettings({
-                ...settings,
-                chat_design: {
-                  ...settings.chat_design,
-                  show_dividers: settings.chat_design?.show_dividers ?? true,
-                  alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                  message_spacing: settings.chat_design?.message_spacing ?? 2,
-                  font_size: settings.chat_design?.font_size ?? 14,
-                  font_weight: settings.chat_design?.font_weight ?? 400,
-                  mention_color: color,
-                  reply_color: settings.chat_design?.reply_color ?? '#ff6b6b',
-                  mention_animation: settings.chat_design?.mention_animation ?? true,
-                },
-              })
-            }
+            label=""
+            color={cd.mention_color ?? '#ff4444'}
+            onChange={(color) => setDesign({ mention_color: color })}
           />
+        </SettingsRow>
 
-          {/* Reply Color */}
+        <SettingsRow
+          title="Reply Thread Color"
+          description="Color used for replies in threads"
+        >
           <ColorWheelPicker
-            label="Reply Thread Color"
-            color={settings.chat_design?.reply_color ?? '#ff6b6b'}
-            onChange={(color) =>
-              updateSettings({
-                ...settings,
-                chat_design: {
-                  ...settings.chat_design,
-                  show_dividers: settings.chat_design?.show_dividers ?? true,
-                  alternating_backgrounds: settings.chat_design?.alternating_backgrounds ?? false,
-                  message_spacing: settings.chat_design?.message_spacing ?? 2,
-                  font_size: settings.chat_design?.font_size ?? 14,
-                  font_weight: settings.chat_design?.font_weight ?? 400,
-                  mention_color: settings.chat_design?.mention_color ?? '#ff4444',
-                  reply_color: color,
-                  mention_animation: settings.chat_design?.mention_animation ?? true,
-                },
-              })
-            }
+            label=""
+            color={cd.reply_color ?? '#ff6b6b'}
+            onChange={(color) => setDesign({ reply_color: color })}
           />
-        </div>
-      </div>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection label="Emotes">
+        <SettingsRow
+          title={`Emote Size: ${(cd.emote_scale ?? 1).toFixed(2)}x`}
+          description="Multiplier for inline emote size. 1.00x matches the default."
+        >
+          <input
+            type="range"
+            min="0.5"
+            max="3"
+            step="0.05"
+            value={cd.emote_scale ?? 1}
+            onChange={(e) => setDesign({ emote_scale: parseFloat(e.target.value) })}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={`Emote Spacing: ${(cd.emote_margin ?? 0.125).toFixed(3)}rem`}
+          description="Horizontal space around emotes. Negative values let them overlap for an inline feel."
+        >
+          <input
+            type="range"
+            min="-0.5"
+            max="0.5"
+            step="0.025"
+            value={cd.emote_margin ?? 0.125}
+            onChange={(e) => setDesign({ emote_margin: parseFloat(e.target.value) })}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        label="Chat Input"
+        description="Quality-of-life behavior for the message composer."
+      >
+        <SettingsRow
+          title="Bypass duplicate-message check"
+          description="When you send the same message twice in a row, append an invisible character so Twitch doesn't reject the second send. Useful for repeating an emote."
+          control={
+            <Toggle
+              enabled={settings.chat_input?.bypass_duplicate ?? false}
+              onChange={() => setInput({ bypass_duplicate: !(settings.chat_input?.bypass_duplicate ?? false) })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Quick Send (Ctrl+Enter keeps message)"
+          description="Holding Ctrl while pressing Enter sends the message AND leaves it in the input box so you can re-send fast. Plain Enter still sends and clears like normal."
+          control={
+            <Toggle
+              enabled={settings.chat_input?.quick_send ?? false}
+              onChange={() => setInput({ quick_send: !(settings.chat_input?.quick_send ?? false) })}
+            />
+          }
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        label="Render Style"
+        description="How specific message classes look in chat."
+      >
+        <SettingsRow
+          title="Deleted messages"
+          description="How banned, timed-out, and deleted messages render."
+        >
+          <SegmentedSelect<'strikethrough' | 'dimmed' | 'keep' | 'hidden'>
+            value={cd.deleted_message_style as 'strikethrough' | 'dimmed' | 'keep' | 'hidden'}
+            onChange={(value) => setDesign({ deleted_message_style: value })}
+            options={[
+              { value: 'strikethrough', label: 'Strikethrough' },
+              { value: 'dimmed', label: 'Dimmed' },
+              { value: 'keep', label: 'Keep' },
+              { value: 'hidden', label: 'Hidden' },
+            ]}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title="Hide shared chat messages"
+          description="Suppress messages flagged as coming from another room in a Twitch shared-chat session."
+          control={
+            <Toggle
+              enabled={cd.hide_shared_chat}
+              onChange={() => setDesign({ hide_shared_chat: !cd.hide_shared_chat })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Paint @mentions inline"
+          description="When someone @ mentions a user, render the mentioned name with their 7TV paint. Off renders mentions in their flat color only."
+          control={
+            <Toggle
+              enabled={cd.paint_mentions_in_body}
+              onChange={() => setDesign({ paint_mentions_in_body: !cd.paint_mentions_in_body })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Compact emote tooltips"
+          description='Show just the emote name on hover instead of the full "Right-click to copy" hint.'
+          control={
+            <Toggle
+              enabled={cd.compact_emote_tooltips}
+              onChange={() => setDesign({ compact_emote_tooltips: !cd.compact_emote_tooltips })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Smooth scroll on Resume"
+          description='Animate the scroll when you click the "Resume" button. New-message auto-scroll stays instant.'
+          control={
+            <Toggle
+              enabled={settings.chat_render?.smooth_scroll_on_resume ?? false}
+              onChange={() =>
+                setRender({ smooth_scroll_on_resume: !(settings.chat_render?.smooth_scroll_on_resume ?? false) })
+              }
+            />
+          }
+        />
+
+        <SettingsRow
+          title={`Message buffer: ${settings.chat_render?.message_buffer_cap ?? 100} messages`}
+          description="How many messages to keep in the local scrollback per channel. Higher = more history, more memory."
+        >
+          <input
+            type="range"
+            min="50"
+            max="1000"
+            step="10"
+            value={settings.chat_render?.message_buffer_cap ?? 100}
+            onChange={(e) => setRender({ message_buffer_cap: parseInt(e.target.value, 10) })}
+            className="w-full accent-accent cursor-pointer"
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        label="7TV Cosmetics"
+        description="Visual controls for 7TV-rendered usernames (paints)."
+      >
+        <SettingsRow
+          title="Paint drop shadows"
+          description='Some 7TV paints stack heavy drop shadows for readability. Drop to "One" or "None" if they feel too noisy.'
+        >
+          <SegmentedSelect<'all' | 'one' | 'none'>
+            value={(settings.cosmetics?.paint_shadows ?? 'all') as 'all' | 'one' | 'none'}
+            onChange={(value) => setCosmetics({ paint_shadows: value })}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'one', label: 'One' },
+              { value: 'none', label: 'None' },
+            ]}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <HighlightAppearanceSettings />
 
       <HighlightPhrasesSettings />
+
+      <BuiltInHighlightsSettings />
+
+      <UserHighlightsSettings />
+
+      <BadgeHighlightsSettings />
 
       <UserCommandsSettings />
 

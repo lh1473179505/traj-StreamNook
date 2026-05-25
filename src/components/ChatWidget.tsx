@@ -1582,15 +1582,46 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     initializeSharedChannelBadges();
   }, [messages]);
 
-  const handleSendMessage = async () => {
+  // Per-channel last-sent cache for the bypass-duplicate feature. Keyed by
+  // currentStream user_id so switching channels resets the tracking.
+  const lastSentRef = useRef<Map<string, string>>(new Map());
+  // Invisible Plane-14 tag character that Twitch's duplicate-message detector
+  // ignores but the IRC pipeline accepts. Used to bypass the rejection when
+  // the user opts in. Single char, takes no visual space in chat.
+  const DUPLICATE_BYPASS_SUFFIX = ' \u{E0000}';
+
+  const handleSendMessage = async (opts?: { keepInput?: boolean }) => {
     if ((messageInput.trim() || isWatchStreakMode || isResubMode) && isConnected && currentUser) {
-      const messageToSend = messageInput;
+      const inputSettings = useAppStore.getState().settings.chat_input;
+      const keepInput = !!opts?.keepInput;
+      let messageToSend = messageInput;
+
+      // Bypass duplicate — if this message is identical to the last one we
+      // sent on this channel, append the invisible suffix so Twitch accepts
+      // the second send. Skipped for slash commands (which Twitch doesn't
+      // dedupe) and resub/streak modes (different code path entirely).
+      const channelKey = currentStream?.user_id || '_';
+      if (
+        inputSettings?.bypass_duplicate &&
+        !messageToSend.startsWith('/') &&
+        !isResubMode &&
+        !isWatchStreakMode &&
+        lastSentRef.current.get(channelKey) === messageToSend
+      ) {
+        messageToSend = messageToSend + DUPLICATE_BYPASS_SUFFIX;
+      }
+      // Record what we sent (the original, pre-suffix form) so a third send
+      // of the same text also triggers the bypass.
+      lastSentRef.current.set(channelKey, messageInput);
+
       const replyParentMsgId = replyingTo?.messageId;
-      setMessageInput('');
-      setReplyingTo(null);
-      // Reset textarea height after sending
-      if (inputRef.current) {
-        inputRef.current.style.height = '36px';
+      if (!keepInput) {
+        setMessageInput('');
+        setReplyingTo(null);
+        // Reset textarea height after sending
+        if (inputRef.current) {
+          inputRef.current.style.height = '36px';
+        }
       }
       inputRef.current?.focus({ preventScroll: true });
 
@@ -1827,10 +1858,14 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       }
     }
     
-    // Normal Enter to send message
+    // Normal Enter to send message. Ctrl+Enter is "Quick Send" — sends but
+    // keeps the message in the input box for rapid-fire re-send. Shift+Enter
+    // still inserts a newline (textarea default behavior).
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      const quickSendEnabled = useAppStore.getState().settings.chat_input?.quick_send ?? false;
+      const keepInput = quickSendEnabled && (e.ctrlKey || e.metaKey);
+      handleSendMessage({ keepInput });
     }
   };
 
@@ -3109,8 +3144,8 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                   />
                 </div>
                 <Tooltip content={isWatchStreakMode ? "Share Watch Streak" : "Send message"} side="top">
-                <button 
-                  onClick={handleSendMessage} 
+                <button
+                  onClick={() => handleSendMessage()}
                   disabled={(!messageInput.trim() && !isWatchStreakMode && !isResubMode) || isInputDisabled} 
                   className={`flex-shrink-0 flex items-center justify-center self-center w-9 h-9 text-white rounded transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed ${
                     isWatchStreakMode 

@@ -1,4 +1,4 @@
-import type { HighlightPhrase } from '../types';
+import type { HighlightPhrase, HighlightUser, HighlightBadge } from '../types';
 import type { SoundId } from './notificationSound';
 
 export interface HighlightMatch {
@@ -90,6 +90,56 @@ export function matchHighlightPhrase(
         sound_id: c.sound_id,
         cooldown_ms: c.cooldown_ms,
       };
+    }
+  }
+  return null;
+}
+
+// Match the message's author login against any enabled user-highlight rule.
+// Returns the first match by list order (so the user can prioritize rules).
+export function matchHighlightUser(
+  login: string | null | undefined,
+  users: HighlightUser[] | undefined,
+): HighlightMatch | null {
+  if (!login || !users || users.length === 0) return null;
+  const lowered = login.toLowerCase();
+  for (const u of users) {
+    if (!u.enabled) continue;
+    if (u.username.toLowerCase() === lowered) {
+      return {
+        phrase_id: u.id,
+        color: u.color,
+        sound_id: normalizeSoundId(u.sound_id),
+        cooldown_ms: Math.max(0, (u.cooldown_seconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000),
+      };
+    }
+  }
+  return null;
+}
+
+// Match any of the message's badges against the enabled badge-highlight
+// rules. badge_key in the rule supports a `name/*` form that matches any
+// version of the badge (e.g. "subscriber/*" matches subscriber/0, /3, /24).
+export function matchHighlightBadge(
+  badgeKeys: string[] | null | undefined,
+  badges: HighlightBadge[] | undefined,
+): HighlightMatch | null {
+  if (!badgeKeys || badgeKeys.length === 0 || !badges || badges.length === 0) return null;
+  for (const b of badges) {
+    if (!b.enabled) continue;
+    const key = b.badge_key.toLowerCase();
+    const isWildcard = key.endsWith('/*');
+    const prefix = isWildcard ? key.slice(0, -1) : null; // includes trailing slash
+    for (const userBadge of badgeKeys) {
+      const ub = userBadge.toLowerCase();
+      if (isWildcard ? ub.startsWith(prefix!) : ub === key) {
+        return {
+          phrase_id: b.id,
+          color: b.color,
+          sound_id: normalizeSoundId(b.sound_id),
+          cooldown_ms: Math.max(0, (b.cooldown_seconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000),
+        };
+      }
     }
   }
   return null;

@@ -3,13 +3,16 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore, type WhisperImportProgress } from './stores/AppStore';
 import { useContextMenuStore } from './stores/contextMenuStore';
 import { listenForSettingsUpdates } from './utils/settingsBroadcast';
-import { trackPresence, isSupabaseConfigured, incrementStat, subscribeToStreamNookRegistry } from './services/supabaseService';
+import { trackPresence, isSupabaseConfigured, incrementStat, subscribeToStreamNookRegistry, subscribeToCosmeticsRegistry } from './services/supabaseService';
 import TitleBar from './components/TitleBar';
 import VideoPlayer from './components/VideoPlayer';
 import ChatWidget from './components/ChatWidget';
 import { ModLogsWidget } from './components/chat/ModLogsWidget';
 import Home from './components/Home';
 import SettingsDialog from './components/SettingsDialog';
+import CommandPalette from './components/CommandPalette';
+import { useCommandPaletteHotkey } from './hooks/useCommandPaletteHotkey';
+import { startSnippetSync } from './stores/snippetStore';
 import { usemultiNookStore } from './stores/multiNookStore';
 import { MultiNookView } from './components/multi-nook/MultiNookView';
 import MultiNookChatSwitcher from './components/multi-nook/MultiNookChatSwitcher';
@@ -17,7 +20,6 @@ import LoadingWidget from './components/LoadingWidget';
 import ToastManager from './components/ToastManager';
 import { TooltipManager } from './components/ui/TooltipManager';
 import { Tooltip } from './components/ui/Tooltip';
-import ProfileModal from './components/ProfileModal';
 import { SearchProfileModal } from './components/SearchProfileModal';
 import DropsOverlay from './components/DropsOverlay';
 import BadgesOverlay from './components/BadgesOverlay';
@@ -60,7 +62,25 @@ const DEFAULT_CHAT_WIDTH = 402; // For 'right' placement
 const DEFAULT_CHAT_HEIGHT = 200; // For 'bottom' placement
 
 function App() {
-  const { loadSettings, chatPlacement, isLoading, streamUrl, currentMediaType, checkAuthStatus, showProfileOverlay, setShowProfileOverlay, addToast, showBadgesOverlay, setShowBadgesOverlay, badgesOverlayInitialPaintId, badgesOverlayInitialBadgeId, badgesOverlayInitialStreamNook, showWhispersOverlay, setShowWhispersOverlay, settings, updateSettings, isTheaterMode, isHomeActive, loadActiveDropsCache, profileModalUser, setProfileModalUser } = useAppStore();
+  useCommandPaletteHotkey();
+  useEffect(() => {
+    // Subscribe to snippet-store updates from MultiChat popouts so favoriting
+    // or adding a custom snippet over there propagates here without reload.
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void startSnippetSync().then((u) => {
+      if (cancelled) {
+        u?.();
+        return;
+      }
+      unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  const { loadSettings, chatPlacement, isLoading, streamUrl, currentMediaType, checkAuthStatus, addToast, showBadgesOverlay, setShowBadgesOverlay, badgesOverlayInitialPaintId, badgesOverlayInitialBadgeId, badgesOverlayInitialStreamNook, showWhispersOverlay, setShowWhispersOverlay, settings, updateSettings, isTheaterMode, isHomeActive, loadActiveDropsCache, profileModalUser, setProfileModalUser } = useAppStore();
   // Channels owned by StreamNook MultiChat popouts. When the currently-watched
   // channel is in here, the in-app chat panel collapses so the popout becomes
   // the sole chat surface — no duplicate chat across windows.
@@ -316,8 +336,9 @@ function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
-    const cleanup = subscribeToStreamNookRegistry();
-    return () => { cleanup?.(); };
+    const cleanupRegistry = subscribeToStreamNookRegistry();
+    const cleanupCosmetics = subscribeToCosmeticsRegistry();
+    return () => { cleanupRegistry?.(); cleanupCosmetics?.(); };
   }, []);
 
   useEffect(() => {
@@ -1106,33 +1127,12 @@ function App() {
 
         const bundleStatus = await invoke('check_for_bundle_update') as BundleUpdateStatus;
 
-        if (bundleStatus.update_available) {
-          const { addToast, openSettings, settings: currentSettings } = useAppStore.getState();
-
-          // Check if auto-update is enabled
-          if (currentSettings.auto_update_on_start) {
-            addToast(
-              `Update available! v${bundleStatus.current_version} → v${bundleStatus.latest_version}. Auto-updating...`,
-              'info'
-            );
-            // Auto-update will be triggered by the backend
-            try {
-              await invoke('download_and_install_bundle');
-            } catch (e) {
-              Logger.error('Auto-update failed:', e);
-              addToast(`Auto-update failed: ${e}`, 'error');
-            }
-          } else {
-            addToast(
-              `StreamNook update available! v${bundleStatus.current_version} → v${bundleStatus.latest_version}`,
-              'info',
-              {
-                label: 'Update',
-                onClick: () => openSettings('Updates')
-              }
-            );
-          }
-        }
+        const { setUpdateInfo } = useAppStore.getState();
+        setUpdateInfo(
+          bundleStatus.update_available
+            ? { current_version: bundleStatus.current_version, latest_version: bundleStatus.latest_version }
+            : null
+        );
       } catch (error) {
         Logger.error('Failed to check for bundle updates:', error);
       }
@@ -1401,11 +1401,7 @@ function App() {
       </div>
       <SettingsDialog />
       <DropsOverlay />
-      <ProfileModal
-        isOpen={showProfileOverlay}
-        onClose={() => setShowProfileOverlay(false)}
-      />
-      
+
       {profileModalUser && (
         <SearchProfileModal
           user={profileModalUser}
@@ -1453,6 +1449,7 @@ function App() {
       <StreamlinkMissingDialog />
       <ToastManager />
       <TooltipManager />
+      <CommandPalette />
       <StreamContextMenu />
     </div>
   );

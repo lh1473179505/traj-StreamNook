@@ -1,13 +1,35 @@
 import { open } from '@tauri-apps/plugin-dialog';
-import { FolderOpen, X } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronRight,
+  FolderOpen,
+  HardDrive,
+  Package,
+} from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/AppStore';
 import ProxyHealthChecker from './ProxyHealthChecker';
-import { Tooltip } from '../ui/Tooltip';
+import { SettingsSection, SettingsRow, SegmentedSelect } from './_primitives';
 
 import { Logger } from '../../utils/logger';
 
+interface StreamlinkValidation {
+  resolved_path: string;
+  exists: boolean;
+  version: string | null;
+  error: string | null;
+}
 
-// Toggle component for reuse
+interface DetectedStreamlinkInstall {
+  label: string;
+  path: string;
+  version: string | null;
+  is_bundled: boolean;
+}
+
+
 const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
   <button
     onClick={onChange}
@@ -24,7 +46,6 @@ const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void 
 const PlayerSettings = () => {
   const { settings, updateSettings } = useAppStore();
 
-  // Default values for streamlink settings
   const streamlinkDefaults = {
     low_latency_enabled: true,
     hls_live_edge: 3,
@@ -42,13 +63,56 @@ const PlayerSettings = () => {
   };
 
   const streamlink = settings.streamlink || streamlinkDefaults;
+  const autoSwitch = settings.auto_switch;
+  const autoSwitchEnabled = autoSwitch?.enabled ?? true;
+  const autoSwitchMode = autoSwitch?.mode ?? 'same_category';
+  const autoSwitchNotification = autoSwitch?.show_notification ?? true;
+  const autoSwitchRaid = autoSwitch?.auto_redirect_on_raid ?? true;
+  const autoSwitchOfflineChat = autoSwitch?.stay_in_offline_chat ?? false;
+  const videoPlayer = settings.video_player;
+
+  const [validation, setValidation] = useState<StreamlinkValidation | null>(null);
+  const [detectedInstalls, setDetectedInstalls] = useState<DetectedStreamlinkInstall[] | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const runValidation = useCallback(async (path: string | undefined) => {
+    try {
+      const result = await invoke<StreamlinkValidation>('validate_streamlink_install', {
+        path: path || null,
+      });
+      setValidation(result);
+    } catch (e) {
+      Logger.error('Failed to validate Streamlink install:', e);
+      setValidation({ resolved_path: '', exists: false, version: null, error: String(e) });
+    }
+  }, []);
+
+  useEffect(() => {
+    runValidation(streamlink.custom_streamlink_path);
+  }, [streamlink.custom_streamlink_path, runValidation]);
+
+  useEffect(() => {
+    if (validation && (validation.error || !validation.exists)) {
+      setAdvancedOpen(true);
+    }
+  }, [validation]);
+
+  useEffect(() => {
+    if (!advancedOpen || detectedInstalls !== null) return;
+    invoke<DetectedStreamlinkInstall[]>('detect_streamlink_installs')
+      .then(setDetectedInstalls)
+      .catch((e) => {
+        Logger.error('Failed to detect Streamlink installs:', e);
+        setDetectedInstalls([]);
+      });
+  }, [advancedOpen, detectedInstalls]);
 
   const handleSelectStreamlinkFolder = async () => {
     try {
       const selected = await open({
-        directory: true,
         multiple: false,
-        title: 'Select Streamlink Folder',
+        filters: [{ name: 'Streamlink executable', extensions: ['exe'] }],
+        title: 'Select Streamlink executable (streamlinkw.exe or streamlink.exe)',
       });
 
       if (selected && typeof selected === 'string') {
@@ -58,8 +122,18 @@ const PlayerSettings = () => {
         });
       }
     } catch (error) {
-      Logger.error('Failed to open folder picker:', error);
+      Logger.error('Failed to open file picker:', error);
     }
+  };
+
+  const handleSelectInstall = (install: DetectedStreamlinkInstall) => {
+    updateSettings({
+      ...settings,
+      streamlink: {
+        ...streamlink,
+        custom_streamlink_path: install.is_bundled ? undefined : install.path,
+      },
+    });
   };
 
   const handleClearStreamlinkPath = () => {
@@ -69,294 +143,283 @@ const PlayerSettings = () => {
     });
   };
 
+  const setAutoSwitch = (patch: Partial<NonNullable<typeof autoSwitch>>) => {
+    updateSettings({
+      ...settings,
+      auto_switch: {
+        enabled: autoSwitchEnabled,
+        mode: autoSwitchMode,
+        show_notification: autoSwitchNotification,
+        auto_redirect_on_raid: autoSwitchRaid,
+        stay_in_offline_chat: autoSwitchOfflineChat,
+        ...patch,
+      },
+    });
+  };
+
   return (
-    <div className="space-y-6">
-      <div className="mb-4">
-        <p className="text-sm text-textSecondary">
-          Most player controls (volume, quality, playback speed) are now available directly in the video player.
-          These settings control advanced streaming behavior.
-        </p>
-      </div>
+    <div className="space-y-8">
+      <p className="text-sm text-textSecondary px-1">
+        Most player controls (volume, quality, playback speed) are available directly in the video player.
+        These settings control advanced streaming behavior.
+      </p>
 
-      {/* Auto-Switch Settings */}
-      <div id="settings-section-auto-switch">
-        <h3 className="text-lg font-semibold text-textPrimary border-b border-borderColor pb-2 mb-4">
-          Auto-Switch
-        </h3>
-        <p className="text-xs text-textSecondary mb-4">
-          When a stream goes offline, automatically switch to another stream.
-        </p>
-
-        <div className="space-y-4">
-          {/* Enable Auto-Switch */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="text-sm font-medium text-textPrimary">
-                Enable Auto-Switch
-              </label>
-              <p className="text-xs text-textSecondary">
-                Automatically switch when current stream goes offline
-              </p>
-            </div>
+      <SettingsSection
+        id="settings-section-auto-switch"
+        label="Auto-Switch"
+        description="When a stream goes offline, automatically switch to another stream."
+      >
+        <SettingsRow
+          title="Enable Auto-Switch"
+          description="Automatically switch when current stream goes offline"
+          control={
             <Toggle
-              enabled={settings.auto_switch?.enabled ?? true}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  auto_switch: {
-                    enabled: !(settings.auto_switch?.enabled ?? true),
-                    mode: settings.auto_switch?.mode ?? 'same_category',
-                    show_notification: settings.auto_switch?.show_notification ?? true,
-                    auto_redirect_on_raid: settings.auto_switch?.auto_redirect_on_raid ?? true,
-                  },
-                })
-              }
+              enabled={autoSwitchEnabled}
+              onChange={() => setAutoSwitch({ enabled: !autoSwitchEnabled })}
             />
-          </div>
+          }
+        />
 
-          {/* Switch Mode */}
-          <div className={`${!(settings.auto_switch?.enabled ?? true) ? 'opacity-50 pointer-events-none' : ''}`}>
-            <label className="text-sm font-medium text-textPrimary mb-2 block">
-              Switch To
-            </label>
-            <p className="text-xs text-textSecondary mb-2">
-              Choose where to auto-switch when stream goes offline
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() =>
-                  updateSettings({
-                    ...settings,
-                    auto_switch: {
-                      enabled: settings.auto_switch?.enabled ?? true,
-                      mode: 'same_category',
-                      show_notification: settings.auto_switch?.show_notification ?? true,
-                      auto_redirect_on_raid: settings.auto_switch?.auto_redirect_on_raid ?? true,
-                    },
-                  })
-                }
-                className={`flex-1 px-4 py-2 text-sm font-medium rounded transition-all ${(settings.auto_switch?.mode ?? 'same_category') === 'same_category'
-                  ? 'glass-button text-white'
-                  : 'bg-glass text-textSecondary hover:bg-glass-hover'
-                  }`}
+        <SettingsRow
+          title="Switch To"
+          description={
+            autoSwitchMode === 'same_category'
+              ? 'Switch to the highest viewer stream in the same game/category'
+              : 'Switch to one of your live followed streamers'
+          }
+          disabled={!autoSwitchEnabled}
+        >
+          <SegmentedSelect
+            value={autoSwitchMode}
+            onChange={(mode) => setAutoSwitch({ mode })}
+            options={[
+              { value: 'same_category', label: 'Same Category' },
+              { value: 'followed_streams', label: 'Followed Streams' },
+            ]}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title="Show Notification"
+          description="Display a toast when auto-switching streams"
+          disabled={!autoSwitchEnabled}
+          control={
+            <Toggle
+              enabled={autoSwitchNotification}
+              onChange={() => setAutoSwitch({ show_notification: !autoSwitchNotification })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Auto-Redirect on Raid"
+          description="Automatically follow raids to the target channel (requires login)"
+          control={
+            <Toggle
+              enabled={autoSwitchRaid}
+              onChange={() => setAutoSwitch({ auto_redirect_on_raid: !autoSwitchRaid })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Stay in Offline Chat"
+          description="Don't auto-switch when stream ends, stay in the chat room instead"
+          control={
+            <Toggle
+              enabled={autoSwitchOfflineChat}
+              onChange={() => setAutoSwitch({ stay_in_offline_chat: !autoSwitchOfflineChat })}
+            />
+          }
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        id="settings-section-streamlink-location"
+        label="Streamlink"
+        bare
+      >
+        {validation && (!validation.exists || validation.error) && (
+          <div className="glass-panel rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-red-500/10 flex-shrink-0">
+                <AlertTriangle size={16} className="text-red-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-textPrimary">Streamlink isn't responding</p>
+                <p className="text-xs text-textSecondary mt-1.5 break-words font-mono leading-relaxed">
+                  {validation.error || `Not found at: ${validation.resolved_path}`}
+                </p>
+                <p className="text-xs text-textSecondary mt-2">
+                  Pick a different install below, or reinstall StreamNook to repair the bundled copy.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {streamlink.custom_streamlink_path && validation && !validation.error && validation.exists && (
+          <div className="glass-panel rounded-lg p-3 flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-accent/10 flex-shrink-0">
+              <CheckCircle2 size={16} className="text-accent" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-[10px] font-semibold text-textSecondary uppercase tracking-wider">
+                  Custom install
+                </p>
+                {validation.version && (
+                  <span className="glass-badge px-2 py-0.5 text-[10px] text-textSecondary rounded-full">
+                    {validation.version.replace(/^streamlink\s+/i, 'v')}
+                  </span>
+                )}
+              </div>
+              <p
+                className="text-xs text-textPrimary truncate font-mono mt-0.5"
+                title={validation.resolved_path}
               >
-                Same Category
-              </button>
-              <button
-                onClick={() =>
-                  updateSettings({
-                    ...settings,
-                    auto_switch: {
-                      enabled: settings.auto_switch?.enabled ?? true,
-                      mode: 'followed_streams',
-                      show_notification: settings.auto_switch?.show_notification ?? true,
-                      auto_redirect_on_raid: settings.auto_switch?.auto_redirect_on_raid ?? true,
-                    },
-                  })
-                }
-                className={`flex-1 px-4 py-2 text-sm font-medium rounded transition-all ${settings.auto_switch?.mode === 'followed_streams'
-                  ? 'glass-button text-white'
-                  : 'bg-glass text-textSecondary hover:bg-glass-hover'
-                  }`}
-              >
-                Followed Streams
-              </button>
-            </div>
-            <p className="text-xs text-textSecondary mt-2">
-              {(settings.auto_switch?.mode ?? 'same_category') === 'same_category'
-                ? 'Switch to the highest viewer stream in the same game/category'
-                : 'Switch to one of your live followed streamers'}
-            </p>
-          </div>
-
-          {/* Show Notification */}
-          <div className={`flex items-center justify-between ${!(settings.auto_switch?.enabled ?? true) ? 'opacity-50 pointer-events-none' : ''}`}>
-            <div>
-              <label className="text-sm font-medium text-textPrimary">
-                Show Notification
-              </label>
-              <p className="text-xs text-textSecondary">
-                Display a toast when auto-switching streams
+                {validation.resolved_path}
               </p>
-            </div>
-            <Toggle
-              enabled={settings.auto_switch?.show_notification ?? true}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  auto_switch: {
-                    enabled: settings.auto_switch?.enabled ?? true,
-                    mode: settings.auto_switch?.mode ?? 'same_category',
-                    show_notification: !(settings.auto_switch?.show_notification ?? true),
-                    auto_redirect_on_raid: settings.auto_switch?.auto_redirect_on_raid ?? true,
-                  },
-                })
-              }
-            />
-          </div>
-
-          {/* Auto-Redirect on Raid */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="text-sm font-medium text-textPrimary">
-                Auto-Redirect on Raid
-              </label>
-              <p className="text-xs text-textSecondary">
-                Automatically follow raids to the target channel (requires login)
-              </p>
-            </div>
-            <Toggle
-              enabled={settings.auto_switch?.auto_redirect_on_raid ?? true}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  auto_switch: {
-                    ...settings.auto_switch,
-                    enabled: settings.auto_switch?.enabled ?? true,
-                    mode: settings.auto_switch?.mode ?? 'same_category',
-                    show_notification: settings.auto_switch?.show_notification ?? true,
-                    auto_redirect_on_raid: !(settings.auto_switch?.auto_redirect_on_raid ?? true),
-                  },
-                })
-              }
-            />
-          </div>
-
-          {/* Stay in Offline Chat */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="text-sm font-medium text-textPrimary">
-                Stay in Offline Chat
-              </label>
-              <p className="text-xs text-textSecondary">
-                Don't auto-switch when stream ends, stay in the chat room instead
-              </p>
-            </div>
-            <Toggle
-              enabled={settings.auto_switch?.stay_in_offline_chat ?? false}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  auto_switch: {
-                    ...settings.auto_switch,
-                    enabled: settings.auto_switch?.enabled ?? true,
-                    mode: settings.auto_switch?.mode ?? 'same_category',
-                    show_notification: settings.auto_switch?.show_notification ?? true,
-                    stay_in_offline_chat: !(settings.auto_switch?.stay_in_offline_chat ?? false),
-                  },
-                })
-              }
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Custom Streamlink Location */}
-      <div id="settings-section-streamlink-location" className="space-y-4">
-        <h3 className="text-lg font-semibold text-textPrimary border-b border-borderColor pb-2">
-          Custom Streamlink Location
-        </h3>
-        <p className="text-xs text-textSecondary">
-          If the bundled Streamlink is missing or you prefer to use your own installation,
-          select your Streamlink folder here. We'll automatically find plugins in this folder
-          or in your AppData (for installed versions).
-        </p>
-
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Streamlink Folder Path
-          </label>
-          <div className="flex gap-2">
-            <div className="flex-1 relative">
-              <input
-                type="text"
-                value={streamlink.custom_streamlink_path || ''}
-                readOnly
-                placeholder="Using bundled Streamlink (default)"
-                className="w-full glass-input text-textPrimary text-sm px-3 py-2 pr-10"
-              />
-              {streamlink.custom_streamlink_path && (
-                <Tooltip content="Clear custom path" side="top">
-                <button
-                  onClick={handleClearStreamlinkPath}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-textSecondary hover:text-red-400 transition-colors"
-                >
-                  <X size={16} />
-                </button>
-                </Tooltip>
-              )}
             </div>
             <button
-              onClick={handleSelectStreamlinkFolder}
-              className="px-4 py-2 glass-button text-white text-sm font-medium rounded flex items-center gap-2"
+              onClick={handleClearStreamlinkPath}
+              className="glass-button px-3 py-1.5 text-xs text-textPrimary rounded flex-shrink-0"
             >
-              <FolderOpen size={16} />
-              Browse
+              Use bundled
             </button>
           </div>
-          <p className="text-xs text-textSecondary mt-2">
-            {streamlink.custom_streamlink_path
-              ? `Looking for executable at: ${streamlink.custom_streamlink_path}/bin/streamlinkw.exe`
-              : 'Leave empty to use the bundled Streamlink that comes with StreamNook.'}
-          </p>
-          <div className="mt-2 p-3 bg-glass rounded-lg">
-            <p className="text-xs text-textSecondary">
-              <strong className="text-textPrimary">Plugin Search Order:</strong>
+        )}
+
+        <details
+          open={advancedOpen}
+          onToggle={(e) => setAdvancedOpen((e.currentTarget as HTMLDetailsElement).open)}
+          className="group glass-panel px-4 py-2"
+        >
+          <summary className="cursor-pointer list-none flex items-center gap-1.5 py-1 text-sm font-medium text-textSecondary hover:text-textPrimary select-none transition-colors">
+            <ChevronRight size={14} className="transition-transform group-open:rotate-90" />
+            Advanced
+          </summary>
+          <div className="mt-3 space-y-3 pb-2">
+            <p className="text-xs text-textSecondary leading-relaxed">
+              Most users don't need to change this. Use a different Streamlink install only if you maintain your own.
             </p>
-            <ol className="text-xs text-textSecondary mt-1 list-decimal list-inside space-y-1">
-              <li>Custom folder plugins (for Portable versions): <code className="text-accent">&lt;custom_path&gt;/plugins</code></li>
-              <li>AppData plugins (for Installed versions): <code className="text-accent">%APPDATA%/streamlink/plugins</code></li>
-              <li>Bundled plugins: <code className="text-accent">&lt;app_dir&gt;/streamlink/plugins</code></li>
-            </ol>
+
+            {detectedInstalls === null ? (
+              <div className="rounded-lg p-4 text-center bg-glass">
+                <p className="text-xs text-textSecondary italic">Scanning for installs...</p>
+              </div>
+            ) : detectedInstalls.length === 0 ? (
+              <div className="rounded-lg p-5 text-center bg-glass">
+                <Package size={20} className="text-textSecondary/40 mx-auto mb-2" />
+                <p className="text-xs text-textSecondary">No Streamlink installs detected on this system.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {detectedInstalls.map((install) => {
+                  const isSelected = install.is_bundled
+                    ? !streamlink.custom_streamlink_path
+                    : streamlink.custom_streamlink_path === install.path;
+                  const Icon = install.is_bundled ? Package : HardDrive;
+                  return (
+                    <button
+                      key={install.path}
+                      onClick={() => handleSelectInstall(install)}
+                      className={`w-full rounded-lg p-3 text-left transition-all bg-glass ${
+                        isSelected ? 'ring-1 ring-accent/40' : 'hover:bg-glass-hover'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`p-2 rounded-lg flex-shrink-0 transition-colors ${
+                            isSelected ? 'bg-accent/15' : 'bg-glass'
+                          }`}
+                        >
+                          <Icon
+                            size={14}
+                            className={isSelected ? 'text-accent' : 'text-textSecondary'}
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-textPrimary">{install.label}</p>
+                            {install.version && (
+                              <span className="glass-badge px-1.5 py-0.5 text-[10px] text-textSecondary rounded-full">
+                                {install.version.replace(/^streamlink\s+/i, 'v')}
+                              </span>
+                            )}
+                          </div>
+                          <p
+                            className="text-xs text-textSecondary truncate font-mono mt-0.5"
+                            title={install.path}
+                          >
+                            {install.path}
+                          </p>
+                        </div>
+                        <div
+                          className={`mt-1 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors ${
+                            isSelected ? 'border-accent' : 'border-textSecondary/40'
+                          }`}
+                        >
+                          {isSelected && <div className="w-2 h-2 rounded-full bg-accent" />}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={handleSelectStreamlinkFolder}
+              className="glass-button px-3 py-2 text-xs text-textPrimary rounded flex items-center gap-2"
+            >
+              <FolderOpen size={14} />
+              Browse for a different install
+            </button>
           </div>
-        </div>
-      </div>
+        </details>
+      </SettingsSection>
 
-      {/* Streamlink Optimization Settings */}
-      <div id="settings-section-streamlink-optimization" className="space-y-4">
-        <h3 className="text-lg font-semibold text-textPrimary border-b border-borderColor pb-2">
-          Streamlink Optimization
-        </h3>
+      <SettingsSection
+        id="settings-section-streamlink-optimization"
+        label="Streamlink Optimization"
+      >
+        <SettingsRow
+          title="Twitch Low Latency Mode"
+          description="Uses Twitch's low latency streaming (forces --twitch-low-latency)"
+          control={
+            <Toggle
+              enabled={streamlink.low_latency_enabled}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  streamlink: { ...streamlink, low_latency_enabled: !streamlink.low_latency_enabled },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Twitch Low Latency */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Twitch Low Latency Mode</span>
-            <p className="text-xs text-textSecondary">Uses Twitch's low latency streaming (forces --twitch-low-latency)</p>
-          </div>
-          <Toggle
-            enabled={streamlink.low_latency_enabled}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, low_latency_enabled: !streamlink.low_latency_enabled },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Allow h265 + AV1 codecs"
+          description="Request AV1 and HEVC stream variants in addition to h264. Some Twitch channels ship more efficient encodings at the same resolution. Turn off if you see decode errors on older hardware."
+          control={
+            <Toggle
+              enabled={streamlink.enhanced_codecs ?? true}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  streamlink: { ...streamlink, enhanced_codecs: !(streamlink.enhanced_codecs ?? true) },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Modern codecs (h265 + AV1) */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Allow h265 + AV1 codecs</span>
-            <p className="text-xs text-textSecondary">Request AV1 and HEVC stream variants in addition to h264. Some Twitch channels ship more efficient encodings at the same resolution. Turn off if you see decode errors on older hardware.</p>
-          </div>
-          <Toggle
-            enabled={streamlink.enhanced_codecs ?? true}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, enhanced_codecs: !(streamlink.enhanced_codecs ?? true) },
-              })
-            }
-          />
-        </div>
-
-        {/* HLS Live Edge */}
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            HLS Live Edge: {streamlink.hls_live_edge} segments
-          </label>
+        <SettingsRow
+          title={`HLS Live Edge: ${streamlink.hls_live_edge} segments`}
+          description="How many segments from the live edge to stay (lower = less latency, less stability)"
+        >
           <input
             type="range"
             min="1"
@@ -371,16 +434,12 @@ const PlayerSettings = () => {
             }
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            How many segments from the live edge to stay (lower = less latency, less stability)
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Stream Timeout */}
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Stream Timeout: {streamlink.stream_timeout}s
-          </label>
+        <SettingsRow
+          title={`Stream Timeout: ${streamlink.stream_timeout}s`}
+          description="How long to wait for stream response before timing out"
+        >
           <input
             type="range"
             min="30"
@@ -395,16 +454,12 @@ const PlayerSettings = () => {
             }
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            How long to wait for stream response before timing out
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Retry Streams */}
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Auto-Retry Count: {streamlink.retry_streams}
-          </label>
+        <SettingsRow
+          title={`Auto-Retry Count: ${streamlink.retry_streams}`}
+          description="Number of times to automatically retry on stream errors (0 = no retry)"
+        >
           <input
             type="range"
             min="0"
@@ -419,171 +474,154 @@ const PlayerSettings = () => {
             }
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            Number of times to automatically retry on stream errors (0 = no retry)
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Disable Hosting */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Disable Hosting</span>
-            <p className="text-xs text-textSecondary">Skip streams that are hosting other channels</p>
-          </div>
-          <Toggle
-            enabled={streamlink.disable_hosting}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, disable_hosting: !streamlink.disable_hosting },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Disable Hosting"
+          description="Skip streams that are hosting other channels"
+          control={
+            <Toggle
+              enabled={streamlink.disable_hosting}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  streamlink: { ...streamlink, disable_hosting: !streamlink.disable_hosting },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Use Proxy */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Use Proxy Routing</span>
-            <p className="text-xs text-textSecondary">Route playlists through CDN proxies (recommended for ad-blocking)</p>
-          </div>
-          <Toggle
-            enabled={streamlink.use_proxy}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, use_proxy: !streamlink.use_proxy },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Use Proxy Routing"
+          description="Route playlists through CDN proxies (recommended for ad-blocking)"
+          control={
+            <Toggle
+              enabled={streamlink.use_proxy}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  streamlink: { ...streamlink, use_proxy: !streamlink.use_proxy },
+                })
+              }
+            />
+          }
+        >
+          {streamlink.use_proxy && (
+            <div className="space-y-4">
+              <ProxyHealthChecker />
 
-        {/* Proxy Health Checker & Settings */}
-        {streamlink.use_proxy && (
-          <div className="space-y-4">
-            {/* Proxy Health Checker */}
-            <ProxyHealthChecker />
-            
-            {/* Advanced: Manual Proxy Args */}
-            <details className="group">
-              <summary className="cursor-pointer text-sm font-medium text-textSecondary hover:text-textPrimary transition-colors flex items-center gap-2">
-                <span className="transform transition-transform group-open:rotate-90">▶</span>
-                Advanced: Manual Proxy Configuration
-              </summary>
-              <div className="mt-3 p-3 bg-glass rounded-lg">
-                <label className="block text-sm font-medium text-textPrimary mb-2">
-                  Proxy Arguments
-                </label>
-                <input
-                  type="text"
-                  value={streamlink.proxy_playlist}
-                  onChange={(e) =>
-                    updateSettings({
-                      ...settings,
-                      streamlink: { ...streamlink, proxy_playlist: e.target.value },
-                    })
-                  }
-                  className="w-full glass-input text-textPrimary text-sm px-3 py-2 font-mono"
-                  placeholder="--twitch-proxy-playlist=https://..."
-                />
-                <p className="text-xs text-textSecondary mt-1">
-                  Custom proxy playlist arguments. Use the health checker above to auto-generate optimal settings,
-                  or manually specify proxy URLs here.
-                </p>
-              </div>
-            </details>
-          </div>
-        )}
+              <details className="group">
+                <summary className="cursor-pointer text-sm font-medium text-textSecondary hover:text-textPrimary transition-colors flex items-center gap-2">
+                  <span className="transform transition-transform group-open:rotate-90">▶</span>
+                  Advanced: Manual Proxy Configuration
+                </summary>
+                <div className="mt-3 p-3 bg-glass rounded-lg">
+                  <label className="block text-sm font-medium text-textPrimary mb-2">
+                    Proxy Arguments
+                  </label>
+                  <input
+                    type="text"
+                    value={streamlink.proxy_playlist}
+                    onChange={(e) =>
+                      updateSettings({
+                        ...settings,
+                        streamlink: { ...streamlink, proxy_playlist: e.target.value },
+                      })
+                    }
+                    className="w-full glass-input text-textPrimary text-sm px-3 py-2 font-mono"
+                    placeholder="--twitch-proxy-playlist=https://..."
+                  />
+                  <p className="text-xs text-textSecondary mt-1">
+                    Custom proxy playlist arguments. Use the health checker above to auto-generate optimal settings,
+                    or manually specify proxy URLs here.
+                  </p>
+                </div>
+              </details>
+            </div>
+          )}
+        </SettingsRow>
 
-        {/* Skip SSL Verify */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Skip SSL Verification</span>
-            <p className="text-xs text-textSecondary">⚠️ Only enable if you have connection issues (not recommended)</p>
-          </div>
-          <Toggle
-            enabled={streamlink.skip_ssl_verify}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                streamlink: { ...streamlink, skip_ssl_verify: !streamlink.skip_ssl_verify },
-              })
-            }
-          />
-        </div>
-      </div>
+        <SettingsRow
+          title="Skip SSL Verification"
+          description="Only enable if you have connection issues (not recommended)"
+          control={
+            <Toggle
+              enabled={streamlink.skip_ssl_verify}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  streamlink: { ...streamlink, skip_ssl_verify: !streamlink.skip_ssl_verify },
+                })
+              }
+            />
+          }
+        />
+      </SettingsSection>
 
-      {/* Video Player Settings */}
-      <div id="settings-section-video-player" className="space-y-4">
-        <h3 className="text-lg font-semibold text-textPrimary border-b border-borderColor pb-2 mt-6">
-          Video Player
-        </h3>
-        {/* Autoplay */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Autoplay</span>
-            <p className="text-xs text-textSecondary">Automatically play stream when loaded</p>
-          </div>
-          <Toggle
-            enabled={settings.video_player?.autoplay ?? true}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                video_player: { ...settings.video_player, autoplay: !(settings.video_player?.autoplay ?? true) },
-              })
-            }
-          />
-        </div>
+      <SettingsSection
+        id="settings-section-video-player"
+        label="Video Player"
+      >
+        <SettingsRow
+          title="Autoplay"
+          description="Automatically play stream when loaded"
+          control={
+            <Toggle
+              enabled={videoPlayer?.autoplay ?? true}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  video_player: { ...videoPlayer, autoplay: !(videoPlayer?.autoplay ?? true) },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Low Latency Mode */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Low Latency Mode</span>
-            <p className="text-xs text-textSecondary">Reduce stream delay for live content (may affect stability)</p>
-          </div>
-          <Toggle
-            enabled={settings.video_player?.low_latency_mode ?? true}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                video_player: { ...settings.video_player, low_latency_mode: !(settings.video_player?.low_latency_mode ?? true) },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Low Latency Mode"
+          description="Reduce stream delay for live content (may affect stability)"
+          control={
+            <Toggle
+              enabled={videoPlayer?.low_latency_mode ?? true}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  video_player: { ...videoPlayer, low_latency_mode: !(videoPlayer?.low_latency_mode ?? true) },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Max Buffer Length */}
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Max Buffer Length: {settings.video_player?.max_buffer_length ?? 120}s
-          </label>
+        <SettingsRow
+          title={`Max Buffer Length: ${videoPlayer?.max_buffer_length ?? 120}s`}
+          description="Maximum amount of video to buffer ahead (higher = more stable, but more delay)"
+        >
           <input
             type="range"
             min="3"
             max="300"
             step="1"
-            value={settings.video_player?.max_buffer_length ?? 120}
+            value={videoPlayer?.max_buffer_length ?? 120}
             onChange={(e) =>
               updateSettings({
                 ...settings,
                 video_player: {
-                  ...settings.video_player,
+                  ...videoPlayer,
                   max_buffer_length: parseInt(e.target.value),
                 },
               })
             }
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            Maximum amount of video to buffer ahead (higher = more stable, but more delay)
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Stream Quality */}
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Default Stream Quality
-          </label>
+        <SettingsRow
+          title="Default Stream Quality"
+          description="Quality to use when starting streams (you can change quality anytime using the player controls)"
+        >
           <select
             value={settings.quality}
             onChange={(e) =>
@@ -597,7 +635,7 @@ const PlayerSettings = () => {
             {/* Quality strings match Twitch's player UI. The Rust closest-match
                 picker + equivalence rule reconcile naming with whatever string
                 Streamlink actually returns for the channel (`480p` vs `480p30`
-                etc. — both show up in the wild). */}
+                etc., both show up in the wild). */}
             <option value="best">Auto (Source)</option>
             <option value="1440p60">1440p60</option>
             <option value="1080p60">1080p60</option>
@@ -607,68 +645,60 @@ const PlayerSettings = () => {
             <option value="160p30">160p30</option>
             <option value="audio_only">Audio Only</option>
           </select>
-          <p className="text-xs text-textSecondary mt-1">
-            Quality to use when starting streams (you can change quality anytime using the player controls)
-          </p>
-        </div>
+        </SettingsRow>
 
-        {/* Lock Aspect Ratio */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Lock Aspect Ratio (16:9)</span>
-            <p className="text-xs text-textSecondary">Prevent letterboxing by constraining window resize to maintain video aspect ratio</p>
-          </div>
-          <Toggle
-            enabled={settings.video_player?.lock_aspect_ratio ?? false}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                video_player: { ...settings.video_player, lock_aspect_ratio: !(settings.video_player?.lock_aspect_ratio ?? false) },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Lock Aspect Ratio (16:9)"
+          description="Prevent letterboxing by constraining window resize to maintain video aspect ratio"
+          control={
+            <Toggle
+              enabled={videoPlayer?.lock_aspect_ratio ?? false}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  video_player: { ...videoPlayer, lock_aspect_ratio: !(videoPlayer?.lock_aspect_ratio ?? false) },
+                })
+              }
+            />
+          }
+        />
 
-        {/* Default Volume and Muted - Kept for initial state */}
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <span className="text-sm font-medium text-textPrimary">Start Muted</span>
-            <p className="text-xs text-textSecondary">Begin playback with audio muted</p>
-          </div>
-          <Toggle
-            enabled={settings.video_player?.muted ?? false}
-            onChange={() =>
-              updateSettings({
-                ...settings,
-                video_player: { ...settings.video_player, muted: !(settings.video_player?.muted ?? false) },
-              })
-            }
-          />
-        </div>
+        <SettingsRow
+          title="Start Muted"
+          description="Begin playback with audio muted"
+          control={
+            <Toggle
+              enabled={videoPlayer?.muted ?? false}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  video_player: { ...videoPlayer, muted: !(videoPlayer?.muted ?? false) },
+                })
+              }
+            />
+          }
+        />
 
-        <div>
-          <label className="block text-sm font-medium text-textPrimary mb-2">
-            Default Volume: {Math.round((settings.video_player?.volume ?? 1.0) * 100)}%
-          </label>
+        <SettingsRow
+          title={`Default Volume: ${Math.round((videoPlayer?.volume ?? 1.0) * 100)}%`}
+          description="Initial volume level when starting playback"
+        >
           <input
             type="range"
             min="0"
             max="1"
             step="0.01"
-            value={settings.video_player?.volume ?? 1.0}
+            value={videoPlayer?.volume ?? 1.0}
             onChange={(e) =>
               updateSettings({
                 ...settings,
-                video_player: { ...settings.video_player, volume: parseFloat(e.target.value) },
+                video_player: { ...videoPlayer, volume: parseFloat(e.target.value) },
               })
             }
             className="w-full accent-accent cursor-pointer"
           />
-          <p className="text-xs text-textSecondary mt-1">
-            Initial volume level when starting playback
-          </p>
-        </div>
-      </div>
+        </SettingsRow>
+      </SettingsSection>
     </div>
   );
 };

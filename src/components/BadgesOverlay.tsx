@@ -12,8 +12,16 @@ import {
   getStreamNookUserNumber,
   subscribeStreamNookRegistryVersion,
   getStreamNookRegistryVersion,
+  subscribeCosmeticsVersion,
+  getCosmeticsVersion,
+  getAllCosmetics,
+  getOwnedCosmeticSlugs,
+  getActiveCosmeticSlug,
+  setActiveCosmetic,
 } from '../services/supabaseService';
+import type { CosmeticCatalogEntry } from '../services/supabaseService';
 import { StreamNookTierCard } from './StreamNookBadge';
+import { COSMETIC_ASSET_BY_SLUG } from './cosmeticAssets';
 import streamNookLogo from '../assets/streamnook-logo.png';
 
 import { Logger } from '../utils/logger';
@@ -193,6 +201,15 @@ const BadgesOverlay = ({ onClose, onBadgeClick, initialPaintId, initialBadgeId, 
   // tier card surfaces inside the StreamNook tab as soon as the registry resolves.
   useSyncExternalStore(subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion, getStreamNookRegistryVersion);
   const currentUserStreamNookNumber = currentUser?.user_id ? getStreamNookUserNumber(currentUser.user_id) : null;
+
+  // Cosmetics catalog + ownership for the StreamNook tab grid.
+  useSyncExternalStore(subscribeCosmeticsVersion, getCosmeticsVersion, getCosmeticsVersion);
+  const cosmeticsCatalog = getAllCosmetics();
+  const ownedCosmeticSlugs = currentUser?.user_id
+    ? getOwnedCosmeticSlugs(currentUser.user_id)
+    : new Set<string>();
+  const activeCosmeticSlug = currentUser?.user_id ? getActiveCosmeticSlug(currentUser.user_id) : null;
+  const [selectedCosmetic, setSelectedCosmetic] = useState<CosmeticCatalogEntry | null>(null);
 
   // Handle deep link to specific paint
   useEffect(() => {
@@ -2352,60 +2369,102 @@ const BadgesOverlay = ({ onClose, onBadgeClick, initialPaintId, initialBadgeId, 
               Not data-driven from any API; tiers are durable per the Brain. */}
           {activeTab === 'streamnook' && (
             <div className="max-w-3xl mx-auto py-6 space-y-8">
-              {/* Hero */}
+              {/* Identity hero: wordmark + viewer's tier card + subtle blurb.
+                  Identity-related content lives at the top so the page reads
+                  as "who you are in StreamNook" before "what badges exist". */}
               <div className="flex flex-col items-center text-center">
                 <img
                   src={streamNookLogo}
                   alt="StreamNook"
-                  className="w-20 h-20 object-contain mb-4"
+                  className="w-16 h-16 object-contain mb-3"
                   draggable={false}
                 />
                 <h2 className="text-3xl font-bold text-textPrimary mb-2">StreamNook</h2>
-                <p className="text-sm text-textSecondary uppercase tracking-[0.28em] font-medium">
+                <p className="text-sm text-textSecondary uppercase tracking-[0.28em] font-medium mb-5">
                   Community Identity Badge
                 </p>
-              </div>
-
-              {/* Description */}
-              <div className="glass-panel rounded-xl p-6">
-                <p className="text-textPrimary leading-relaxed">
-                  Every member of the StreamNook community gets a permanent rank number,
-                  based on the order they joined, plus a tier label tied to that number.
-                  The badge appears in chat alongside Twitch, 7TV, and FFZ badges, visible
-                  only to other members.
-                </p>
-                <p className="text-textSecondary text-sm leading-relaxed mt-3">
-                  Hover the badge in chat to see the rank reveal. The number is permanent
-                  and never reshuffles. Your tier reflects your spot in the timeline.
+                {currentUserStreamNookNumber !== null && (
+                  <StreamNookTierCard userNumber={currentUserStreamNookNumber} skipCypher />
+                )}
+                <p className="mt-5 max-w-md text-[12px] leading-relaxed text-textSecondary/70">
+                  A permanent rank by join order, with a tier label tied to it. Hover any badge in chat
+                  to reveal the rank. Visible only to other members.
                 </p>
               </div>
 
-              {/* Viewer's own tier card. Only renders when the signed-in user is in the registry */}
-              {currentUserStreamNookNumber !== null && (
+              {/* Cosmetics catalog. Tile style ported verbatim from the Twitch
+                  badges grid above so the two tabs read as the same surface
+                  (gold "collected" treatment + corner Check). The equipped
+                  cosmetic gets an additional accent ring on top of the gold. */}
+              {cosmeticsCatalog.length > 0 && (
                 <div>
                   <p className="text-[11px] text-textSecondary uppercase tracking-[0.28em] font-semibold mb-3 text-center">
-                    Your Rank
+                    Badges
                   </p>
-                  <div className="flex justify-center">
-                    <StreamNookTierCard userNumber={currentUserStreamNookNumber} skipCypher />
+                  <div className="grid grid-cols-3 gap-6 max-w-md mx-auto">
+                    {cosmeticsCatalog.map((cosmetic) => {
+                      const asset = COSMETIC_ASSET_BY_SLUG[cosmetic.slug];
+                      if (!asset) return null;
+                      const owned = ownedCosmeticSlugs.has(cosmetic.slug);
+                      const isActive = activeCosmeticSlug === cosmetic.slug;
+                      return (
+                        <Tooltip
+                          key={cosmetic.slug}
+                          content={owned ? `${cosmetic.name} (Collected!)` : cosmetic.name}
+                          side="bottom"
+                        >
+                          <button
+                            onClick={() => setSelectedCosmetic(cosmetic)}
+                            className={`flex flex-col items-center gap-2 p-3 transition-all duration-300 group relative ${
+                              isActive ? 'rounded-xl bg-gradient-to-br from-[#d4a84b]/20 to-[#b8860b]/10 border border-[#d4a84b]/50 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1),0_4px_20px_rgba(212,168,75,0.2)] backdrop-blur-md ring-2 ring-accent/50 hover:bg-[#d4a84b]/25 hover:border-[#d4a84b]/60' :
+                              owned ? 'rounded-xl bg-gradient-to-br from-[#d4a84b]/15 to-[#b8860b]/5 border border-[#d4a84b]/30 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1),0_4px_20px_rgba(212,168,75,0.15)] backdrop-blur-md hover:bg-[#d4a84b]/20 hover:border-[#d4a84b]/50' :
+                              'rounded-lg hover:bg-white/5'
+                            }`}
+                          >
+                            <div className={`w-18 h-18 flex items-center justify-center bg-transparent group-hover:scale-110 transition-transform duration-300 relative ${
+                              owned ? 'drop-shadow-[0_0_15px_rgba(212,168,75,0.4)]' : ''
+                            }`}>
+                              <img
+                                src={asset}
+                                alt={cosmetic.name}
+                                className="w-16 h-16 object-contain"
+                                loading="lazy"
+                              />
+                            </div>
+                            {owned && (
+                              <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center bg-black/40 backdrop-blur-md border border-[#d4a84b]/60 shadow-[0_0_15px_rgba(212,168,75,0.4)] overflow-hidden">
+                                <div className="absolute inset-0 bg-gradient-to-br from-[#d4a84b]/30 to-transparent pointer-events-none" />
+                                <Check size={13} className="text-[#f0d78c] drop-shadow-[0_0_3px_rgba(212,168,75,0.8)] z-10" strokeWidth={2.5} />
+                              </div>
+                            )}
+                            <span className={`text-xs text-center line-clamp-2 transition-all duration-300 font-medium ${
+                              owned ? 'text-[#f0d78c] drop-shadow-[0_0_8px_rgba(212,168,75,0.3)]' : 'text-textSecondary group-hover:text-textPrimary'
+                            }`}>
+                              {cosmetic.name}
+                            </span>
+                          </button>
+                        </Tooltip>
+                      );
+                    })}
                   </div>
                 </div>
               )}
 
-              {/* External link */}
+              {/* Ko-fi link. Replaces the prior GitHub link as the canonical
+                  "do something next" CTA at the bottom of the StreamNook tab. */}
               <div className="flex justify-center pt-2">
                 <button
                   onClick={async () => {
                     try {
                       const { open } = await import('@tauri-apps/plugin-shell');
-                      await open('https://github.com/winters27/StreamNook');
+                      await open('https://ko-fi.com/streamnook');
                     } catch (err) {
-                      Logger.error('Failed to open StreamNook repo:', err);
+                      Logger.error('Failed to open Ko-fi page:', err);
                     }
                   }}
                   className="px-5 py-2.5 glass-button text-sm text-textPrimary flex items-center gap-2 hover:bg-white/5 transition-colors"
                 >
-                  View StreamNook on GitHub
+                  Subscribe
                   <ExternalLink size={14} className="opacity-60" />
                 </button>
               </div>
@@ -2549,6 +2608,121 @@ const BadgesOverlay = ({ onClose, onBadgeClick, initialPaintId, initialBadgeId, 
             </div>
           </div>
         </div>,
+        document.body
+      )}
+
+      {/* Cosmetic Detail Modal */}
+      {selectedCosmetic && createPortal(
+        (() => {
+          const cosmetic = selectedCosmetic;
+          const asset = COSMETIC_ASSET_BY_SLUG[cosmetic.slug];
+          const owned = ownedCosmeticSlugs.has(cosmetic.slug);
+          const isActive = activeCosmeticSlug === cosmetic.slug;
+          const handleEquip = async () => {
+            if (!currentUser?.user_id) return;
+            await setActiveCosmetic(currentUser.user_id, isActive ? null : cosmetic.slug);
+          };
+          const handleGet = async () => {
+            if (!cosmetic.ko_fi_url) return;
+            try {
+              const { open } = await import('@tauri-apps/plugin-shell');
+              await open(cosmetic.ko_fi_url);
+            } catch (err) {
+              Logger.error('Failed to open Ko-fi URL:', err);
+            }
+          };
+          const acquireLabel = cosmetic.is_default
+            ? 'Free for every StreamNook member'
+            : cosmetic.payment_type === 'Subscription'
+              ? 'Awarded for an active Ko-fi monthly subscription'
+              : cosmetic.payment_type === 'Donation'
+                ? 'Awarded for a one-time Ko-fi donation'
+                : null;
+          return (
+            <div
+              className="fixed inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+              style={{ zIndex: 100000 }}
+              onClick={() => setSelectedCosmetic(null)}
+            >
+              <div
+                className="bg-secondary border border-borderSubtle rounded-xl shadow-2xl p-6 max-w-md w-full mx-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <h3 className="text-xl font-bold text-textPrimary">{cosmetic.name}</h3>
+                  <button
+                    onClick={() => setSelectedCosmetic(null)}
+                    className="p-1 hover:bg-white/5 rounded-lg transition-colors"
+                  >
+                    <X size={18} className="text-textSecondary" />
+                  </button>
+                </div>
+
+                <div className="flex justify-center mb-6">
+                  <div className="w-32 h-32 flex items-center justify-center bg-transparent rounded-xl">
+                    {asset ? (
+                      <img
+                        src={asset}
+                        alt={cosmetic.name}
+                        className="w-28 h-28 object-contain"
+                        draggable={false}
+                      />
+                    ) : (
+                      <div className="w-28 h-28 rounded bg-white/[0.04]" />
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {cosmetic.description && (
+                    <div>
+                      <span className="text-xs text-textSecondary uppercase tracking-wider">Description</span>
+                      <p className="text-textPrimary mt-1">{cosmetic.description}</p>
+                    </div>
+                  )}
+
+                  {acquireLabel && (
+                    <div>
+                      <span className="text-xs text-textSecondary uppercase tracking-wider">How to acquire</span>
+                      <p className="text-textPrimary mt-1">{acquireLabel}</p>
+                    </div>
+                  )}
+
+                  {cosmetic.animated && (
+                    <div className="flex items-center gap-2 text-accent">
+                      <span className="w-2 h-2 bg-accent rounded-full animate-pulse"></span>
+                      <span className="text-sm">Animated Badge</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 pt-2">
+                    {owned ? (
+                      <button
+                        onClick={handleEquip}
+                        disabled={!currentUser?.user_id}
+                        className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+                          isActive
+                            ? 'glass-input border border-accent/50 text-textPrimary'
+                            : 'glass-button text-textPrimary hover:bg-white/5'
+                        }`}
+                      >
+                        {isActive ? 'Equipped — tap to unequip' : 'Equip'}
+                      </button>
+                    ) : cosmetic.ko_fi_url ? (
+                      <button
+                        onClick={handleGet}
+                        className="flex-1 px-4 py-2 text-sm font-medium glass-button text-textPrimary hover:bg-white/5 transition-all flex items-center justify-center gap-2"
+                      >
+                        Get it on Ko-fi
+                        <ExternalLink size={14} className="opacity-60" />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })(),
         document.body
       )}
     </motion.div>

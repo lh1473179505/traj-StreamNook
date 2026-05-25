@@ -1,10 +1,26 @@
-import { useEffect, useState, useRef, memo } from 'react';
+import { useEffect, useState, useRef, useSyncExternalStore, memo } from 'react';
 import type { ReactNode, MouseEvent } from 'react';
 import { Tooltip } from './ui/Tooltip';
 import streamNookLogo from '../assets/streamnook-logo.png';
+import {
+  getActiveCosmeticSlug,
+  getCosmeticBySlug,
+  getCosmeticsVersion,
+  subscribeCosmeticsVersion,
+} from '../services/supabaseService';
+import { COSMETIC_ASSET_BY_SLUG } from './cosmeticAssets';
 
 interface StreamNookBadgeProps {
+  userId: string | undefined;
   userNumber: number | null;
+  /** Which side of the trigger the hover popover renders on. Defaults to
+   *  'top' (chat convention — popover sits above the chat row). Surfaces
+   *  near the top of the viewport (e.g. ProfileSettings header) should pass
+   *  'bottom' so the popover grows downward and doesn't clip the title bar.
+   *  TooltipManager has a flip-on-overflow guard but it measures the
+   *  popover ONCE at mount, before the cypher-reveal animation expands it,
+   *  so the auto-flip can miss this. */
+  side?: 'top' | 'bottom' | 'left' | 'right';
 }
 
 // Rank tiers based on signup order. The cutoffs and labels are intentionally
@@ -79,11 +95,13 @@ const EASTER_EGGS: Record<number, string> = {
   9000: 'Over 9000',    // Dragon Ball Z
 };
 
-const getTier = (n: number): TierInfo => {
+export const getTier = (n: number): TierInfo => {
   const base = getTierBase(n);
   const easterEgg = EASTER_EGGS[n];
   return easterEgg ? { ...base, label: easterEgg } : base;
 };
+
+export type { TierInfo };
 
 const getTierBase = (n: number): TierInfo => {
   if (n === 1) {
@@ -161,12 +179,18 @@ interface MatrixDecodeProps {
   tier: TierInfo;
   /** When true, mount straight in the resolved state (no cypher, no fade-in).
       Used for surfaces where the user is looking at their *own* rank (e.g.
-      ProfileModal), since the cypher reveal is a "discover someone else's
-      tier" moment, not a self-check moment. */
+      the Profile settings panel), since the cypher reveal is a "discover
+      someone else's tier" moment, not a self-check moment. */
   skipCypher?: boolean;
+  /** Name of the user's active cosmetic badge (Supporter, Subscriber, etc.).
+      Shown below the tier label in a smaller secondary tag so a hover reveals
+      both "who is this person in the StreamNook timeline" and "which badge
+      are they wearing" in one popover. Suppressed for the default cosmetic
+      since the wordmark + tier label already convey that identity. */
+  cosmeticName?: string | null;
 }
 
-const MatrixDecode = ({ numberText, tier, skipCypher = false }: MatrixDecodeProps) => {
+const MatrixDecode = ({ numberText, tier, skipCypher = false, cosmeticName = null }: MatrixDecodeProps) => {
   const padWidth = Math.max(numberText.length, MIN_SCRAMBLE_WIDTH);
 
   // Build the initial scramble synchronously so the first paint has glyphs in it
@@ -223,26 +247,29 @@ const MatrixDecode = ({ numberText, tier, skipCypher = false }: MatrixDecodeProp
     };
   }, [padWidth, skipCypher]);
 
-  // Card composition. The number element is always rendered (mono cypher
-  // glyphs during phase 1, tier-styled resolved number during phase 2) so the
-  // card geometry stays stable through the reveal. The decorative chrome
-  // (wordmark, "Nº" prefix, hairline, tier label) is rendered alongside but
-  // held at opacity-0 during the cypher; on reveal they fade and slide in
-  // together. Pre-rendering at opacity-0 reserves their layout space so the
-  // card doesn't jump from compact-cypher to taller-card on resolve.
-  const chromeTransition = `transition-all duration-300 ease-out ${
-    animateIn ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-1'
+  // Card composition. During the cypher phase the card houses only the
+  // number row, so the cypher is the visual center. On reveal, the chrome
+  // around it (wordmark above; hairline / tier label / cosmetic block below)
+  // expands into place via a max-height + opacity transition. Tooltip
+  // re-positions because its anchor calculation runs against the trigger
+  // rect, so the cypher stays vertically near where it was during scramble.
+  const chromeOpacity = `transition-opacity duration-300 ease-out ${
+    animateIn ? 'opacity-100' : 'opacity-0'
   }`;
+  const collapsibleWrapper = `overflow-hidden transition-[max-height,opacity] duration-500 ease-out`;
+  const aboveCollapsed = animateIn ? 'max-h-12 opacity-100' : 'max-h-0 opacity-0';
+  const belowCollapsed = animateIn ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0';
 
   return (
     <>
       {tier.auraClassName && <div className={tier.auraClassName} />}
       <div className="relative flex flex-col items-center w-full">
-        {/* Wordmark */}
-        <div
-          className={`text-[9px] uppercase tracking-[0.36em] font-medium text-white/35 mb-4 ${chromeTransition}`}
-        >
-          StreamNook
+        {/* Above-cypher chrome: wordmark. Collapsed during scramble so the
+            cypher reads as the popover's vertical center. */}
+        <div className={`${collapsibleWrapper} ${aboveCollapsed} flex flex-col items-center`}>
+          <div className="text-[9px] uppercase tracking-[0.36em] font-medium text-white/35 mb-4">
+            StreamNook
+          </div>
         </div>
 
         {/* Number row: leading Nº prefix + number, with a phantom Nº mirror on
@@ -251,8 +278,8 @@ const MatrixDecode = ({ numberText, tier, skipCypher = false }: MatrixDecodeProp
             ⇒ identical widths ⇒ the scramble / resolved number always sits at
             the geometric center of the row, regardless of whether the leading
             Nº is at opacity-0 (cypher) or opacity-1 (reveal). */}
-        <div className="flex items-baseline justify-center gap-2 mb-3.5">
-          <span className={`text-[11px] text-white/30 font-light leading-none ${chromeTransition}`}>
+        <div className="flex items-baseline justify-center gap-2">
+          <span className={`text-[11px] text-white/30 font-light leading-none ${chromeOpacity}`}>
             Nº
           </span>
           {!revealed ? (
@@ -267,13 +294,22 @@ const MatrixDecode = ({ numberText, tier, skipCypher = false }: MatrixDecodeProp
           </span>
         </div>
 
-        {/* Tier-colored hairline */}
-        <div className={`w-16 h-px ${tier.hairlineClassName} mb-2.5 ${chromeTransition}`} />
-
-        {/* Tier label */}
-        {tier.label && (
-          <div className={`${tier.labelClassName} ${chromeTransition}`}>{tier.label}</div>
-        )}
+        {/* Below-cypher chrome: hairline + tier label + cosmetic block. Also
+            collapsed during scramble, expands on reveal. */}
+        <div className={`${collapsibleWrapper} ${belowCollapsed} flex flex-col items-center`}>
+          <div className={`w-16 h-px ${tier.hairlineClassName} mt-3.5 mb-2.5`} />
+          {tier.label && <div className={tier.labelClassName}>{tier.label}</div>}
+          {cosmeticName && (
+            <div className="mt-3 flex flex-col items-center">
+              <div className="text-[9px] uppercase tracking-[0.36em] font-medium text-white/35 mb-1.5">
+                Badge
+              </div>
+              <div className="text-[11px] uppercase tracking-[0.22em] font-light text-white/80">
+                {cosmeticName}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </>
   );
@@ -281,25 +317,49 @@ const MatrixDecode = ({ numberText, tier, skipCypher = false }: MatrixDecodeProp
 
 // Standalone tier card with chassis + aura + composed content. Used both as the
 // Tooltip content for the chat-badge hover (via StreamNookBadge) and as an
-// inline element in any "your identity" surface (e.g. ProfileModal). When
+// inline element in any "your identity" surface (e.g. ProfileSettings). When
 // inline, place it directly; when in a tooltip, pass CARD_CLASS as the
 // tooltip's containerClassName so the tooltip bubble itself becomes the card
 // chassis (avoids double-wrapping).
 export const StreamNookTierCard = memo(function StreamNookTierCard({
   userNumber,
   skipCypher = false,
-}: { userNumber: number; skipCypher?: boolean }) {
+  cosmeticName = null,
+}: { userNumber: number; skipCypher?: boolean; cosmeticName?: string | null }) {
   const tier = getTier(userNumber);
   return (
     <div className={CARD_CLASS}>
       {tier.auraClassName && <div className={tier.auraClassName} />}
-      <MatrixDecode numberText={String(userNumber)} tier={tier} skipCypher={skipCypher} />
+      <MatrixDecode numberText={String(userNumber)} tier={tier} skipCypher={skipCypher} cosmeticName={cosmeticName} />
     </div>
   );
 });
 
+/**
+ * Sync read for the active-cosmetic asset for a given Twitch user.
+ *
+ * Returns the resolved Vite asset URL, or null if the user has no active
+ * cosmetic / the cosmetics registry has not loaded yet / the slug points at
+ * an asset we don't bundle. Wired to useSyncExternalStore at the call site
+ * so it re-renders when the user's selection changes (locally or via the
+ * realtime subscription).
+ */
+const useActiveCosmeticAsset = (userId: string | undefined): string | null => {
+  useSyncExternalStore(subscribeCosmeticsVersion, getCosmeticsVersion, getCosmeticsVersion);
+  if (!userId) return null;
+  const slug = getActiveCosmeticSlug(userId);
+  if (!slug) return null;
+  // The catalog may have the slug but we still need an actual file we bundle.
+  // If the asset map is missing the slug, treat it as no cosmetic so the
+  // default logo wins.
+  const asset = COSMETIC_ASSET_BY_SLUG[slug];
+  return asset ?? null;
+};
+
 export const StreamNookBadge = memo(function StreamNookBadge({
+  userId,
   userNumber,
+  side = 'top',
 }: StreamNookBadgeProps) {
   // Default click opens BadgesOverlay on the StreamNook tab. Same destination
   // from every surface (chat row, UserProfileCard badge list, etc.). Wrapped
@@ -315,6 +375,12 @@ export const StreamNookBadge = memo(function StreamNookBadge({
       openBadgesOnStreamNookInMain();
     });
   };
+
+  const cosmeticAsset = useActiveCosmeticAsset(userId);
+  const cosmeticSlug = getActiveCosmeticSlug(userId);
+  const cosmetic = cosmeticSlug ? getCosmeticBySlug(cosmeticSlug) : null;
+  const cosmeticName = cosmetic?.name ?? null;
+
   // If the registry lookup somehow missed (shouldn't happen given isSN was true),
   // fall back to the plain label so we never render a broken animation.
   let tooltipContent: ReactNode;
@@ -324,7 +390,7 @@ export const StreamNookBadge = memo(function StreamNookBadge({
     tooltipContent = (
       <>
         {tier.auraClassName && <div className={tier.auraClassName} />}
-        <MatrixDecode numberText={String(userNumber)} tier={tier} />
+        <MatrixDecode numberText={String(userNumber)} tier={tier} cosmeticName={cosmeticName} />
       </>
     );
     containerClassName = CARD_CLASS;
@@ -332,18 +398,21 @@ export const StreamNookBadge = memo(function StreamNookBadge({
     tooltipContent = 'StreamNook user';
   }
 
+  const src = cosmeticAsset ?? streamNookLogo;
+  const alt = cosmeticName ? `StreamNook ${cosmeticName}` : 'StreamNook';
+
   return (
     <Tooltip
       content={tooltipContent}
-      side="top"
+      side={side}
       delay={120}
       containerClassName={containerClassName}
     >
       <img
-        src={streamNookLogo}
-        alt="StreamNook"
+        src={src}
+        alt={alt}
         loading="lazy"
-        className="w-5 h-5 inline-block object-contain cursor-pointer hover:scale-110 transition-transform"
+        className="w-6 h-6 inline-block object-contain cursor-pointer hover:scale-110 transition-transform"
         draggable={false}
         onClick={handleClick}
       />

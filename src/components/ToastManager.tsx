@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { CheckCircle, XCircle, AlertCircle, Info, X } from 'lucide-react';
+import { XCircle, AlertCircle, Info, X } from 'lucide-react';
 import { useAppStore, Toast } from '../stores/AppStore';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -238,10 +238,11 @@ const ToastManager = () => {
 
   const getToastIcon = (type: string) => {
     switch (type) {
-      case 'success': return <CheckCircle size={20} />;
+      case 'success': return null;
       case 'error': return <XCircle size={20} />;
       case 'warning': return <AlertCircle size={20} />;
       case 'live': return null;
+      case 'channel_points': return null;
       default: return <Info size={20} />;
     }
   };
@@ -252,6 +253,7 @@ const ToastManager = () => {
       case 'error': return 'border-red-500/30 bg-red-500/5';
       case 'warning': return 'border-yellow-500/30 bg-yellow-500/5';
       case 'live': return 'border-accent/40 bg-accent/5';
+      case 'channel_points': return 'border-orange-500/30 bg-orange-500/5';
       default: return 'border-accent/30 bg-accent/5';
     }
   };

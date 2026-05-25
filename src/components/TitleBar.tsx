@@ -1,5 +1,5 @@
 import { Window } from '@tauri-apps/api/window';
-import { Gift, User, Settings, Proportions, MessageCircle, Pickaxe, Clock, Tv } from 'lucide-react';
+import { Gift, User, Settings, Proportions, MessageCircle, Pickaxe, Clock, Tv, RotateCw } from 'lucide-react';
 import { Minus, X, CornersOut, CornersIn, Medal } from 'phosphor-react';
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -17,10 +17,25 @@ import type { MiningStatus, DropsSettings } from '../types';
 import { Logger } from '../utils/logger';
 import { Tooltip } from './ui/Tooltip';
 
+/** Maps the discrete stage strings emitted by Rust's bundle-update-progress
+ *  event to a fill percentage for the progress bar. */
+const getUpdateStageProgress = (stage: string | null): number => {
+  if (!stage) return 5;
+  const s = stage.toLowerCase();
+  if (s.includes('complete')) return 100;
+  if (s.includes('restart')) return 95;
+  if (s.includes('install')) return 75;
+  if (s.includes('extract')) return 50;
+  if (s.includes('download')) return 25;
+  return 5;
+};
+
 const TitleBar = () => {
   const store = useAppStore();
 
-  const { openSettings, setShowProfileOverlay, setShowDropsOverlay, setShowBadgesOverlay, setShowWhispersOverlay, showProfileOverlay, isAuthenticated, currentUser, isMiningActive, isTheaterMode, toggleTheaterMode, streamUrl, settings, whisperImportState } = store;
+  const { openSettings, setShowDropsOverlay, setShowBadgesOverlay, setShowWhispersOverlay, isAuthenticated, currentUser, isMiningActive, isTheaterMode, toggleTheaterMode, streamUrl, settings, whisperImportState, updateInfo, setUpdateInfo, addToast } = store;
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [, setShowSplash] = useState(false);
   const [dropsSettings, setDropsSettings] = useState<DropsSettings | null>(null);
@@ -264,6 +279,34 @@ const TitleBar = () => {
     await window.close();
   };
 
+  const handleSettingsOrUpdate = useCallback(async () => {
+    if (isUpdating) return;
+    if (!updateInfo) {
+      openSettings();
+      return;
+    }
+    setIsUpdating(true);
+    setUpdateProgress('Starting update...');
+    addToast(`Updating to v${updateInfo.latest_version}...`, 'info');
+
+    const unlisten = await listen<string>('bundle-update-progress', (event) => {
+      setUpdateProgress(event.payload);
+    });
+
+    try {
+      await invoke('download_and_install_bundle');
+      addToast('Update installed successfully!', 'success');
+      setUpdateInfo(null);
+    } catch (e) {
+      Logger.error('Update failed:', e);
+      addToast(`Update failed: ${e}`, 'error');
+    } finally {
+      unlisten();
+      setIsUpdating(false);
+      setUpdateProgress(null);
+    }
+  }, [updateInfo, isUpdating, openSettings, setUpdateInfo, addToast]);
+
   return (
     <>
       <div
@@ -440,15 +483,67 @@ const TitleBar = () => {
 
 
 
-          {/* Settings Button */}
-          <Tooltip content="Settings" delay={200}>
-            <button
-              onClick={() => openSettings()}
-              className="settings-gear-btn p-1.5 text-textSecondary hover:text-textPrimary rounded transition-all duration-200"
+          {/* Settings / Update button. Morphs into an update trigger when an
+              update is available; one click installs the new bundle. Auto-opens
+              a progress dropdown while installing. */}
+          <div className="relative">
+            <Tooltip
+              content={
+                isUpdating
+                  ? ''
+                  : updateInfo
+                    ? `Update v${updateInfo.current_version} to v${updateInfo.latest_version} (click to install)`
+                    : 'Settings'
+              }
+              delay={200}
             >
-              <Settings size={16} />
-            </button>
-          </Tooltip>
+              <button
+                onClick={handleSettingsOrUpdate}
+                disabled={isUpdating}
+                className={`settings-gear-btn p-1.5 rounded transition-colors duration-200 ${
+                  updateInfo
+                    ? 'text-[#84ff57] hover:bg-[#84ff57]/10'
+                    : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                {updateInfo ? (
+                  <RotateCw size={16} className={isUpdating ? 'animate-spin' : 'update-icon-pulse'} />
+                ) : (
+                  <Settings size={16} />
+                )}
+              </button>
+            </Tooltip>
+
+            {isUpdating && updateInfo && (
+              <div className="drops-preview-card-right">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="p-1.5 rounded-md bg-[#84ff57]/15">
+                    <RotateCw size={14} className="text-[#84ff57] animate-spin" />
+                  </div>
+                  <span className="text-xs font-semibold text-textPrimary">Updating StreamNook</span>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs mb-3">
+                  <span className="text-textMuted">v{updateInfo.current_version}</span>
+                  <span className="text-textMuted">→</span>
+                  <span className="text-[#84ff57] font-medium">v{updateInfo.latest_version}</span>
+                </div>
+
+                <div className="h-1.5 bg-surface rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${getUpdateStageProgress(updateProgress)}%`,
+                      backgroundColor: '#84ff57',
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-textMuted mt-1.5 truncate">
+                  {updateProgress ?? 'Starting update...'}
+                </p>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex space-x-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -467,9 +562,9 @@ const TitleBar = () => {
           </Tooltip>
 
           {/* Profile Button */}
-          <Tooltip content={isAuthenticated ? 'Profile' : 'Login'} delay={200}>
+          <Tooltip content={isAuthenticated ? 'Profile' : 'Sign in'} delay={200}>
             <button
-              onClick={() => setShowProfileOverlay(!showProfileOverlay)}
+              onClick={() => openSettings('Profile')}
               className="p-1 text-textSecondary hover:text-textPrimary rounded transition-all duration-200"
             >
               {isAuthenticated && currentUser?.profile_image_url ? (

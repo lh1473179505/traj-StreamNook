@@ -25,6 +25,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Update icon pulse for the title-bar update button. Subtle green drop-shadow
+   swell + opacity flicker. Scoped to .update-icon-pulse only. */
+@keyframes update-icon-pulse {
+  0%, 100% { opacity: 0.85; filter: drop-shadow(0 0 2px rgba(132, 255, 87, 0.3)); }
+  25%      { opacity: 0.5;  filter: drop-shadow(0 0 5px rgba(132, 255, 87, 0.5)); }
+  50%      { opacity: 0.85; filter: drop-shadow(0 0 2px rgba(132, 255, 87, 0.3)); }
+  75%      { opacity: 1;    filter: drop-shadow(0 0 0px rgba(132, 255, 87, 0)); }
+}
+
+.update-icon-pulse {
+  animation: update-icon-pulse 2.5s ease-in-out infinite;
+}
+
 /* Heart drop animation for unfollow */
 @keyframes heart-drop {
   0% {
@@ -193,11 +206,32 @@ body {
   backdrop-filter: blur(10px);
   /* A highly subtle version of the liquid glass bevel to frame content cards */
   border: 1px solid transparent;
-  box-shadow: 
+  box-shadow:
     inset 1px 1px 0 0 rgba(255, 255, 255, 0.08),
     inset -1px -1px 0 0 rgba(0, 0, 0, 0.15),
     0 4px 10px rgba(0, 0, 0, 0.15);
   transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.25);
+}
+
+/* Settings card — AuraKey steps-container background, glass-panel bevel preserved. */
+.settings-card {
+  background: linear-gradient(137deg, #111214 4.87%, #0c0d0f 75.88%);
+  border-radius: 8px;
+  border: 1px solid transparent;
+  box-shadow:
+    inset 1px 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset -1px -1px 0 0 rgba(0, 0, 0, 0.15),
+    0 4px 10px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+}
+
+.settings-row {
+  background: transparent;
+  transition: background-color 100ms;
+}
+
+.settings-row:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* User Profile Card specific styling with black transparency */
