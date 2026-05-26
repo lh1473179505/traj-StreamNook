@@ -165,7 +165,7 @@ impl DropsService {
         let session_id = Uuid::new_v4().to_string().replace("-", "");
 
         Self {
-            client: Client::new(),
+            client: crate::services::http::client().clone(),
             settings: Arc::new(RwLock::new(initial_settings)),
             drop_progress: Arc::new(RwLock::new(HashMap::new())),
             claimed_drops: Arc::new(RwLock::new(Vec::new())),

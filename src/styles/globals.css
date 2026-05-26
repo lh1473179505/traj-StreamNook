@@ -1059,40 +1059,89 @@ body {
 }
 
 /* Pulsing red dot animation for LIVE indicator */
+/* CRITICAL: only animate transform here. box-shadow animation is NOT
+ * GPU-accelerated — every frame the renderer has to re-rasterize the blur
+ * for every animated element. With 28 stream cards visible on the Following
+ * tab that translates to 28 concurrent per-frame repaints and ~50% CPU at
+ * idle. transform-only animation is composited entirely on the GPU at
+ * effectively zero CPU cost. The "glow" feel is preserved via the static
+ * box-shadow on the `.live-dot::before` rule below (no animation on it). */
 @keyframes pulse-dot {
   0%,
   100% {
-    opacity: 1;
     transform: scale(1);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-error) 70%, transparent);
   }
   50% {
-    opacity: 1;
-    transform: scale(1.15);
-    box-shadow: 0 0 8px 2px
-      color-mix(in srgb, var(--color-error) 90%, transparent);
+    transform: scale(1.2);
   }
 }
 
+/* Glass-red LIVE badge — mirrors the `.drops-badge-glass` recipe but uses
+ * --color-error (red) and intentionally omits the metal-shine sweep that
+ * drops-badge-glass has. That `::after` infinite animation is acceptable on
+ * drops-badge-glass because at most a handful of stream cards have drops,
+ * but the LIVE badge appears on EVERY visible card (~28 on the Following
+ * grid). Stacking that many concurrent shimmer animations would put us
+ * right back in the Layerize/Recalculate-style trap we just dug out of. */
 .live-dot {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background-color: rgba(0, 0, 0, 0.6);
+  gap: 4px;
+  padding: 2px 8px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-error) 45%, transparent) 0%,
+    color-mix(in srgb, var(--color-error) 30%, transparent) 50%,
+    color-mix(in srgb, var(--color-error) 45%, transparent) 100%
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in srgb, var(--color-error) 60%, transparent);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--color-text-primary);
   letter-spacing: 0.5px;
+  /* Sharp 1px drop with no blur — a blurred text-shadow at 10px font size
+   * dominates the glyph itself and reads as fuzzy text rather than a shadow. */
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+  /* Force crisp antialiasing. Without these, backdrop-filter's compositor
+   * layer can render text via a less-sharp pipeline on Chromium. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* New stacking context so the LIVE text is unambiguously above the
+   * blurred background layer and the red dot pseudo-element, never below
+   * or sandwiched between them. */
+  isolation: isolate;
+  box-shadow:
+    0 2px 10px color-mix(in srgb, var(--color-error) 35%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+  overflow: hidden;
 }
 
 .live-dot::before {
   content: "";
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   background-color: var(--color-error);
   border-radius: 50%;
+  /* Static red dot + static glow. The pulse animation only runs when the
+   * containing card is hovered (see below) — see the flame-graph analysis
+   * dated 2026-05-25: 28 concurrent always-on transform animations on the
+   * Following grid were burning ~95% renderer CPU in Layerize / Recalculate
+   * style / Commit, with effectively zero JS work. Pre-rendered + static
+   * glow gives the "live" feel; pulse activates on the card the user is
+   * actually interacting with. */
+  box-shadow: 0 0 3px 1px color-mix(in srgb, var(--color-error) 60%, transparent);
+}
+
+/* Animate the pulse only on the hovered card. The stream-card grid uses
+ * Tailwind's `group` pattern, so `.group:hover .live-dot::before` targets
+ * the dot of whichever card is being hovered. At most one animation runs
+ * at a time instead of 28 concurrent ones. */
+.group:hover .live-dot::before {
   animation: pulse-dot 2s ease-in-out infinite;
 }
 

@@ -9,6 +9,7 @@ import { useContextMenuStore } from '../stores/contextMenuStore';
 import { Tooltip } from './ui/Tooltip';
 
 import { Logger } from '../utils/logger';
+import { useVisibleInterval } from '../utils/useVisibleInterval';
 // Width constants
 const COMPACT_WIDTH = 56;
 const DEFAULT_EXPANDED_WIDTH = 280;
@@ -98,54 +99,55 @@ const Sidebar = () => {
     // Drops-enabled games tracking (by game_name lowercase)
     const [dropsGameNames, setDropsGameNames] = useState<Set<string>>(new Set());
 
-    // Load drops data to know which games have active drops
-    useEffect(() => {
-        const loadActiveDrops = async () => {
-            try {
-                const inventory = await invoke<{ items: Array<{ campaign: { game_name: string }; status: string }> }>('get_drops_inventory');
-                if (inventory?.items) {
-                    const gameNames = new Set<string>();
-                    for (const item of inventory.items) {
-                        if (item.status === 'Active' && item.campaign.game_name) {
-                            gameNames.add(item.campaign.game_name.toLowerCase());
-                        }
+    // Load drops data to know which games have active drops. Per user
+    // direction: do NOT fetch at idle — only after the user has opened the
+    // drops overlay at least once this session. The DropsCenter overlay
+    // does its own fresh fetch when it opens, so this sidebar indicator
+    // simply piggybacks: once the overlay was opened, we refresh on a
+    // 60-min cadence to keep the sidebar gift-icon indicator in sync.
+    // Until then, the sidebar just doesn't show drops indicators — that's
+    // the explicit trade-off.
+    const dropsOverlayEverOpened = useAppStore((s) => s.dropsOverlayEverOpened);
+    const loadActiveDrops = useCallback(async () => {
+        if (!dropsOverlayEverOpened) return;
+        try {
+            const inventory = await invoke<{ items: Array<{ campaign: { game_name: string }; status: string }> }>('get_drops_inventory');
+            if (inventory?.items) {
+                const gameNames = new Set<string>();
+                for (const item of inventory.items) {
+                    if (item.status === 'Active' && item.campaign.game_name) {
+                        gameNames.add(item.campaign.game_name.toLowerCase());
                     }
-                    setDropsGameNames(gameNames);
                 }
-            } catch (err) {
-                // Silently fail - drops indicator is optional
-                Logger.warn('[Sidebar] Could not load drops data:', err);
+                setDropsGameNames(gameNames);
             }
-        };
-        loadActiveDrops();
-        // Refresh every 5 minutes
-        const interval = setInterval(loadActiveDrops, 5 * 60 * 1000);
-        return () => clearInterval(interval);
-    }, []);
-
-    // Refresh Hype Train status for sidebar streams periodically
+        } catch (err) {
+            // Silently fail - drops indicator is optional
+            Logger.warn('[Sidebar] Could not load drops data:', err);
+        }
+    }, [dropsOverlayEverOpened]);
     useEffect(() => {
-        const channelIds = new Set<string>();
-        followedStreams.forEach(s => channelIds.add(s.user_id));
-        recommendedStreams.forEach(s => channelIds.add(s.user_id));
-        
-        if (channelIds.size > 0) {
-            // Initial refresh
-            refreshHypeTrainStatuses(Array.from(channelIds));
-            
-            // Refresh every 30 seconds for sidebar
-            const interval = setInterval(() => {
-                const ids = new Set<string>();
-                followedStreams.forEach(s => ids.add(s.user_id));
-                recommendedStreams.forEach(s => ids.add(s.user_id));
-                if (ids.size > 0) {
-                    refreshHypeTrainStatuses(Array.from(ids));
-                }
-            }, 30000);
-            
-            return () => clearInterval(interval);
+        loadActiveDrops();
+    }, [loadActiveDrops]);
+    useVisibleInterval(loadActiveDrops, 60 * 60 * 1000);
+
+    // Refresh Hype Train status for sidebar streams periodically.
+    // Visibility-gated: when the window is in the tray, hype-train indicators
+    // can't be seen anyway, so we skip the Helix calls.
+    const refreshHypeTrains = useCallback(() => {
+        const ids = new Set<string>();
+        followedStreams.forEach(s => ids.add(s.user_id));
+        recommendedStreams.forEach(s => ids.add(s.user_id));
+        if (ids.size > 0) {
+            refreshHypeTrainStatuses(Array.from(ids));
         }
     }, [followedStreams, recommendedStreams, refreshHypeTrainStatuses]);
+
+    useEffect(() => {
+        refreshHypeTrains();
+    }, [refreshHypeTrains]);
+
+    useVisibleInterval(refreshHypeTrains, 30000);
 
     // Listen for settings changes from InterfaceSettings
     useEffect(() => {
@@ -254,21 +256,19 @@ const Sidebar = () => {
     }, [isHovered, isEdgeHovered, isManuallyExpanded, isAuthenticated, loadFollowedStreams, loadRecommendedStreams]);
 
     // Constant background freshness (every 3 minutes)
-    // Ensures sidebar is fresh even if user hasn't opened/closed it in hours
-    useEffect(() => {
-        const interval = setInterval(() => {
-            const isSidebarVisible = isHovered || isEdgeHovered || isManuallyExpanded;
-            // Only sync in background if sidebar is currently HIDDEN to prevent mid-reading layout shifts
-            if (!isSidebarVisible) {
-                Logger.debug('[Sidebar] Background stream sync');
-                if (isAuthenticated) {
-                    loadFollowedStreams();
-                }
+    // Ensures sidebar is fresh even if user hasn't opened/closed it in hours.
+    // Visibility-gated: tray-backgrounded sessions stop syncing entirely.
+    const backgroundStreamSync = useCallback(() => {
+        const isSidebarVisible = isHovered || isEdgeHovered || isManuallyExpanded;
+        // Only sync if sidebar is currently HIDDEN to prevent mid-reading layout shifts
+        if (!isSidebarVisible) {
+            Logger.debug('[Sidebar] Background stream sync');
+            if (isAuthenticated) {
+                loadFollowedStreams();
             }
-        }, 3 * 60 * 1000);
-        
-        return () => clearInterval(interval);
+        }
     }, [isHovered, isEdgeHovered, isManuallyExpanded, isAuthenticated, loadFollowedStreams]);
+    useVisibleInterval(backgroundStreamSync, 3 * 60 * 1000);
 
     // Infinite scroll for recommended streams
     useEffect(() => {

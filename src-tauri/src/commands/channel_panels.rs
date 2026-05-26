@@ -146,7 +146,7 @@ pub async fn get_channel_about_data(channel_login: String) -> Result<ChannelAbou
         channel_login
     );
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Inline GQL query for channel panels + social media
     // - Panel is a union type — use inline fragment for DefaultPanel fields

@@ -448,6 +448,53 @@ export default function MultiChatWindow() {
     [layoutMode],
   );
 
+  // Listen for `multichat-add-channel` events from main. Fired by
+  // `openMultiChatWindow` when this popout already exists and the user
+  // popped chat out from another stream — main focuses us and forwards the
+  // channel here instead of spawning a second window. Dedup against the
+  // current channel list (functional setter to avoid stale closure) and
+  // either append + activate, or just activate if already a tab.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const u = await listen<{
+          channel: string;
+          channelId: string | null;
+          channelName: string | null;
+        }>('multichat-add-channel', (event) => {
+          const login = (event.payload.channel || '').toLowerCase();
+          if (!login) return;
+          setChannels((prev) => {
+            if (prev.some((c) => c.channel === login)) return prev;
+            return [
+              ...prev,
+              {
+                channel: login,
+                channelId: event.payload.channelId ?? null,
+                channelName: event.payload.channelName || login,
+              },
+            ];
+          });
+          setActiveChannel(login);
+        });
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      } catch (err) {
+        Logger.warn('[MultiChatWindow] listen multichat-add-channel failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // Keyboard shortcuts scoped to this popout window. Tauri webviews don't
   // implement default browser behavior for these chords, so claiming them
   // doesn't fight the user agent:

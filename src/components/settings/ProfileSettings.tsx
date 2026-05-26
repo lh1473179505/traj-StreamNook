@@ -273,7 +273,7 @@ const ProfileSettings = () => {
   useEffect(() => {
     seventvBadges.forEach((badge: any) => {
       if (badge?.id && !badge.localUrl) {
-        const badgeUrl = `https://cdn.7tv.app/badge/${badge.id}/4x`;
+        const badgeUrl = `https://cdn.7tv.app/badge/${badge.id}/4x.webp`;
         queueCosmeticForCaching(badge.id, badgeUrl);
       }
     });
@@ -655,10 +655,23 @@ const ProfileSettings = () => {
                 <button
                   type="button"
                   onClick={() => openBadgesWithPaintInMain(seventvPaint.id)}
-                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide cursor-pointer transition-all border border-white/10 bg-black/40 hover:bg-black/50 hover:border-white/20"
-                  style={computePaintStyle(seventvPaint as any, '#29b6f6')}
+                  className="px-2 py-0.5 rounded-md text-[11px] font-bold inline-block relative overflow-hidden cursor-pointer hover:ring-1 hover:ring-accent/50 transition-all border border-white/10"
+                  style={{
+                    ...computePaintStyle(seventvPaint as any, '#9146FF'),
+                    WebkitBackgroundClip: 'padding-box',
+                    backgroundClip: 'padding-box',
+                  }}
                 >
-                  {seventvPaint.name}
+                  <span
+                    style={{
+                      ...computePaintStyle(seventvPaint as any, '#9146FF'),
+                      filter: 'invert(1) contrast(1.5)',
+                      WebkitBackgroundClip: 'text',
+                      backgroundClip: 'text',
+                    }}
+                  >
+                    {seventvPaint.name}
+                  </span>
                 </button>
               </Tooltip>
             )}

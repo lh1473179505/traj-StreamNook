@@ -7,7 +7,7 @@ import { getCachedEmojiUrl, parseEmojisSync } from '../services/emojiService';
 import { calculateHalfPadding } from '../utils/chatLayoutUtils';
 import { computePaintStyle, getBadgeImageUrl, getBadgeFallbackUrls, queueCosmeticForCaching } from '../services/seventvService';
 import { FallbackImage } from './FallbackImage';
-import { getCosmeticsWithFallback, getThirdPartyBadgesFromMemoryCache, getCosmeticsFromMemoryCache, getTwitchBadgesWithFallback } from '../services/cosmeticsCache';
+import { getCosmeticsWithFallback, getThirdPartyBadgesFromMemoryCache } from '../services/cosmeticsCache';
 import type { ThirdPartyBadge as ThirdPartyBadgeType } from '../services/thirdPartyBadges';
 import { useAppStore } from '../stores/AppStore';
 import { openBadgesWithBadgeInMain } from '../utils/openBadgesInMain';
@@ -315,13 +315,17 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     }
   }, [chatDesign?.show_timestamps, chatDesign?.show_timestamp_seconds, parsed.metadata, parsed.tags]);
 
-  const [contentWithEmotes, setContentWithEmotes] = useState<EmoteSegment[]>([]);
-
-  // PHASE 3.1 - THE ENDGAME: Use pre-parsed segments from Rust
-  useEffect(() => {
-    // Convert Rust MessageSegment to EmoteSegment format for rendering
+  // Computed in-render via useMemo rather than via useEffect+useState — the
+  // previous useEffect pattern meant the FIRST render of a new message
+  // committed with an empty content array; only the second render (after
+  // useEffect fired) painted the actual text. In a fast burst that gap is
+  // visible: the screen flashes a wall of usernames with no message bodies,
+  // then the bodies pop in. Computing in-render closes the gap entirely —
+  // first render contains the real content.
+  const contentWithEmotes = useMemo<EmoteSegment[]>(() => {
+    // Pre-parsed segments from Rust (the primary path)
     if (parsed.segments && parsed.segments.length > 0) {
-      const convertedSegments: EmoteSegment[] = parsed.segments.map((seg) => {
+      return parsed.segments.map((seg): EmoteSegment => {
         if (seg.type === 'emote') {
           return {
             type: 'emote' as const,
@@ -360,72 +364,71 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
           };
         }
       });
-      
-      setContentWithEmotes(convertedSegments);
-    } else if (emotes) {
-       // Fallback for local messages (no segments from Rust yet): Parse text using the provided emotes prop
-       const words = parsed.content.split(' ');
-       const newSegments: EmoteSegment[] = [];
-
-       words.forEach((word, i) => {
-           // Check providers for exact match
-           const emote = emotes['7tv'].find((e: Emote) => e.name === word) ||
-                         emotes.bttv.find((e: Emote) => e.name === word) ||
-                         emotes.ffz.find((e: Emote) => e.name === word) ||
-                         emotes.twitch.find((e: Emote) => e.name === word);
-
-           if (i > 0) newSegments.push({ type: 'text', content: ' ' });
-
-           if (emote) {
-               newSegments.push({
-                   type: 'emote',
-                   content: emote.name,
-                   emoteId: emote.id,
-                   emoteUrl: emote.url, // The emote object from ChatWidget already has localUrl merged if available
-                   isZeroWidth: emote.isZeroWidth || (emote as any).is_zero_width,
-               });
-           } else {
-               // Parse the word for emojis - this enables iOS-style emoji for optimistic messages
-               const emojiParsed = parseEmojisSync(word);
-               emojiParsed.forEach(seg => {
-                   if (seg.type === 'emoji' && seg.emojiUrl) {
-                       newSegments.push({
-                           type: 'emoji' as const,
-                           content: seg.content,
-                           emojiUrl: seg.emojiUrl,
-                       });
-                   } else {
-                       newSegments.push({ type: 'text', content: seg.content });
-                   }
-               });
-           }
-       });
-
-       // Coalesce adjacent text segments
-       const coalesced: EmoteSegment[] = [];
-       newSegments.forEach(seg => {
-           if (coalesced.length > 0 && coalesced[coalesced.length-1].type === 'text' && seg.type === 'text') {
-               coalesced[coalesced.length-1].content += seg.content;
-           } else {
-               coalesced.push(seg);
-           }
-       });
-       setContentWithEmotes(coalesced);
-    } else {
-      // No segments and no emotes loaded - parse for emojis at minimum
-      const emojiParsed = parseEmojisSync(parsed.content);
-      const segments: EmoteSegment[] = emojiParsed.map(seg => {
-        if (seg.type === 'emoji' && seg.emojiUrl) {
-          return {
-            type: 'emoji' as const,
-            content: seg.content,
-            emojiUrl: seg.emojiUrl,
-          };
-        }
-        return { type: 'text' as const, content: seg.content };
-      });
-      setContentWithEmotes(segments);
     }
+
+    // Fallback for local messages (no segments from Rust yet): parse text
+    // using the provided emotes prop.
+    if (emotes) {
+      const words = parsed.content.split(' ');
+      const newSegments: EmoteSegment[] = [];
+
+      words.forEach((word, i) => {
+        const emote = emotes['7tv'].find((e: Emote) => e.name === word) ||
+                      emotes.bttv.find((e: Emote) => e.name === word) ||
+                      emotes.ffz.find((e: Emote) => e.name === word) ||
+                      emotes.twitch.find((e: Emote) => e.name === word);
+
+        if (i > 0) newSegments.push({ type: 'text', content: ' ' });
+
+        if (emote) {
+          newSegments.push({
+            type: 'emote',
+            content: emote.name,
+            emoteId: emote.id,
+            emoteUrl: emote.url,
+            isZeroWidth: emote.isZeroWidth || (emote as any).is_zero_width,
+          });
+        } else {
+          // Parse the word for emojis for iOS-style emoji on optimistic msgs
+          const emojiParsed = parseEmojisSync(word);
+          emojiParsed.forEach(seg => {
+            if (seg.type === 'emoji' && seg.emojiUrl) {
+              newSegments.push({
+                type: 'emoji' as const,
+                content: seg.content,
+                emojiUrl: seg.emojiUrl,
+              });
+            } else {
+              newSegments.push({ type: 'text', content: seg.content });
+            }
+          });
+        }
+      });
+
+      // Coalesce adjacent text segments
+      const coalesced: EmoteSegment[] = [];
+      newSegments.forEach(seg => {
+        if (coalesced.length > 0 && coalesced[coalesced.length - 1].type === 'text' && seg.type === 'text') {
+          coalesced[coalesced.length - 1].content += seg.content;
+        } else {
+          coalesced.push(seg);
+        }
+      });
+      return coalesced;
+    }
+
+    // No segments and no emotes loaded - parse for emojis at minimum
+    const emojiParsed = parseEmojisSync(parsed.content);
+    return emojiParsed.map((seg): EmoteSegment => {
+      if (seg.type === 'emoji' && seg.emojiUrl) {
+        return {
+          type: 'emoji' as const,
+          content: seg.content,
+          emojiUrl: seg.emojiUrl,
+        };
+      }
+      return { type: 'text' as const, content: seg.content };
+    });
   }, [parsed.segments, parsed.content, emotes]);
 
   // Extract userId once to prevent re-renders
@@ -452,21 +455,26 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     [userId, userOverrides, parsed.color],
   );
 
-  // Initialize state from synchronous memory cache (avoids null -> data flash)
-  const [seventvBadge, setSeventvBadge] = useState<SevenTVBadgeWithSelection | null>(() => {
-    if (!userId) return null;
-    const cached = getCosmeticsFromMemoryCache(userId);
-    return cached?.badges.find((b: SevenTVBadgeWithSelection) => b.selected) || null;
-  });
-  const [seventvPaint, setSeventvPaint] = useState<SevenTVPaintWithSelection | null>(() => {
-    if (!userId) return null;
-    const cached = getCosmeticsFromMemoryCache(userId);
-    return cached?.paints.find((p: SevenTVPaintWithSelection) => p.selected) || null;
-  });
-  const [thirdPartyBadges, setThirdPartyBadges] = useState<ThirdPartyBadgeType[]>(() => {
-    if (!userId) return [];
-    return getThirdPartyBadgesFromMemoryCache(userId) || [];
-  });
+  // Paint + 7TV badge are now derived from chatUserStore: ChatWidget's addUser
+  // fires the cosmetics fetch once per user and stores the selected paint+badge.
+  // Subscribing here means a 100-message scrollback renders 0 paint-fetches +
+  // 0 paint-derivations per message — the store holds one resolved entry per
+  // unique chatter and every message just reads from it.
+  const seventvPaint = useChatUserStore(
+    (s) => (userId ? s.users.get(userId)?.paint : undefined),
+  ) as SevenTVPaintWithSelection | null | undefined;
+  const seventvBadge = useChatUserStore(
+    (s) => (userId ? s.users.get(userId)?.seventvBadge : undefined),
+  ) as SevenTVBadgeWithSelection | null | undefined;
+  const thirdPartyBadgesFromStore = useChatUserStore(
+    (s) => (userId ? s.users.get(userId)?.thirdPartyBadges : undefined),
+  ) as ThirdPartyBadgeType[] | undefined;
+  // If the store doesn't have third-party badges yet (e.g., this is a message
+  // from before channel context was available), fall back to a one-shot read
+  // from the per-user cache. Empty array if neither source has data.
+  const thirdPartyBadges: ThirdPartyBadgeType[] =
+    thirdPartyBadgesFromStore ??
+    (userId ? (getThirdPartyBadgesFromMemoryCache(userId) || []) : []);
   const [broadcasterType] = useState<string | null>(null);
   const [isMentioned, setIsMentioned] = useState(false);
   const [isReplyToMe, setIsReplyToMe] = useState(false);
@@ -573,64 +581,9 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phraseMatch]);
 
-  // Fetch 7TV user cosmetics and third-party badges (only if not already loaded from cache)
-  useEffect(() => {
-    if (!userId) {
-      return;
-    }
-
-    let cancelled = false;
-
-    // Only fetch 7TV cosmetics if we don't already have data from initial cache
-    // This prevents redundant API calls when cache already populated the state
-    const cachedCosmetics = getCosmeticsFromMemoryCache(userId);
-    if (!cachedCosmetics) {
-      getCosmeticsWithFallback(userId).then((cosmetics) => {
-        if (cancelled || !cosmetics) return;
-
-        // Find selected paint (the 'selected' property is added by seventvService)
-        const selectedPaint = cosmetics.paints.find((p: any) => p.selected);
-        if (selectedPaint) {
-          setSeventvPaint(selectedPaint);
-        }
-
-        // Find selected badge (the 'selected' property is added by seventvService)
-        const selectedBadge = cosmetics.badges.find((b: any) => b.selected);
-        if (selectedBadge) {
-          setSeventvBadge(selectedBadge);
-        }
-      });
-    }
-
-    // Third-party badges are populated as part of the unified Rust badge call.
-    // We trigger that call here (only if needed) to ensure these badges show
-    // consistently in chat.
-    const cachedThirdParty = getThirdPartyBadgesFromMemoryCache(userId);
-    if (!cachedThirdParty) {
-      const effectiveChannelId =
-        parsed.tags.get('source-room-id') ||
-        parsed.tags.get('room-id') ||
-        currentStream?.user_id ||
-        '';
-
-      const effectiveChannelName =
-        currentStream?.user_login ||
-        currentStream?.user_name ||
-        parsed.tags.get('room') ||
-        '';
-
-      // This call also populates the third-party badge in-memory cache.
-      getTwitchBadgesWithFallback(userId, parsed.username, effectiveChannelId, effectiveChannelName).then(() => {
-        if (cancelled) return;
-        setThirdPartyBadges(getThirdPartyBadgesFromMemoryCache(userId) || []);
-      });
-    }
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  // All cosmetic resolution (paint, 7TV badge, third-party badges) lives in
+  // chatUserStore.addUser. ChatMessage just subscribes via the selectors
+  // above. No per-message useEffect / useState / fetch.
 
   // Reactive caching for 7TV cosmetics
   useEffect(() => {
@@ -1140,7 +1093,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             // Handle both old format (key/info) and new format (name/version)
             if (!badge.info) return null;
@@ -1187,6 +1139,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
               />
             </Tooltip>
           ))}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
         </span>
       );
     };
@@ -1305,7 +1258,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1351,6 +1303,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
               />
             </Tooltip>
           ))}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
         </span>
       );
     };
@@ -1484,7 +1437,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center gap-1 mr-1">
-          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1529,6 +1481,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
               />
             </Tooltip>
           ))}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
         </span>
       );
     };
@@ -1619,7 +1572,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
 
       return (
         <span className="inline-flex items-center align-middle gap-1 mr-1">
-          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
           {parsed.badges.map((badge, idx) => {
             if (!badge.info) return null;
             return (
@@ -1664,6 +1616,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
               />
             </Tooltip>
           ))}
+          {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
         </span>
       );
     };
@@ -2128,8 +2081,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
           {/* Badges */}
           {isSN || (isFromSharedChat && channelProfileImage) || parsed.badges.length > 0 || seventvBadge || thirdPartyBadges.length > 0 ? (
             <span className="inline-flex items-center gap-1 mr-1.5 align-middle">
-              {/* StreamNook user identity badge (only visible to other StreamNook users) */}
-              {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
               {/* Shared chat channel profile image badge */}
               {isFromSharedChat && channelProfileImage && (
                 <Tooltip content={`Chatting from ${fetchedChannelName || 'shared channel'}`} side="top">
@@ -2200,6 +2151,9 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
                   />
                 </Tooltip>
               ))}
+              {/* StreamNook identity badge — rendered LAST so it sits closest
+                  to the username, matching the profile card's badge order. */}
+              {isSN && <StreamNookBadge userId={senderUserId} userNumber={getStreamNookUserNumber(senderUserId)} />}
             </span>
           ) : null}
 

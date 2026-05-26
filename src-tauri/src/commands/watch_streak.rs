@@ -185,7 +185,7 @@ pub async fn get_watch_streak(channel_id: String) -> Result<Option<WatchStreakMi
         .await
         .map_err(|e| format!("Failed to get auth token: {}", e))?;
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Build GQL request for RewardList
     let request_body = serde_json::json!({
@@ -285,7 +285,7 @@ pub async fn share_watch_streak(
         .await
         .map_err(|e| format!("Failed to get auth token: {}", e))?;
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Build the input object
     let mut input = serde_json::json!({
@@ -376,7 +376,7 @@ pub async fn get_watch_streaks_batch(
         .await
         .map_err(|e| format!("Failed to get auth token: {}", e))?;
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Max 35 operations per batch per Twitch GQL limits.
     // However, if the frontend sends more than 35, we'll process them in chunks.

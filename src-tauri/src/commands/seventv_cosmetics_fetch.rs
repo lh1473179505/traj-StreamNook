@@ -160,7 +160,7 @@ query AllPaints {
 // ============================================================================
 
 async fn execute_gql_query(query: &str) -> Result<serde_json::Value, String> {
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     let response = client
         .post(SEVENTV_GQL_URL)

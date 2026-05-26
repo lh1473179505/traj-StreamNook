@@ -82,25 +82,22 @@ const FriendlyFooter = () => (
   </div>
 );
 
-// Helper to format markdown text roughly (Matched with UpdatesSettings)
+// Helper to format markdown text. Matches the renderer in WhatsNewSettings.tsx
+// so the post-install modal and the in-settings tab agree on what a release
+// looks like. NO content truncation — earlier versions cut everything after a
+// bare `---` line on the theory that the workflow-appended Bundle Components /
+// Installation block was noise, but release_manager.ps1 uses `---` as a
+// legitimate section separator between the release headline and the structured
+// Features / Bug Fixes blocks, which meant the modal silently swallowed
+// everything after the headline. Surface the full body; let the consumer scroll.
 const FormatMarkdown = ({ content }: { content: string }) => {
   if (!content) return null;
 
-  // Filter content to stop at "Bundle Components", "Installation", or separator
   const lines = content.split('\n');
-  const filteredLines: string[] = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === '---' || trimmed === 'Bundle Components' || trimmed === 'Installation') {
-      break;
-    }
-    filteredLines.push(line);
-  }
 
   return (
     <div className="space-y-1 text-xs text-textSecondary">
-      {filteredLines.map((line, i) => {
+      {lines.map((line, i) => {
         const cleanLine = line.trim();
         if (!cleanLine) return <div key={i} className="h-2" />;
 
@@ -161,10 +158,28 @@ const FormatMarkdown = ({ content }: { content: string }) => {
 
         if (cleanLine.startsWith('# '))
           return <h3 key={i} className="text-sm font-bold text-textPrimary mt-4 mb-2">{parseInlineMarkdown(cleanLine.replace('# ', ''))}</h3>;
+        // `##` is the headline tier used at the top of a release body. Render
+        // larger than the structured `###` section headings (Features, etc.)
+        // so the eye lands here first, mirroring WhatsNewSettings.
         if (cleanLine.startsWith('## '))
-          return <h4 key={i} className="text-xs font-bold text-textPrimary mt-3 mb-1">{parseInlineMarkdown(cleanLine.replace('## ', ''))}</h4>;
+          return <h4 key={i} className="text-base font-bold text-textPrimary mt-4 mb-2">{parseInlineMarkdown(cleanLine.replace('## ', ''))}</h4>;
         if (cleanLine.startsWith('### '))
           return <h5 key={i} className="text-xs font-semibold text-textPrimary mt-2">{parseInlineMarkdown(cleanLine.replace('### ', ''))}</h5>;
+        // Blockquotes (>) render as a left-bordered subtle callout — same recipe
+        // as WhatsNewSettings' ReleaseBody so headline bodies look identical
+        // across the two surfaces.
+        if (cleanLine.startsWith('> ')) {
+          return (
+            <div key={i} className="border-l-2 border-accent/40 pl-3 py-1 my-2 text-textSecondary">
+              {parseInlineMarkdown(cleanLine.replace('> ', ''))}
+            </div>
+          );
+        }
+        // Horizontal rule. Used by release_manager to separate the headline
+        // block from the structured sections below it.
+        if (cleanLine === '---') {
+          return <div key={i} className="h-px bg-borderSubtle my-3" />;
+        }
         if (cleanLine.startsWith('- ') || cleanLine.startsWith('* '))
           return (
             <div key={i} className="flex items-start gap-2 ml-2">

@@ -56,7 +56,7 @@ async fn fetch_badges_from_api(
 
     debug!("[Badges] Fetching global badges from Twitch API...");
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(url)
         .header("Client-Id", client_id)
@@ -470,7 +470,7 @@ pub async fn fetch_channel_badges(
         channel_id
     );
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(&url)
         .header("Client-Id", client_id)
@@ -508,7 +508,7 @@ pub async fn get_user_badges(
         .await
         .map_err(|e| format!("Failed to get token: {}", e))?;
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     // Get user information to check broadcaster_type
     let user_url = format!("https://api.twitch.tv/helix/users?id={}", user_id);

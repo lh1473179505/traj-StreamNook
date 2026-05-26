@@ -240,7 +240,7 @@ impl SevenTVAuthService {
             Err(_) => return Ok(false),
         };
 
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Make a simple authenticated query to verify the token works
         let query = r#"{ users { me { id } } }"#;
@@ -302,7 +302,7 @@ impl SevenTVCosmeticsService {
     /// Set active paint
     pub async fn set_active_paint(user_id: &str, paint_id: Option<&str>) -> Result<bool> {
         let token = SevenTVAuthService::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Use the simplified mutation (we only need the response status)
         let mutation = r#"
@@ -376,7 +376,7 @@ impl SevenTVCosmeticsService {
     /// Set active badge
     pub async fn set_active_badge(user_id: &str, badge_id: Option<&str>) -> Result<bool> {
         let token = SevenTVAuthService::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Use the simplified mutation
         let mutation = r#"

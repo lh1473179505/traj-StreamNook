@@ -236,7 +236,7 @@ impl TwitchService {
 
     // Device Code Flow - the main login method (like Python app)
     pub async fn login(_state: &AppState, app_handle: tauri::AppHandle) -> Result<String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Start device flow
         let device_response = Self::start_device_flow(&client).await?;
@@ -349,7 +349,7 @@ impl TwitchService {
 
     // Device code flow methods (kept for backward compatibility if needed)
     pub async fn start_device_login(_state: &AppState) -> Result<DeviceCodeInfo> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let device_response = Self::start_device_flow(&client).await?;
 
         Ok(DeviceCodeInfo {
@@ -362,7 +362,7 @@ impl TwitchService {
     }
 
     pub async fn complete_device_login(device_code: &str, _state: &AppState) -> Result<String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let token_response = Self::poll_for_token(&client, device_code, 5, 1800).await?;
 
@@ -500,7 +500,7 @@ impl TwitchService {
     }
 
     async fn refresh_token(refresh_token: &str) -> Result<StorableToken> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let params = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -619,7 +619,7 @@ impl TwitchService {
                                 }
                             } else {
                                 // No refresh token, validate the token directly
-                                let client = Client::new();
+                                let client = crate::services::http::client().clone();
                                 let response = client
                                     .get("https://id.twitch.tv/oauth2/validate")
                                     .header(
@@ -711,7 +711,7 @@ impl TwitchService {
     /// Verify the current token's health and return detailed status
     /// This should be called on app startup to proactively check/refresh the token
     pub async fn verify_token_health() -> Result<TokenHealthStatus> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Try to get the current token (this will auto-refresh if needed)
         let access_token = match Self::get_token().await {
@@ -878,7 +878,7 @@ impl TwitchService {
                 ));
             }
         };
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // First, get the user ID
         let user_response = client
@@ -975,7 +975,7 @@ impl TwitchService {
                 ));
             }
         };
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let response = client
             .get(format!(
                 "https://api.twitch.tv/helix/channels?broadcaster_login={}",
@@ -1001,7 +1001,7 @@ impl TwitchService {
 
     pub async fn get_user_info() -> Result<UserInfo> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let response = client
             .get("https://api.twitch.tv/helix/users")
@@ -1024,7 +1024,7 @@ impl TwitchService {
 
     pub async fn get_user_by_login(login: &str) -> Result<UserInfo> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let response = client
             .get(format!("https://api.twitch.tv/helix/users?login={}", login))
@@ -1047,7 +1047,7 @@ impl TwitchService {
 
     pub async fn get_user_by_id(user_id: &str) -> Result<UserInfo> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let response = client
             .get(format!("https://api.twitch.tv/helix/users?id={}", user_id))
@@ -1075,7 +1075,7 @@ impl TwitchService {
     ) -> Result<(Vec<TwitchStream>, Option<String>)> {
         // Try to get token, but don't fail if not authenticated
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Build URL with pagination
         let mut url = format!("https://api.twitch.tv/helix/streams?first={}", limit);
@@ -1169,7 +1169,7 @@ impl TwitchService {
             Err(_) => return, // Can't check without token
         };
 
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         for stream in streams.iter_mut() {
             // Check if this broadcaster is in a shared chat session
@@ -1208,7 +1208,7 @@ impl TwitchService {
         limit: u32,
     ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let mut url = format!("https://api.twitch.tv/helix/games/top?first={}", limit);
         if let Some(cursor) = cursor {
@@ -1299,7 +1299,7 @@ impl TwitchService {
         limit: u32,
     ) -> Result<(Vec<TwitchStream>, Option<String>)> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let mut url = format!(
             "https://api.twitch.tv/helix/streams?game_id={}&first={}",
@@ -1379,7 +1379,7 @@ impl TwitchService {
 
     pub async fn search_channels(_state: &AppState, query: &str) -> Result<Vec<TwitchStream>> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/search/channels?query={}&first=60&live_only=false",
@@ -1574,7 +1574,7 @@ impl TwitchService {
         // GQL mutations require token + Client-Id to match.
         // DropsAuthService provides a token issued for the Android client ID.
         let token = DropsAuthService::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Twitch Android app client ID — matches the DropsAuthService token
         const GQL_CLIENT_ID: &str = env!("TWITCH_ANDROID_CLIENT_ID");
@@ -1639,7 +1639,7 @@ impl TwitchService {
         use crate::services::drops_auth_service::DropsAuthService;
 
         let token = DropsAuthService::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         const GQL_CLIENT_ID: &str = env!("TWITCH_ANDROID_CLIENT_ID");
 
@@ -1701,7 +1701,7 @@ impl TwitchService {
         use crate::services::drops_auth_service::DropsAuthService;
 
         let token = DropsAuthService::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         const GQL_CLIENT_ID: &str = env!("TWITCH_ANDROID_CLIENT_ID");
 
@@ -1867,7 +1867,7 @@ impl TwitchService {
         cursor: Option<String>,
     ) -> Result<(Vec<TwitchStream>, Option<String>)> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let user_info = Self::get_user_info().await?;
 
@@ -1993,7 +1993,7 @@ impl TwitchService {
     pub async fn get_offline_last_broadcasts(
         user_ids: Vec<String>,
     ) -> Result<std::collections::HashMap<String, Option<String>>> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         // create the query
         let query = format!(
             r#"query {{ users(ids: {}) {{ id lastBroadcast {{ startedAt }} videos(first: 1, sort: TIME) {{ edges {{ node {{ createdAt lengthSeconds }} }} }} }} }}"#,
@@ -2075,7 +2075,7 @@ impl TwitchService {
 
     pub async fn check_following_status(target_user_id: &str) -> Result<bool> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Get the current user's ID
         let user_info = Self::get_user_info().await?;
@@ -2128,7 +2128,7 @@ impl TwitchService {
     /// Returns the stream data if online, None if offline
     pub async fn check_stream_online(user_login: &str) -> Result<Option<TwitchStream>> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/streams?user_login={}",
@@ -2157,7 +2157,7 @@ impl TwitchService {
     /// Get the game ID by game name
     pub async fn get_game_id_by_name(game_name: &str) -> Result<Option<String>> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/games?name={}",
@@ -2187,7 +2187,7 @@ impl TwitchService {
     /// Returns a list of matching categories with id, name, and box_art_url
     pub async fn search_categories(query: &str, limit: u32) -> Result<Vec<serde_json::Value>> {
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/search/categories?query={}&first={}",
@@ -2216,7 +2216,7 @@ impl TwitchService {
     /// Requires user:manage:whispers scope
     pub async fn send_whisper(to_user_id: &str, message: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Get the current user's ID
         let user_info = Self::get_user_info().await?;
@@ -2259,7 +2259,7 @@ impl TwitchService {
         };
 
         let token = Self::get_token().await.ok();
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let mut url = format!(
             "https://api.twitch.tv/helix/streams?game_id={}&first={}",
@@ -2360,7 +2360,7 @@ impl TwitchService {
     pub async fn get_category_info(
         game_name: &str,
     ) -> Result<Option<crate::models::stream::CategoryInfo>> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let query = "query($name: String!) { game(name: $name) { id name displayName description followersCount boxArtURL tags(tagType: CONTENT) { id localizedName } } }";
 
         let body = serde_json::json!({
@@ -2392,7 +2392,7 @@ impl TwitchService {
         period: Option<&str>,
     ) -> Result<(Vec<crate::models::stream::TwitchClip>, Option<String>)> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let mut url = format!(
             "https://api.twitch.tv/helix/clips?game_id={}&first={}",
@@ -2456,7 +2456,7 @@ impl TwitchService {
         cursor: Option<&str>,
     ) -> Result<(Vec<crate::models::stream::TwitchVideo>, Option<String>)> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let mut url = format!(
             "https://api.twitch.tv/helix/videos?game_id={}&sort={}&first={}",
@@ -2507,7 +2507,7 @@ impl TwitchService {
         limit: u32,
     ) -> Result<Vec<crate::models::stream::TwitchVideo>> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/videos?user_id={}&sort={}&first={}",
@@ -2542,7 +2542,7 @@ impl TwitchService {
         settings: serde_json::Value,
     ) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2575,7 +2575,7 @@ impl TwitchService {
     /// Clear all messages from chat
     pub async fn clear_chat(broadcaster_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2603,7 +2603,7 @@ impl TwitchService {
     /// Delete a specific chat message
     pub async fn delete_chat_message(broadcaster_id: &str, message_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2636,7 +2636,7 @@ impl TwitchService {
         reason: Option<&str>,
     ) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2682,7 +2682,7 @@ impl TwitchService {
     /// Unban a user
     pub async fn unban_user(broadcaster_id: &str, target_user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2710,7 +2710,7 @@ impl TwitchService {
     /// Add a channel moderator
     pub async fn add_channel_moderator(broadcaster_id: &str, user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/moderation/moderators?broadcaster_id={}&user_id={}",
@@ -2736,7 +2736,7 @@ impl TwitchService {
     /// Remove a channel moderator
     pub async fn remove_channel_moderator(broadcaster_id: &str, user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/moderation/moderators?broadcaster_id={}&user_id={}",
@@ -2762,7 +2762,7 @@ impl TwitchService {
     /// Add a channel VIP
     pub async fn add_channel_vip(broadcaster_id: &str, user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/channels/vips?broadcaster_id={}&user_id={}",
@@ -2788,7 +2788,7 @@ impl TwitchService {
     /// Remove a channel VIP
     pub async fn remove_channel_vip(broadcaster_id: &str, user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/channels/vips?broadcaster_id={}&user_id={}",
@@ -2818,7 +2818,7 @@ impl TwitchService {
         status: &str,
     ) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -2856,7 +2856,7 @@ impl TwitchService {
     /// Update User Chat Color
     pub async fn update_user_chat_color(user_id: &str, color: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/chat/color?user_id={}&color={}",
@@ -2885,7 +2885,7 @@ impl TwitchService {
     /// Block user
     pub async fn block_user(target_user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
 
         let url = format!(
@@ -2912,7 +2912,7 @@ impl TwitchService {
     /// Unblock user
     pub async fn unblock_user(target_user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
 
         let url = format!(
@@ -2939,7 +2939,7 @@ impl TwitchService {
     /// Get Channel Moderators
     pub async fn get_channel_moderators(broadcaster_id: &str) -> Result<Vec<serde_json::Value>> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/moderation/moderators?broadcaster_id={}",
@@ -2975,7 +2975,7 @@ impl TwitchService {
     /// Get Channel VIPs
     pub async fn get_channel_vips(broadcaster_id: &str) -> Result<Vec<serde_json::Value>> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/channels/vips?broadcaster_id={}",
@@ -3012,7 +3012,7 @@ impl TwitchService {
     /// The Helix API requires broadcaster_id to match the access token user_id,
     /// so we use the GQL Mods/VIPs queries which work for any authenticated user.
     pub async fn get_chatters_by_role(channel_login: &str) -> Result<serde_json::Value> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Build batch GQL request — both Mods and VIPs in one round trip
         let payload = serde_json::json!([
@@ -3116,7 +3116,7 @@ impl TwitchService {
         color: Option<&str>,
     ) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -3157,7 +3157,7 @@ impl TwitchService {
     /// Send Shoutout
     pub async fn send_shoutout(broadcaster_id: &str, target_user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -3185,7 +3185,7 @@ impl TwitchService {
     /// Start Commercial
     pub async fn start_commercial(broadcaster_id: &str, length: u32) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = "https://api.twitch.tv/helix/channels/commercial";
 
@@ -3215,7 +3215,7 @@ impl TwitchService {
     /// Start Raid
     pub async fn start_raid(broadcaster_id: &str, target_user_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/raids?from_broadcaster_id={}&to_broadcaster_id={}",
@@ -3241,7 +3241,7 @@ impl TwitchService {
     /// Cancel Raid
     pub async fn cancel_raid(broadcaster_id: &str) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = format!(
             "https://api.twitch.tv/helix/raids?broadcaster_id={}",
@@ -3267,7 +3267,7 @@ impl TwitchService {
     /// Create Stream Marker
     pub async fn create_stream_marker(user_id: &str, description: Option<&str>) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let url = "https://api.twitch.tv/helix/streams/markers";
 
@@ -3309,7 +3309,7 @@ impl TwitchService {
         reason: &str,
     ) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 
@@ -3346,7 +3346,7 @@ impl TwitchService {
     /// Update Shield Mode (Helix: PUT /moderation/shield_mode)
     pub async fn update_shield_mode(broadcaster_id: &str, is_active: bool) -> Result<()> {
         let token = Self::get_token().await?;
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
         let user_info = Self::get_user_info().await?;
         let moderator_id = &user_info.id;
 

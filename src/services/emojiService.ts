@@ -6,8 +6,12 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import { Logger } from '../utils/logger';
-// Cache for proxied emoji URLs (codepoint -> data URL)
-const proxiedEmojiCache = new Map<string, string>();
+import { LruMap } from './cosmeticsCache';
+// LRU-bounded cache for proxied emoji URLs (codepoint -> data URL). 256 entries
+// × ~5 KB per Apple emoji = ~1.3 MB ceiling. Twitch chat uses emojis sparingly
+// in practice so this rarely fills; the cap protects against an edge-case
+// emoji-heavy session pinning 15-20 MB indefinitely in the JS heap.
+const proxiedEmojiCache = new LruMap<string, string>(256);
 
 // Pending emoji fetches (to avoid duplicate requests)
 const pendingEmojiFetches = new Set<string>();

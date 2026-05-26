@@ -151,6 +151,12 @@ interface AppState {
   updateInfo: { current_version: string; latest_version: string } | null;
   showLiveStreamsOverlay: boolean;
   showDropsOverlay: boolean;
+  /**
+   * Latches true the first time the user opens the drops overlay this session.
+   * Sidebar gates its drops-inventory fetch on this so we don't poll Twitch
+   * for inventory data when the user has shown no interest in drops.
+   */
+  dropsOverlayEverOpened: boolean;
   showBadgesOverlay: boolean;
   badgesOverlayInitialPaintId: string | null;
   badgesOverlayInitialBadgeId: string | null;
@@ -283,6 +289,14 @@ let hasShownWelcomeBackToast = false;
 let eventSubListenerCleanup: (() => void)[] = [];
 let eventSubConnectionId = 0;
 
+// Watch streak batch fetches are HEAVY — Twitch GraphQL with one sub-query
+// per channel (28 sub-queries for a typical followed list), the response is
+// a large JSON. `loadFollowedStreams` is called from 10+ call sites that
+// cascade at startup, so without this guard the fetch fires 3-4× back-to-back
+// for the same data. Cache for 1 hour; refetch only after that.
+const WATCH_STREAKS_TTL_MS = 60 * 60 * 1000;
+let lastWatchStreaksFetchAt = 0;
+
 // Helper to save user context to localStorage for error reporting
 const saveUserContextToLocalStorage = (currentUser: TwitchUser | null, currentStream: TwitchStream | null) => {
   try {
@@ -305,8 +319,6 @@ const saveUserContextToLocalStorage = (currentUser: TwitchUser | null, currentSt
   }
 };
 
-// Magne reconnect interval — polls every 5s to reconnect if Magne launches after StreamNook
-let magneReconnectInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useAppStore = create<AppState>((set, get) => ({
   settings: {} as Settings,
@@ -333,6 +345,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateInfo: null,
   showLiveStreamsOverlay: false,
   showDropsOverlay: false,
+  dropsOverlayEverOpened: false,
   showBadgesOverlay: false,
   badgesOverlayInitialPaintId: null,
   badgesOverlayInitialBadgeId: null,
@@ -700,87 +713,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Always connect to Magne (independent of Discord toggle)
-    // Start a reconnect loop so Magne picks up activity even if launched later
-    invoke('connect_magne').catch(() => {});
-    if (!magneReconnectInterval) {
-      magneReconnectInterval = setInterval(async () => {
-        const currentStream = get().currentStream;
-        
-        let multiNookModule;
-        try {
-          multiNookModule = await import('./multiNookStore');
-        } catch {
-          // Module not loaded yet
-        }
-        
-        const multiNookState = multiNookModule ? multiNookModule.usemultiNookStore.getState() : null;
-        
-        if (multiNookState && multiNookState.isMultiNookActive && multiNookState.slots.length > 0) {
-          const allSlots = multiNookState.slots;
-          
-          let maxGame = '';
-          let maxCount = 0;
-          const gameCounts: Record<string, number> = {};
-          
-          for (const slot of allSlots) {
-            if (slot.gameName && slot.gameName.trim() !== '') {
-              gameCounts[slot.gameName] = (gameCounts[slot.gameName] || 0) + 1;
-              if (gameCounts[slot.gameName] > maxCount) {
-                maxCount = gameCounts[slot.gameName];
-                maxGame = slot.gameName;
-              }
-            }
-          }
-
-          const phraseHash = allSlots.reduce((acc, s) => acc + s.channelLogin.length, 0);
-          const phrases = [
-            `Watching ${allSlots.length} Streams`,
-            `Multi-POV: ${allSlots.length} Streams`,
-            `MultiNook \u2014 ${allSlots.length} Streams`
-          ];
-          const detailsPhrase = phrases[phraseHash % phrases.length];
-
-          const details = allSlots.length === 1
-            ? `Watching ${allSlots[0].channelName || allSlots[0].channelLogin}`
-            : detailsPhrase;
-
-          const separators = [', ', ' \u00B7 ', ' | '];
-          const separator = separators[(phraseHash + 1) % separators.length];
-
-          let streamerNames = allSlots
-            .map(s => s.channelName || s.channelLogin)
-            .join(separator);
-          
-          if (streamerNames.length > 120) {
-            streamerNames = streamerNames.substring(0, 110) + `... +${allSlots.length} more`; 
-          }
-
-          invoke('update_magne_presence', {
-            details,
-            activityState: allSlots.length === 1 ? 'MultiNook' : streamerNames,
-            largeImage: '',
-            smallImage: '',
-            startTime: Date.now(),
-            gameName: maxGame,
-            streamUrl: 'https://github.com/winters27/StreamNook/',
-          }).catch(() => {});
-        } else if (currentStream) {
-          // Re-send the watching presence
-          invoke('update_magne_presence', {
-            details: `Watching ${currentStream.user_name}`,
-            activityState: currentStream.title || 'Live on Twitch',
-            largeImage: '',
-            smallImage: '',
-            startTime: Date.now(),
-            gameName: currentStream.game_name || '',
-            streamUrl: `https://twitch.tv/${currentStream.user_login}`,
-          }).catch(() => {});
-        } else {
-          invoke('connect_magne').catch(() => {});
-        }
-      }, 30000); // Changed from 5s to 30s heartbeat
-    }
   },
   updateSettings: async (newSettings) => {
     const oldSettings = get().settings;
@@ -857,8 +789,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const streams = await invoke('get_followed_streams') as TwitchStream[];
       set({ followedStreams: streams });
 
-      // Fetch batched watch streaks for live followed streams
-      if (streams.length > 0) {
+      // Fetch batched watch streaks for live followed streams.
+      // 1h TTL — see WATCH_STREAKS_TTL_MS above for why this matters.
+      const now = Date.now();
+      if (streams.length > 0 && now - lastWatchStreaksFetchAt > WATCH_STREAKS_TTL_MS) {
+        lastWatchStreaksFetchAt = now; // Set optimistically to dedupe concurrent callers.
         const channelIds = streams.map(s => s.user_id);
         invoke('get_watch_streaks_batch', { channelIds })
           .then(res => {
@@ -874,6 +809,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             set(state => ({ watchStreaks: { ...state.watchStreaks, ...formattedStreaks } }));
           })
           .catch(e => {
+            // Roll back the timestamp so a retry can happen
+            lastWatchStreaksFetchAt = 0;
             Logger.debug('[Sidebar] Failed to fetch batched watch streaks:', e);
           });
       }
@@ -1049,10 +986,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
 
-      // Always set idle Magne presence
-      invoke('set_idle_magne_presence').catch((e) => {
-        Logger.warn('Could not set idle Magne presence:', e);
-      });
     } catch (e) {
       Logger.error('Failed to stop stream:', e);
     }
@@ -1335,21 +1268,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         });
       }
 
-      // Always update Magne presence (independent of Discord toggle)
-      invoke('update_magne_presence', {
-        details: `Watching ${info.user_name}`,
-        activityState: info.title || 'Live on Twitch',
-        largeImage: 'icon_256x256',
-        smallImage: 'twitch_logo',
-        startTime: Date.now(),
-        gameName: info.game_name || '',
-        streamUrl: `https://twitch.tv/${channel}`,
-      }).then(() => {
-        Logger.debug('[Magne] Presence updated successfully');
-      }).catch((e) => {
-        Logger.warn('[Magne] Could not update presence (Magne may not be running):', e);
-      });
-
       // Connect to EventSub for real-time events (only if authenticated)
       const channelId = info.user_id;
       const autoRedirectOnRaid = get().settings.auto_switch?.auto_redirect_on_raid ?? true;
@@ -1496,10 +1414,6 @@ export const useAppStore = create<AppState>((set, get) => ({
                   Logger.warn('[Discord] Could not update presence on channel change:', e);
                 });
               }
-
-              invoke('update_magne_presence', presenceArgs).catch((e) => {
-                Logger.warn('[Magne] Could not update presence on channel change:', e);
-              });
             }
           });
           eventSubListenerCleanup.push(unlistenUpdate);
@@ -1766,8 +1680,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showLiveStreamsOverlay: show });
   },
   setShowDropsOverlay: (show: boolean) => {
-    if (show) trackActivity('Opened Drops');
-    set({ showDropsOverlay: show });
+    if (show) {
+      trackActivity('Opened Drops');
+      // Latch the "ever opened" flag so the sidebar can start showing the
+      // drops gift indicator. Once true, stays true for the session.
+      set({ showDropsOverlay: true, dropsOverlayEverOpened: true });
+    } else {
+      set({ showDropsOverlay: false });
+    }
   },
   setShowBadgesOverlay: (show: boolean) => {
     if (show) trackActivity('Opened Badges');

@@ -111,8 +111,8 @@ const PlayerSettings = () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Streamlink executable', extensions: ['exe'] }],
-        title: 'Select Streamlink executable (streamlinkw.exe or streamlink.exe)',
+        filters: [{ name: 'streamlinkw.exe', extensions: ['exe'] }],
+        title: 'Select streamlinkw.exe',
       });
 
       if (selected && typeof selected === 'string') {
@@ -374,7 +374,7 @@ const PlayerSettings = () => {
               className="glass-button px-3 py-2 text-xs text-textPrimary rounded flex items-center gap-2"
             >
               <FolderOpen size={14} />
-              Browse for a different install
+              Browse for streamlinkw.exe
             </button>
           </div>
         </details>

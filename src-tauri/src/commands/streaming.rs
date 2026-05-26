@@ -20,97 +20,19 @@ pub struct StreamStartResult {
     pub quality: String,
 }
 
-/// Check if the ttvlol plugin (twitch.py) actually exists
-/// Uses the same 3-step resolution as get_plugins_directory:
-/// 1. Custom folder plugins
-/// 2. AppData plugins (for installed Streamlink)
-/// 3. Bundled location
-fn is_ttvlol_plugin_installed(custom_folder: Option<&str>) -> bool {
-    // Step 1: Check custom folder plugins (for Portable versions)
-    if let Some(folder) = custom_folder {
-        if !folder.is_empty() {
-            let custom_plugin = PathBuf::from(folder).join("plugins").join("twitch.py");
-            if custom_plugin.exists() {
-                debug!(
-                    "[Streaming] ✅ Found ttvlol plugin in custom folder: {:?}",
-                    custom_plugin
-                );
-                return true;
-            } else {
-                debug!(
-                    "[Streaming] No ttvlol in custom folder {:?}, checking AppData...",
-                    custom_plugin
-                );
-            }
-        }
+/// Whether the bundled TTVLOL plugin is on disk. Thin wrapper around
+/// `StreamlinkManager::bundled_twitch_plugin_exists` so the call site downstream
+/// keeps its log line and reads cleanly. See the `bundled_plugin_dir` doc on the
+/// manager for the resolution rules; the short version is "portable layout
+/// next to the exe, with a dev-tree fallback."
+fn is_ttvlol_plugin_installed(_custom_folder: Option<&str>) -> bool {
+    let exists = StreamlinkManager::bundled_twitch_plugin_exists();
+    if exists {
+        debug!("[Streaming] ✅ Bundled ttvlol plugin present");
+    } else {
+        debug!("[Streaming] ❌ Bundled ttvlol plugin missing — broken install");
     }
-
-    // Step 2: Check User AppData for installed Streamlink plugins
-    // This is where the standard installer puts plugins: %APPDATA%/streamlink/plugins
-    if let Some(config_dir) = dirs::config_dir() {
-        let appdata_plugin = config_dir
-            .join("streamlink")
-            .join("plugins")
-            .join("twitch.py");
-        if appdata_plugin.exists() {
-            debug!(
-                "[Streaming] ✅ Found ttvlol plugin in AppData: {:?}",
-                appdata_plugin
-            );
-            return true;
-        } else {
-            debug!(
-                "[Streaming] No ttvlol in AppData {:?}, checking bundled...",
-                appdata_plugin
-            );
-        }
-    }
-
-    // Step 3: Check bundled location (production)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let plugin_path = exe_dir.join("streamlink").join("plugins").join("twitch.py");
-            debug!("[Streaming] Checking exe-relative path: {:?}", plugin_path);
-            if plugin_path.exists() {
-                debug!(
-                    "[Streaming] ✅ Found ttvlol plugin at exe dir: {:?}",
-                    plugin_path
-                );
-                return true;
-            }
-        }
-    }
-
-    // Development mode: check CWD and parent
-    if let Ok(cwd) = std::env::current_dir() {
-        debug!("[Streaming] CWD is: {:?}", cwd);
-
-        // Check CWD (project root)
-        let cwd_plugin = cwd.join("streamlink").join("plugins").join("twitch.py");
-        if cwd_plugin.exists() {
-            debug!(
-                "[Streaming] ✅ Found ttvlol plugin at CWD: {:?}",
-                cwd_plugin
-            );
-            return true;
-        }
-
-        // Check parent of CWD (for when CWD is src-tauri during dev)
-        if let Some(parent) = cwd.parent() {
-            let parent_plugin = parent.join("streamlink").join("plugins").join("twitch.py");
-            debug!("[Streaming] Checking parent path: {:?}", parent_plugin);
-            if parent_plugin.exists() {
-                debug!(
-                    "[Streaming] ✅ Found ttvlol plugin at parent: {:?}",
-                    parent_plugin
-                );
-                return true;
-            }
-        }
-    }
-
-    debug!("[Streaming] ❌ ttvlol plugin NOT found in any location");
-    false
+    exists
 }
 
 #[tauri::command]

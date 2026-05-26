@@ -12,6 +12,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub struct DropsWebSocketService {
     is_connected: Arc<RwLock<bool>>,
     app_handle: Option<AppHandle>,
+    /// Handle to the spawned reconnect loop. Used by `disconnect()` to actually
+    /// terminate the loop (which previously had no way to exit on demand —
+    /// the old `disconnect()` just flipped a flag the loop never read).
+    task_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl DropsWebSocketService {
@@ -19,23 +23,37 @@ impl DropsWebSocketService {
         Self {
             is_connected: Arc::new(RwLock::new(false)),
             app_handle: None,
+            task_handle: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
+    /// Connect to Twitch PubSub and subscribe to user-scoped drop topics.
+    /// Idempotent: if a live reconnect-loop task already exists, this is a
+    /// no-op. Multiple mining mode entry paths (campaign-specific, multi-
+    /// campaign, auto-mining) all call this safely.
     pub async fn connect(
         &mut self,
         user_id: &str,
         access_token: &str,
         app_handle: AppHandle,
     ) -> Result<()> {
+        {
+            let handle_guard = self.task_handle.lock().await;
+            if let Some(h) = handle_guard.as_ref() {
+                if !h.is_finished() {
+                    debug!("🔌 WebSocket already connected; skipping duplicate connect");
+                    return Ok(());
+                }
+            }
+        }
+
         self.app_handle = Some(app_handle.clone());
 
         let is_connected = self.is_connected.clone();
         let user_id = user_id.to_string();
         let access_token = access_token.to_string();
 
-        // Spawn WebSocket connection task
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match Self::websocket_loop(&user_id, &access_token, &app_handle, &is_connected)
                     .await
@@ -57,11 +75,15 @@ impl DropsWebSocketService {
                     }
                 }
 
-                // Wait before reconnecting
+                // Wait before reconnecting. If disconnect() is called during
+                // this sleep, the task is aborted and the sleep future is
+                // dropped cleanly at its await point.
                 debug!("🔄 Reconnecting WebSocket in 5 seconds...");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
+
+        *self.task_handle.lock().await = Some(handle);
 
         Ok(())
     }
@@ -297,9 +319,16 @@ impl DropsWebSocketService {
         *self.is_connected.read().await
     }
 
+    /// Terminate the reconnect loop and close the WebSocket. Aborts the
+    /// spawned task — tokio drops its future at the next await point, which
+    /// releases the socket and exits the reconnect loop. After this returns,
+    /// `connect()` can be called again to start a fresh connection.
     pub async fn disconnect(&self) {
+        if let Some(h) = self.task_handle.lock().await.take() {
+            h.abort();
+            debug!("🛑 Aborted DropsWebSocket reconnect loop");
+        }
         let mut connected = self.is_connected.write().await;
         *connected = false;
-        // The WebSocket loop will detect this and close
     }
 }

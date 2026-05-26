@@ -334,107 +334,95 @@ impl StreamlinkManager {
         Self::get_bundled_path().exists()
     }
 
-    /// Get the plugins directory with 3-step resolution:
-    /// 1. Check <custom_folder>/plugins (for Portable Streamlink)
-    /// 2. Check %APPDATA%/streamlink/plugins (for Standard Installed Streamlink)
-    /// 3. Fallback to Bundled location (<exe_directory>/streamlink/plugins/)
-    pub fn get_plugins_directory(custom_folder: Option<&str>) -> Option<String> {
-        // Step 1: Check custom folder plugins (for Portable versions)
-        if let Some(folder) = custom_folder {
-            if !folder.is_empty() {
-                let user_path = PathBuf::from(folder);
-
-                // Determine the base streamlink directory from the provided path
-                let base_dir = if user_path.is_file() {
-                    // C:/.../streamlink/bin/streamlinkw.exe -> C:/.../streamlink
-                    user_path.parent().and_then(|p| {
-                        if p.ends_with("bin") {
-                            p.parent()
-                        } else {
-                            Some(p)
-                        }
-                    })
-                } else if user_path.ends_with("bin") {
-                    // C:/.../streamlink/bin -> C:/.../streamlink
-                    user_path.parent()
-                } else {
-                    // C:/.../streamlink
-                    Some(user_path.as_path())
-                };
-
-                if let Some(base) = base_dir {
-                    let custom_plugins = base.join("plugins");
-                    if custom_plugins.exists() {
-                        debug!(
-                            "[StreamlinkManager] Found plugins in custom folder: {:?}",
-                            custom_plugins
-                        );
-                        return Some(custom_plugins.to_string_lossy().to_string());
-                    } else {
-                        debug!(
-                            "[StreamlinkManager] No plugins in custom folder {:?}, checking AppData...",
-                            custom_plugins
-                        );
-                    }
-                }
-            }
-        }
-
-        // Step 2: Check User AppData for installed Streamlink plugins
-        // This is where the standard installer puts plugins: %APPDATA%/streamlink/plugins
-        if let Some(config_dir) = dirs::config_dir() {
-            let appdata_plugins = config_dir.join("streamlink").join("plugins");
-            if appdata_plugins.exists() {
-                debug!(
-                    "[StreamlinkManager] Found plugins in AppData: {:?}",
-                    appdata_plugins
-                );
-                return Some(appdata_plugins.to_string_lossy().to_string());
-            } else {
-                debug!(
-                    "[StreamlinkManager] No plugins in AppData {:?}, checking bundled...",
-                    appdata_plugins
-                );
-            }
-        }
-
-        // Step 3: Fallback to bundled location (production)
+    /// Single source of truth for "where the bundled TTVLOL plugin folder lives."
+    /// Resolves the portable-install layout (`<exe_dir>/streamlink/plugins/`) and
+    /// falls back to the dev tree (CWD or its parent) so `cargo run` from either
+    /// `src-tauri/` or the repo root still works. Returns the actual directory
+    /// path (not the twitch.py file). None means the bundle is incomplete.
+    pub fn bundled_plugin_dir() -> Option<PathBuf> {
         if let Some(exe_dir) = Self::get_exe_directory() {
-            let plugins_path = exe_dir.join("streamlink").join("plugins");
-            if plugins_path.exists() {
-                debug!(
-                    "[StreamlinkManager] Found plugins directory at bundled: {:?}",
-                    plugins_path
-                );
-                return Some(plugins_path.to_string_lossy().to_string());
+            let p = exe_dir.join("streamlink").join("plugins");
+            if p.exists() {
+                return Some(p);
             }
         }
-
-        // Development mode: check CWD and parent
         if let Ok(cwd) = std::env::current_dir() {
-            let cwd_plugins = cwd.join("streamlink").join("plugins");
-            if cwd_plugins.exists() {
-                debug!(
-                    "[StreamlinkManager] Found plugins directory at CWD: {:?}",
-                    cwd_plugins
-                );
-                return Some(cwd_plugins.to_string_lossy().to_string());
+            let p = cwd.join("streamlink").join("plugins");
+            if p.exists() {
+                return Some(p);
             }
-
             if let Some(parent) = cwd.parent() {
-                let parent_plugins = parent.join("streamlink").join("plugins");
-                if parent_plugins.exists() {
-                    debug!(
-                        "[StreamlinkManager] Found plugins directory at parent: {:?}",
-                        parent_plugins
-                    );
-                    return Some(parent_plugins.to_string_lossy().to_string());
+                let p = parent.join("streamlink").join("plugins");
+                if p.exists() {
+                    return Some(p);
                 }
             }
         }
-
-        debug!("[StreamlinkManager] No plugins directory found");
         None
+    }
+
+    /// True if the bundled `twitch.py` (TTVLOL plugin) is actually on disk inside
+    /// the resolved bundle dir. Use this anywhere that needs to gate behavior on
+    /// "do we have a working TTVLOL plugin to ask Streamlink to load." Replaces
+    /// the per-callsite duplicated resolution that used to live in
+    /// `commands::streaming::is_ttvlol_plugin_installed` and the multi_nook copy.
+    pub fn bundled_twitch_plugin_exists() -> bool {
+        Self::bundled_plugin_dir()
+            .map(|d| d.join("twitch.py").exists())
+            .unwrap_or(false)
+    }
+
+    /// Resolve the plugin directory to pass via `--plugin-dirs`.
+    ///
+    /// StreamNook ships as a portable app: extract the zip anywhere (Downloads,
+    /// Desktop, USB stick) and run `StreamNook.exe` from there. The exe's folder
+    /// is the authoritative app root, and `<exe_dir>/streamlink/plugins/twitch.py`
+    /// is the TTVLOL plugin we tested and shipped with this release. That bundled
+    /// plugin is what we return whenever it exists — full stop. No matter where
+    /// the user extracted the zip, no matter what `custom_streamlink_path` points
+    /// at, no matter what's been lying around in `%APPDATA%\streamlink\plugins`
+    /// from some long-ago standalone install. The bundle is the truth.
+    ///
+    /// `custom_streamlink_path` (handled by `get_effective_path`) still controls
+    /// which `streamlinkw.exe` *binary* gets executed — that's a legitimate
+    /// runtime swap (system install for performance, etc.). Plugins are not
+    /// subject to the same swap: a custom streamlinkw.exe still loads the
+    /// bundled TTVLOL plugin via `--plugin-dirs`. Decoupling binary and plugin
+    /// is intentional, because the only meaningful customization users want is
+    /// the engine, and the plugin is what defines ad-block correctness.
+    ///
+    /// Fallbacks below the bundled path are dev-tree only — they exist so
+    /// `cargo run` inside `src-tauri/` (CWD) or from the repo root (parent)
+    /// still finds the in-tree `streamlink/plugins/`.
+    ///
+    /// History: pre-7.5.2 the resolver preferred `custom_folder/plugins` and
+    /// then `%APPDATA%\streamlink\plugins` over the bundled plugin. Both
+    /// silently shadowed each release's ad-block update with whatever stale
+    /// plugin was sitting in those paths, breaking ads for any long-time user.
+    /// See the StreamNook Brain entry "TTVLOL plugin AppData shadowing".
+    pub fn get_plugins_directory(_custom_folder: Option<&str>) -> Option<String> {
+        match Self::bundled_plugin_dir() {
+            Some(p) => {
+                debug!(
+                    "[StreamlinkManager] Using bundled plugins directory: {:?}",
+                    p
+                );
+                Some(p.to_string_lossy().to_string())
+            }
+            None => {
+                // Bundle is missing — this is a broken install. Returning None
+                // lets `--plugin-dirs` be skipped entirely, which means
+                // streamlink falls back to its builtin (vanilla, non-TTVLOL)
+                // twitch plugin. Ads will come through. The
+                // validate_streamlink_install command surfaces this as a
+                // broken-state banner in Settings, so the user sees the
+                // problem before they hit a stream.
+                debug!(
+                    "[StreamlinkManager] No bundled plugins directory found — TTVLOL plugin will not load. Bundle is incomplete."
+                );
+                None
+            }
+        }
     }
 
     pub async fn get_stream_url_with_settings(

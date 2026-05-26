@@ -288,38 +288,10 @@ const DynamicIsland = () => {
                         addNotification(notification);
                     }
 
-                    // Show toast if enabled
-                    if (useToast) {
-                        // If quick update is enabled, clicking the toast starts the update immediately
-                        if (quickUpdateOnToast) {
-                            addToast(
-                                `Update available: v${status.latest_version} - Click to update now`,
-                                'info',
-                                {
-                                    label: 'Update',
-                                    onClick: async () => {
-                                        try {
-                                            addToast('Starting update...', 'info');
-                                            await invoke('download_and_install_bundle');
-                                            addToast('Update installed successfully!', 'success');
-                                        } catch (e) {
-                                            Logger.error('Failed to update:', e);
-                                            addToast('Update failed: ' + String(e), 'error');
-                                        }
-                                    },
-                                }
-                            );
-                        } else {
-                            addToast(
-                                `Update available: v${status.latest_version}`,
-                                'info',
-                                {
-                                    label: 'View',
-                                    onClick: () => openSettings("What's New"),
-                                }
-                            );
-                        }
-                    }
+                    // No toast for available updates. The title-bar cog morphs
+                    // into a green download button when setUpdateInfo above runs,
+                    // which is a less noisy passive signal that the user can act on
+                    // at their own pace.
 
                     if (soundEnabled) {
                         playNotificationSound();

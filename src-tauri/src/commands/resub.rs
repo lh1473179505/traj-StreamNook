@@ -151,7 +151,7 @@ pub async fn get_resub_notification(
         .await
         .map_err(|e| format!("Failed to get auth token: {}", e))?;
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Build GQL request for Chat_ShareResub_ChannelData
     let request_body = serde_json::json!({
@@ -239,7 +239,7 @@ pub async fn use_resub_token(
         .await
         .map_err(|e| format!("Failed to get auth token: {}", e))?;
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Build the input object
     let mut input = serde_json::json!({

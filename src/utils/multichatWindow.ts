@@ -3,9 +3,12 @@
 // `#/multichat` hash so main.tsx renders the MultiChatWindow shell instead
 // of the regular App.
 //
-// Window label format: `multichat-{shortId}`. Multiple MultiChat windows are
-// allowed (one per monitor is reasonable), so the label includes a random
-// suffix to avoid collisions.
+// Single-popout model: the popout is a singleton keyed by `WINDOW_LABEL`. If
+// one already exists, a second `openMultiChatWindow` call focuses it (and,
+// when a channel is provided, emits `multichat-add-channel` so the existing
+// window appends the new channel as a tab). Storage uses a stable id
+// (`WINDOW_ID`) so closing and reopening restores the same tab set instead
+// of leaving an orphan localStorage record per session.
 
 import { Logger } from './logger';
 
@@ -35,19 +38,68 @@ export interface OpenMultiChatOptions {
 const DEFAULT_WIDTH = 402;
 const DEFAULT_HEIGHT = 620;
 
-function randomId(): string {
-  return Math.random().toString(36).slice(2, 10);
+const WINDOW_ID = 'default';
+const WINDOW_LABEL = `multichat-${WINDOW_ID}`;
+const STORAGE_PREFIX = 'streamnook.multichat.';
+const KEEP_STORAGE_KEY = `${STORAGE_PREFIX}${WINDOW_ID}`;
+
+/** Sweep orphan `streamnook.multichat.<random>` keys left behind by the
+ *  pre-stable-id era. Cheap to run on every spawn; only touches our own
+ *  prefix. */
+function cleanupOrphanStorage(): void {
+  try {
+    const orphans: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(STORAGE_PREFIX) && key !== KEEP_STORAGE_KEY) {
+        orphans.push(key);
+      }
+    }
+    for (const key of orphans) localStorage.removeItem(key);
+    if (orphans.length > 0) {
+      Logger.debug(`[MultiChat] Cleaned ${orphans.length} orphan storage key(s)`);
+    }
+  } catch (err) {
+    Logger.warn('[MultiChat] orphan storage sweep failed:', err);
+  }
 }
 
 export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): Promise<void> {
   try {
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const { emit } = await import('@tauri-apps/api/event');
 
-    const id = randomId();
-    const label = `multichat-${id}`;
+    cleanupOrphanStorage();
 
-    const params = new URLSearchParams({ id });
+    // If a popout already exists, focus it and (if the caller supplied a
+    // channel) ask it to add that channel as a tab. The popout listens for
+    // `multichat-add-channel` and routes the payload through its existing
+    // add/dedup path so this is a no-op when the channel is already a tab.
+    const existing = await WebviewWindow.getByLabel(WINDOW_LABEL);
+    if (existing) {
+      try {
+        if (await existing.isMinimized()) await existing.unminimize();
+        await existing.show();
+        await existing.setFocus();
+      } catch (err) {
+        Logger.warn('[MultiChat] focus existing popout failed:', err);
+      }
+      if (options.channel) {
+        try {
+          await emit('multichat-add-channel', {
+            channel: options.channel.toLowerCase(),
+            channelId: options.channelId ?? null,
+            channelName: options.channelName ?? options.channel,
+          });
+        } catch (err) {
+          Logger.warn('[MultiChat] emit multichat-add-channel failed:', err);
+        }
+      }
+      return;
+    }
+
+    const params = new URLSearchParams({ id: WINDOW_ID });
     if (options.channel) params.set('channel', options.channel.toLowerCase());
     if (options.channelId) params.set('channelId', options.channelId);
     if (options.channelName) params.set('channelName', options.channelName);
@@ -73,7 +125,7 @@ export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): P
       options.title ??
       (titleChannel ? `StreamNook MultiChat — ${titleChannel}` : 'StreamNook MultiChat');
 
-    const win = new WebviewWindow(label, {
+    const win = new WebviewWindow(WINDOW_LABEL, {
       url: `${window.location.origin}/#/multichat?${params.toString()}`,
       title,
       width: options.width ?? DEFAULT_WIDTH,
@@ -98,7 +150,7 @@ export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): P
       Logger.error('[MultiChat] Failed to open MultiChat window:', e);
     });
 
-    Logger.debug(`[MultiChat] Opened window ${label} for channel ${options.channel ?? '(empty)'}`);
+    Logger.debug(`[MultiChat] Opened window ${WINDOW_LABEL} for channel ${options.channel ?? '(empty)'}`);
   } catch (err) {
     Logger.error('[MultiChat] openMultiChatWindow failed:', err);
     throw err;

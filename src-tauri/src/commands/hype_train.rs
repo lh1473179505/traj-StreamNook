@@ -172,7 +172,7 @@ pub async fn get_bulk_hype_train_status(
         return Ok(vec![]);
     }
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // BulkAllActiveHypeTrainStatusesQuery accepts an array of channel IDs
     let bulk_request = serde_json::json!({
@@ -252,7 +252,7 @@ pub async fn get_hype_train_status(
     channel_id: String,
     channel_login: String,
 ) -> Result<HypeTrainStatus, String> {
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // Step 1: Check if channel has active Hype Train using bulk query
     let bulk_request = serde_json::json!({

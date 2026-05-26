@@ -12,11 +12,12 @@
 // Hype train / raid events still require EventSub (which is single-broadcaster
 // today); those remain main-app-only until EventSub is made multi-broadcaster.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import ChatWidget, { type ChatWidgetChannelOverride } from '../ChatWidget';
 import type { TwitchStream } from '../../types';
 import { Logger } from '../../utils/logger';
+import { useVisibleInterval } from '../../utils/useVisibleInterval';
 
 export interface MultiChatPaneProps {
   channel: string;
@@ -59,30 +60,21 @@ export function MultiChatPane({ channel, channelId, channelName }: MultiChatPane
 
   // Poll live stream metadata so viewer count, uptime, title, and game stay
   // current. check_stream_online returns the full TwitchStream when online
-  // and null when offline.
-  useEffect(() => {
-    let active = true;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const fetchStream = async () => {
-      try {
-        const s = await invoke<TwitchStream | null>('check_stream_online', {
-          userLogin: channelKey,
-        });
-        if (active) setStream(s);
-      } catch (err) {
-        Logger.warn('[MultiChatPane] check_stream_online failed:', err);
-      }
-    };
-
-    void fetchStream();
-    timer = setInterval(fetchStream, STREAM_POLL_INTERVAL_MS);
-
-    return () => {
-      active = false;
-      if (timer) clearInterval(timer);
-    };
+  // and null when offline. Visibility-gated so a hidden window stops polling.
+  const fetchStream = useCallback(async () => {
+    try {
+      const s = await invoke<TwitchStream | null>('check_stream_online', {
+        userLogin: channelKey,
+      });
+      setStream(s);
+    } catch (err) {
+      Logger.warn('[MultiChatPane] check_stream_online failed:', err);
+    }
   }, [channelKey]);
+  useEffect(() => {
+    void fetchStream();
+  }, [fetchStream]);
+  useVisibleInterval(fetchStream, STREAM_POLL_INTERVAL_MS);
 
   const channelOverride = useMemo<ChatWidgetChannelOverride>(() => {
     const liveUserId = stream?.user_id || channelId || userInfo?.id || '';

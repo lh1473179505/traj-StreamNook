@@ -8,6 +8,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -21,6 +22,57 @@ static ASYNC_MANIFEST_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(
 
 // Flag to prevent concurrent downloads
 static DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+// In-memory mirror of the on-disk manifest. Initialized from disk on first
+// access; every subsequent read/write hits memory only. A background task
+// flushes dirty state to disk on a 5-second debounce (or on next tick if a
+// flush failed). The public load_manifest/save_manifest functions keep their
+// existing signatures so the dozens of read-modify-write call sites work
+// unchanged. The pre-existing MANIFEST_LOCK / ASYNC_MANIFEST_LOCK continue to
+// serialize RMW sequences at the call site, so concurrent writes still don't
+// race here.
+static MANIFEST_MEMORY: Lazy<StdRwLock<UniversalCacheManifest>> =
+    Lazy::new(|| StdRwLock::new(load_manifest_from_disk().unwrap_or_default()));
+
+// True when the in-memory manifest has unflushed changes. The background
+// flush task clears this on a successful disk write; sets it back if write
+// failed so the next tick retries.
+static MANIFEST_DIRTY: AtomicBool = AtomicBool::new(false);
+
+// Background flush task is started lazily on first write so we don't spawn
+// anything if the app never modifies the manifest (read-only sessions).
+static FLUSH_TASK_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn ensure_flush_task() {
+    if FLUSH_TASK_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if !MANIFEST_DIRTY.swap(false, Ordering::AcqRel) {
+                    continue;
+                }
+                let snapshot = match MANIFEST_MEMORY.read() {
+                    Ok(g) => g.clone(),
+                    Err(_) => {
+                        // Poisoned lock — try again next tick.
+                        MANIFEST_DIRTY.store(true, Ordering::Release);
+                        continue;
+                    }
+                };
+                if let Err(e) = save_manifest_to_disk(&snapshot) {
+                    debug!(
+                        "[UniversalCache] Debounced manifest flush failed (will retry): {}",
+                        e
+                    );
+                    MANIFEST_DIRTY.store(true, Ordering::Release);
+                }
+            }
+        });
+    }
+}
 
 /// Universal cache entry for badges, emotes, and other assets
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -95,8 +147,10 @@ fn is_cache_expired(metadata: &CacheMetadata) -> bool {
     current_time > metadata.timestamp + expiry_seconds
 }
 
-/// Load the universal cache manifest
-pub fn load_manifest() -> Result<UniversalCacheManifest> {
+/// Read the manifest from disk. Private; callers should use `load_manifest()`
+/// which serves the in-memory mirror. This is only invoked once per app
+/// session (during MANIFEST_MEMORY's lazy init).
+fn load_manifest_from_disk() -> Result<UniversalCacheManifest> {
     let manifest_path = get_universal_cache_dir()?.join("manifest.json");
 
     if !manifest_path.exists() {
@@ -111,7 +165,6 @@ pub fn load_manifest() -> Result<UniversalCacheManifest> {
         Ok(json) => json,
         Err(e) => {
             debug!("[UniversalCache] Failed to read manifest file: {}", e);
-            // Create new manifest
             return Ok(UniversalCacheManifest {
                 version: CACHE_VERSION,
                 last_sync: None,
@@ -127,7 +180,6 @@ pub fn load_manifest() -> Result<UniversalCacheManifest> {
                 "[UniversalCache] Failed to parse manifest ({}), creating new one",
                 e
             );
-            // Backup the corrupted manifest
             let backup_path = manifest_path.with_extension("json.backup");
             let _ = fs::rename(&manifest_path, &backup_path);
             debug!(
@@ -135,7 +187,6 @@ pub fn load_manifest() -> Result<UniversalCacheManifest> {
                 backup_path
             );
 
-            // Create new manifest
             Ok(UniversalCacheManifest {
                 version: CACHE_VERSION,
                 last_sync: None,
@@ -145,11 +196,40 @@ pub fn load_manifest() -> Result<UniversalCacheManifest> {
     }
 }
 
-/// Save the universal cache manifest
-pub fn save_manifest(manifest: &UniversalCacheManifest) -> Result<()> {
+/// Write the manifest to disk. Private; callers should use `save_manifest()`
+/// which updates the in-memory mirror and schedules a debounced flush. This
+/// is only invoked by the background flush task.
+fn save_manifest_to_disk(manifest: &UniversalCacheManifest) -> Result<()> {
     let manifest_path = get_universal_cache_dir()?.join("manifest.json");
     let json = serde_json::to_string_pretty(manifest)?;
     fs::write(&manifest_path, json).context("Failed to write manifest file")?;
+    Ok(())
+}
+
+/// Return a clone of the in-memory manifest. The first call lazily reads from
+/// disk; subsequent calls are pure memory reads. Existing read-modify-write
+/// call sites work unchanged because the returned clone can be mutated
+/// without affecting the mirror until `save_manifest` is called.
+pub fn load_manifest() -> Result<UniversalCacheManifest> {
+    let guard = MANIFEST_MEMORY
+        .read()
+        .map_err(|_| anyhow::anyhow!("manifest memory lock poisoned"))?;
+    Ok(guard.clone())
+}
+
+/// Replace the in-memory manifest with `manifest`, then schedule a debounced
+/// disk flush. Concurrent writers are still expected to serialize via the
+/// pre-existing MANIFEST_LOCK / ASYNC_MANIFEST_LOCK at the call site — this
+/// function does not protect against load-modify-save races.
+pub fn save_manifest(manifest: &UniversalCacheManifest) -> Result<()> {
+    {
+        let mut guard = MANIFEST_MEMORY
+            .write()
+            .map_err(|_| anyhow::anyhow!("manifest memory lock poisoned"))?;
+        *guard = manifest.clone();
+    }
+    MANIFEST_DIRTY.store(true, Ordering::Release);
+    ensure_flush_task();
     Ok(())
 }
 
@@ -316,11 +396,14 @@ pub async fn get_cached_item(
         }
     }
 
-    // Not in local cache - check if we've downloaded the universal manifest recently
+    // Not in local cache — force a download if the manifest hasn't been synced
+    // in the last day. (The primary daily refresh runs at app start via
+    // auto_sync_if_stale, which compares remote vs local timestamp; this is
+    // the fallback for lookup-misses during a single very long session.)
     let should_download = manifest.last_sync.is_none() || {
         let current_time = get_current_timestamp();
         let last_sync = manifest.last_sync.unwrap_or(0);
-        current_time - last_sync > 7 * 24 * 60 * 60 // More than 7 days old
+        current_time - last_sync > 24 * 60 * 60 // More than 1 day old
     };
 
     if should_download {
@@ -681,6 +764,22 @@ pub fn clear_universal_cache() -> Result<()> {
         fs::remove_dir_all(&cache_dir).context("Failed to remove universal cache directory")?;
         fs::create_dir_all(&cache_dir).context("Failed to recreate universal cache directory")?;
     }
+
+    // CRITICAL: drop the in-memory manifest mirror too. Without this, stale
+    // `file:<id>` entries with paths to now-deleted files (or files with the
+    // wrong extension after a code change) keep getting served back to the
+    // frontend via get_cached_files_list. That's why a "clear cache" can
+    // appear to do nothing — the disk was wiped but the in-memory paths
+    // outlived it. Also clear the dirty flag so the next debounced flush
+    // doesn't write the stale snapshot back to disk.
+    if let Ok(mut guard) = MANIFEST_MEMORY.write() {
+        *guard = UniversalCacheManifest {
+            version: CACHE_VERSION,
+            last_sync: None,
+            entries: HashMap::new(),
+        };
+    }
+    MANIFEST_DIRTY.store(false, Ordering::Release);
 
     Ok(())
 }

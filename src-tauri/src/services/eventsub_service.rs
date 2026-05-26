@@ -269,7 +269,7 @@ impl EventSubService {
         };
 
         let client_id = env!("TWITCH_APP_CLIENT_ID");
-        let client = reqwest::Client::new();
+        let client = crate::services::http::client().clone();
 
         // Get all existing subscriptions
         let response = match client
@@ -783,7 +783,7 @@ impl EventSubService {
     async fn subscribe_to_events(broadcaster_id: &str, session_id: &str) -> Result<()> {
         let token = TwitchService::get_token().await?;
         let client_id = env!("TWITCH_APP_CLIENT_ID");
-        let client = reqwest::Client::new();
+        let client = crate::services::http::client().clone();
 
         // Get the current user's ID for user-specific subscriptions
         let current_user_id = match TwitchService::get_user_info().await {

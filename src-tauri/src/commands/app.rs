@@ -1,15 +1,24 @@
 use crate::services::embedded_dashboard;
 use log::debug;
+use lru::LruCache;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 use std::env;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use tauri::command;
 use tauri::window::Window;
 use tauri::Manager;
 
-// In-memory cache for emoji images (codepoint -> base64 data URL)
-static EMOJI_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+// In-memory cache for emoji images (codepoint -> base64 data URL).
+// LRU-bounded at 256 entries (~5 KB per entry → ~1.3 MB cap). Twitch chat uses
+// emojis sparingly; in practice this rarely fills. Cap exists so an edge-case
+// emoji-heavy session can't pin 15-20 MB of base64 data indefinitely.
+const EMOJI_CACHE_CAP: usize = 256;
+static EMOJI_CACHE: Lazy<Mutex<LruCache<String, String>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(EMOJI_CACHE_CAP).expect("cap > 0"),
+    ))
+});
 
 // Compile-time admin IDs from .env or CI environment
 // This is injected by build.rs reading from the .env file
@@ -435,9 +444,10 @@ pub async fn start_analytics_dashboard(app_handle: tauri::AppHandle) -> Result<b
 /// This bypasses the browser's tracking prevention by using Tauri's HTTP client
 #[command]
 pub async fn get_emoji_image(codepoint: String) -> Result<String, String> {
-    // Check cache first
+    // Check cache first. `LruCache::get` takes &mut self because it bumps the
+    // entry to most-recently-used — so the lock has to be a mutable borrow.
     {
-        let cache = EMOJI_CACHE.lock().map_err(|e| e.to_string())?;
+        let mut cache = EMOJI_CACHE.lock().map_err(|e| e.to_string())?;
         if let Some(data_url) = cache.get(&codepoint) {
             return Ok(data_url.clone());
         }
@@ -469,10 +479,10 @@ pub async fn get_emoji_image(codepoint: String) -> Result<String, String> {
     let base64_data = STANDARD.encode(&bytes);
     let data_url = format!("data:image/png;base64,{}", base64_data);
 
-    // Cache the result
+    // Cache the result. `put` returns the previous value if any; we ignore it.
     {
         let mut cache = EMOJI_CACHE.lock().map_err(|e| e.to_string())?;
-        cache.insert(codepoint, data_url.clone());
+        cache.put(codepoint, data_url.clone());
     }
 
     Ok(data_url)

@@ -196,6 +196,23 @@ pub struct IVRData {
     pub mod_since: Option<String>,
     pub is_vip: bool,
     pub vip_since: Option<String>,
+    // ISO timestamp of the user's most recent broadcast start, if any. Lets
+    // the UI surface "Last live 3d ago" for active streamers and skip the row
+    // for users who've never gone live.
+    pub last_broadcast_at: Option<String>,
+    pub last_broadcast_title: Option<String>,
+    // Number of channels this user follows. Universally interesting little
+    // stat for the profile card. Note: this is NOT a count of messages or
+    // chat activity — Twitch / IVR don't expose lifetime message counts.
+    pub follows_count: Option<i32>,
+    // Subscription tier ("1" / "2" / "3" / "Prime"), type ("paid" / "prime" /
+    // "gift"), and the gifter's login + display name when the sub is a gift.
+    // All optional — only present when the user is currently subscribed and
+    // IVR's subage `meta` block returned the data.
+    pub sub_tier: Option<String>,
+    pub sub_type: Option<String>,
+    pub sub_gifter_login: Option<String>,
+    pub sub_gifter_display_name: Option<String>,
     pub error: Option<String>,
 }
 
@@ -260,6 +277,13 @@ pub async fn get_user_profile_complete(
             mod_since: None,
             is_vip: false,
             vip_since: None,
+            last_broadcast_at: None,
+            last_broadcast_title: None,
+            follows_count: None,
+            sub_tier: None,
+            sub_type: None,
+            sub_gifter_login: None,
+            sub_gifter_display_name: None,
             error: Some(e),
         }),
     };
@@ -311,7 +335,7 @@ async fn fetch_twitch_profile(user_id: &str) -> Result<TwitchUserProfile, String
 
     let client_id = env!("TWITCH_APP_CLIENT_ID");
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(format!("https://api.twitch.tv/helix/users?id={}", user_id))
         .header("Client-ID", client_id)
@@ -345,7 +369,7 @@ async fn fetch_twitch_profile(user_id: &str) -> Result<TwitchUserProfile, String
 /// Helix's offline_image_url is a different thing (offline video-player placeholder);
 /// the actual profile-page header banner is only exposed through GQL.
 async fn fetch_twitch_banner(login: &str) -> Result<Option<String>, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     let query = r#"
         query StreamNookBanner($login: String!) {
@@ -468,7 +492,7 @@ async fn fetch_badge_data(
 }
 
 async fn fetch_seventv_cosmetics(user_id: &str) -> Result<SevenTVCosmetics, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     // Use the v4 GraphQL API with userByConnection query
     let query = format!(
@@ -806,7 +830,7 @@ fn parse_paint_layer(layer: &serde_json::Value) -> Option<SevenTVPaintLayer> {
 }
 
 async fn fetch_ivr_data(username: &str, channel_name: &str) -> Result<IVRData, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     // Fetch all three IVR endpoints in parallel
     let (user_result, subage_result, modvip_result) = tokio::join!(
@@ -827,6 +851,13 @@ async fn fetch_ivr_data(username: &str, channel_name: &str) -> Result<IVRData, S
         mod_since: None,
         is_vip: false,
         vip_since: None,
+        last_broadcast_at: None,
+        last_broadcast_title: None,
+        follows_count: None,
+        sub_tier: None,
+        sub_type: None,
+        sub_gifter_login: None,
+        sub_gifter_display_name: None,
         error: None,
     };
 
@@ -836,6 +867,22 @@ async fn fetch_ivr_data(username: &str, channel_name: &str) -> Result<IVRData, S
             .get("createdAt")
             .and_then(|v| v.as_str())
             .map(String::from);
+
+        if let Some(last_broadcast) = user.get("lastBroadcast") {
+            ivr_data.last_broadcast_at = last_broadcast
+                .get("startedAt")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            ivr_data.last_broadcast_title = last_broadcast
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+
+        ivr_data.follows_count = user
+            .get("follows")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
     }
 
     // Process subage data
@@ -869,6 +916,23 @@ async fn fetch_ivr_data(username: &str, channel_name: &str) -> Result<IVRData, S
                 .get("months")
                 .and_then(|v| v.as_i64())
                 .map(|v| v as i32);
+        }
+
+        // `meta` block carries the current-period sub details (tier, type,
+        // gifter). Only present while the user is actively subscribed.
+        if let Some(meta) = subage.get("meta") {
+            ivr_data.sub_tier = meta.get("tier").and_then(|v| v.as_str()).map(String::from);
+            ivr_data.sub_type = meta.get("type").and_then(|v| v.as_str()).map(String::from);
+            if let Some(giver) = meta.get("giver") {
+                ivr_data.sub_gifter_login = giver
+                    .get("login")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                ivr_data.sub_gifter_display_name = giver
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
         }
     }
 

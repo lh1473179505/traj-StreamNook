@@ -1,4 +1,7 @@
-lazy_static::lazy_static! { static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new(); }
+// HTTP_CLIENT below kept as a thin file-local alias for the shared client so
+// existing `HTTP_CLIENT.clone()` call sites continue to work; the underlying
+// instance is the global default in `crate::services::http`.
+lazy_static::lazy_static! { static ref HTTP_CLIENT: reqwest::Client = crate::services::http::client().clone(); }
 
 use crate::models::drops::*;
 use crate::models::settings::AppState;
@@ -278,7 +281,15 @@ pub async fn poll_drops_token(
 }
 
 #[tauri::command]
-pub async fn drops_logout() -> Result<(), String> {
+pub async fn drops_logout(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+    // Stop mining BEFORE clearing tokens. stop_mining aborts the PubSub WS task
+    // and flips is_running=false so the watch-payload loop exits at its next
+    // tick. Without this the loop would keep posting watch events with a now-
+    // invalid token (silent 401s) and the WS would keep PINGing PubSub.
+    {
+        let mining_service = state.mining_service.lock().await;
+        mining_service.stop_mining(app_handle).await;
+    }
     DropsAuthService::logout().await.map_err(|e| e.to_string())
 }
 

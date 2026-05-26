@@ -11,7 +11,7 @@ pub struct GraphQLResponse {
 /// Proxy GraphQL requests to 7TV API to bypass CORS restrictions
 #[command]
 pub async fn seventv_graphql(query: String) -> Result<GraphQLResponse, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     let response = client
         .post("https://7tv.io/v4/gql")

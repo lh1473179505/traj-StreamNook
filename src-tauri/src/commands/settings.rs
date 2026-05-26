@@ -84,10 +84,7 @@ pub fn get_installed_streamlink_version(path: String) -> Result<Option<String>, 
 #[tauri::command]
 pub async fn get_latest_streamlink_version() -> Result<String, String> {
     // Fetch the latest release page to get the redirect
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/streamlink/windows-builds/releases/latest")
@@ -120,10 +117,7 @@ pub async fn get_latest_streamlink_version() -> Result<String, String> {
 #[tauri::command]
 pub async fn download_streamlink_installer() -> Result<String, String> {
     // First, fetch the latest release page to get the redirect
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/streamlink/windows-builds/releases/latest")
@@ -158,7 +152,7 @@ pub async fn download_streamlink_installer() -> Result<String, String> {
     );
 
     // Download the file
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(&download_url)
         .send()
@@ -229,10 +223,7 @@ pub fn get_installed_ttvlol_version() -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn get_latest_ttvlol_version() -> Result<String, String> {
     // Fetch the latest release page to get the redirect
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/2bc4/streamlink-ttvlol/releases/latest")
@@ -265,10 +256,7 @@ pub async fn get_latest_ttvlol_version() -> Result<String, String> {
 #[tauri::command]
 pub async fn download_and_install_ttvlol_plugin() -> Result<String, String> {
     // First, get the latest version
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/2bc4/streamlink-ttvlol/releases/latest")
@@ -302,7 +290,7 @@ pub async fn download_and_install_ttvlol_plugin() -> Result<String, String> {
     );
 
     // Download the file
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(&download_url)
         .send()
@@ -470,10 +458,7 @@ pub async fn send_test_notification(
 #[tauri::command]
 pub async fn get_latest_app_version() -> Result<String, String> {
     // Fetch the latest release page to get the redirect
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/winters27/StreamNook/releases/latest")
@@ -519,7 +504,7 @@ pub struct ReleaseNotes {
 
 #[tauri::command]
 pub async fn get_release_notes(version: Option<String>) -> Result<ReleaseNotes, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
 
     // Fetch the raw CHANGELOG.md from the GitHub repo
     let url = "https://raw.githubusercontent.com/winters27/StreamNook/main/CHANGELOG.md";
@@ -612,10 +597,7 @@ pub async fn download_and_install_app_update(
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
     // First, get the latest version
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = crate::services::http::client_no_redirect().clone();
 
     let response = client
         .get("https://github.com/winters27/StreamNook/releases/latest")
@@ -649,7 +631,7 @@ pub async fn download_and_install_app_update(
     );
 
     // Download the file
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client().clone();
     let response = client
         .get(&download_url)
         .send()

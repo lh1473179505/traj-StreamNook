@@ -54,7 +54,7 @@ async fn try_gql_badge_update(badge_id: &str, badge_version: &str) -> Result<boo
         badge_id
     );
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
     let request_body = serde_json::json!({
         "operationName": "ChatSettings_SelectGlobalBadge",
         "variables": {
@@ -214,7 +214,7 @@ async fn try_gql_badge_fetch(username: &str) -> Result<Option<Vec<ChatIdentityBa
         }
     };
 
-    let client = Client::new();
+    let client = crate::services::http::client().clone();
 
     // ChatSettings_Badges returns both availableBadges AND selectedBadge in one query
     let (available_badges, selected_badge_id) =

@@ -1,20 +1,20 @@
-use crate::models::chat_layout::ChatMessage;
-use crate::services::user_message_history_service::UserMessageHistoryService;
+use crate::services::user_message_history_service::{
+    UserMessageHistoryService, UserMessageSummary,
+};
 
-/// Get user message history from Rust LRU cache
-/// This replaces the frontend's userMessageHistory Map
+/// Get user message history from Rust LRU cache.
+/// Returns compact summaries — see `UserMessageSummary`.
 #[tauri::command]
-pub async fn get_user_message_history(user_id: String) -> Result<Vec<ChatMessage>, String> {
+pub async fn get_user_message_history(user_id: String) -> Result<Vec<UserMessageSummary>, String> {
     let service = UserMessageHistoryService::global();
     Ok(service.get_history(&user_id).await)
 }
 
-/// Get user message history with limit
 #[tauri::command]
 pub async fn get_user_message_history_limited(
     user_id: String,
     limit: usize,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<Vec<UserMessageSummary>, String> {
     let service = UserMessageHistoryService::global();
     Ok(service.get_history_limited(&user_id, limit).await)
 }
@@ -27,7 +27,6 @@ pub async fn clear_user_message_history() -> Result<(), String> {
     Ok(())
 }
 
-/// Get the number of users being tracked
 #[tauri::command]
 pub async fn get_user_history_count() -> Result<usize, String> {
     let service = UserMessageHistoryService::global();

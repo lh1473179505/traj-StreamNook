@@ -15,6 +15,7 @@ import type { MiningStatus, DropsSettings } from '../types';
 
 
 import { Logger } from '../utils/logger';
+import { useVisibleInterval } from '../utils/useVisibleInterval';
 import { Tooltip } from './ui/Tooltip';
 
 /** Maps the discrete stage strings emitted by Rust's bundle-update-progress
@@ -76,38 +77,37 @@ const TitleBar = () => {
 
 
 
-  // Load drops settings
-  useEffect(() => {
-    const loadDropsSettings = async () => {
-      try {
-        const settings = await invoke<DropsSettings>('get_drops_settings');
-        setDropsSettings(settings);
-      } catch (err) {
-        Logger.error('Failed to get drops settings:', err);
-      }
-    };
-
-    loadDropsSettings();
-
-    // Refresh settings periodically
-    const interval = setInterval(loadDropsSettings, 5000);
-    return () => clearInterval(interval);
+  // Load drops settings. These are user preferences that only change when the
+  // user toggles them in the settings dialog — polling at 5s was wildly
+  // over-aggressive. Once on mount + once an hour as a stale-protection
+  // safety net, gated on window visibility.
+  const loadDropsSettings = useCallback(async () => {
+    try {
+      const settings = await invoke<DropsSettings>('get_drops_settings');
+      setDropsSettings(settings);
+    } catch (err) {
+      Logger.error('Failed to get drops settings:', err);
+    }
   }, []);
+  useEffect(() => {
+    loadDropsSettings();
+  }, [loadDropsSettings]);
+  useVisibleInterval(loadDropsSettings, 60 * 60 * 1000);
 
   // Load and subscribe to mining status updates for progress badge
+  const loadMiningStatus = useCallback(async () => {
+    try {
+      const status = await invoke<MiningStatus>('get_mining_status');
+      setMiningStatus(status);
+    } catch {
+      // Silently fail - not critical for title bar
+    }
+  }, []);
+
   useEffect(() => {
     let unlistenStatus: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
     let isMounted = true;
-
-    const loadMiningStatus = async () => {
-      try {
-        const status = await invoke<MiningStatus>('get_mining_status');
-        setMiningStatus(status);
-      } catch {
-        // Silently fail - not critical for title bar
-      }
-    };
 
     const setupListeners = async () => {
       // Listen for mining status updates
@@ -121,11 +121,11 @@ const TitleBar = () => {
       const uProgress = await listen<{ drop_id: string; current_minutes: number; required_minutes: number; campaign_id?: string; drop_name?: string }>('drops-progress-update', (event) => {
         setMiningStatus((prev) => {
           if (!prev || !prev.is_mining) return prev;
-          
+
           const dropId = event.payload.drop_id;
           const currentMinutes = event.payload.current_minutes;
           const requiredMinutes = event.payload.required_minutes;
-          
+
           // Update current_drop if it matches
           if (prev.current_drop && prev.current_drop.drop_id === dropId) {
             return {
@@ -137,7 +137,7 @@ const TitleBar = () => {
               }
             };
           }
-          
+
           // If current_drop doesn't exist or is different, update with new drop info
           return {
             ...prev,
@@ -160,16 +160,18 @@ const TitleBar = () => {
     loadMiningStatus();
     setupListeners();
 
-    // Poll periodically as backup
-    const interval = setInterval(loadMiningStatus, 10000);
-
     return () => {
       isMounted = false;
       if (unlistenStatus) unlistenStatus();
       if (unlistenProgress) unlistenProgress();
-      clearInterval(interval);
     };
-  }, []);
+  }, [loadMiningStatus]);
+
+  // Backup poll: real-time updates come from the event listeners above. This
+  // is just a stale-protection net in case an event was missed. 60-min cadence
+  // aligned with the drops-settings poll above. Visibility-gated so it doesn't
+  // fire when StreamNook is tucked in the tray.
+  useVisibleInterval(loadMiningStatus, 60 * 60 * 1000);
 
   // Clean up preview timeout on unmount
   useEffect(() => {

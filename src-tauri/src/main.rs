@@ -30,7 +30,7 @@ use commands::{
     announcements::*, app::*, automation::*, badge_metadata::*, badge_service::*, badges::*,
     cache::*, channel_panels::*, chat::*, chat_identity::*, components::*, cosmetics_cache::*,
     diagnostic_logging::*, discord::*, drops::*, emoji::*, emotes::*, eventsub::*, hype_train::*,
-    layout::*, logs::*, magne::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
+    justlog::*, layout::*, logs::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
     screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
     streaming::*, twitch::*, universal_cache::*, user_profile::*, watch_streak::*,
     whisper_storage::*,
@@ -83,6 +83,142 @@ fn load_settings_from_file() -> Result<Settings, Box<dyn std::error::Error>> {
     Ok(settings)
 }
 
+/// Pull `STREAMLINK_TTVLOL_VERSION = "..."` out of a TTVLOL twitch.py.
+/// Returns None if the file is missing, unreadable, or doesn't carry the marker.
+fn read_ttvlol_version_from_file(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("STREAMLINK_TTVLOL_VERSION") {
+            let after_eq = rest.split_once('=')?.1.trim();
+            // Expect `"X.Y.Z-YYYYMMDD"` (single or double quotes)
+            let quote = after_eq.chars().next()?;
+            if quote != '"' && quote != '\'' {
+                return None;
+            }
+            let body = &after_eq[1..];
+            let end = body.find(quote)?;
+            return Some(body[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Parse `MAJOR.MINOR.PATCH-YYYYMMDD` into a comparable tuple. The trailing date
+/// is what we actually care about for staleness — TTVLOL ships dated builds and
+/// "newer date = newer plugin." None on malformed input.
+fn parse_ttvlol_version(s: &str) -> Option<(u32, u32, u32, u32)> {
+    let (ver, date) = s.split_once('-')?;
+    let mut parts = ver.splitn(3, '.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch: u32 = parts.next()?.parse().ok()?;
+    let date: u32 = date.parse().ok()?;
+    Some((major, minor, patch, date))
+}
+
+/// One-time self-heal: when a user has a stale TTVLOL plugin in
+/// `%APPDATA%\streamlink\plugins\twitch.py` (left over from a standalone
+/// Streamlink install — winget, scoop, pip, the old StreamLinkerino path)
+/// AND it's older than the TTVLOL we bundle with this release, rename it to
+/// `.streamnook-disabled-YYYYMMDD.bak` so the resolver falls through to the
+/// bundled plugin. Pre-7.5.2 the plugin resolver preferred AppData over
+/// bundled, which silently shadowed each release's ad-block update with
+/// whatever was there from years ago.
+///
+/// Non-destructive (rename, not delete), reversible, and skipped if the
+/// AppData plugin is the same age or newer than bundled (covers the edge
+/// case where someone is deliberately running an upstream-master plugin).
+fn migrate_stale_appdata_ttvlol_plugin() {
+    let Some(config_dir) = dirs::config_dir() else {
+        return;
+    };
+    let appdata_plugin = config_dir
+        .join("streamlink")
+        .join("plugins")
+        .join("twitch.py");
+    if !appdata_plugin.exists() {
+        return;
+    }
+
+    let bundled_plugin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join("streamlink").join("plugins").join("twitch.py"));
+    let Some(bundled_plugin) = bundled_plugin else {
+        return;
+    };
+    if !bundled_plugin.exists() {
+        return;
+    }
+
+    let appdata_ver_str = read_ttvlol_version_from_file(&appdata_plugin);
+    let bundled_ver_str = read_ttvlol_version_from_file(&bundled_plugin);
+
+    let appdata_ver = appdata_ver_str.as_deref().and_then(parse_ttvlol_version);
+    let bundled_ver = bundled_ver_str.as_deref().and_then(parse_ttvlol_version);
+
+    let should_disable = match (appdata_ver, bundled_ver) {
+        (Some(a), Some(b)) => a < b,
+        // No marker in the AppData copy = not a TTVLOL plugin at all (could be
+        // vanilla streamlink's twitch.py from a system install). That still
+        // shadows the bundled TTVLOL under the old resolver and breaks ads;
+        // disable it too. Bundled with no marker = something we don't recognize,
+        // bail out conservatively.
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if !should_disable {
+        debug!(
+            "[Migration] AppData TTVLOL plugin at {:?} is current or newer ({:?} vs bundled {:?}); leaving in place",
+            appdata_plugin, appdata_ver_str, bundled_ver_str
+        );
+        return;
+    }
+
+    let date = chrono::Utc::now().format("%Y%m%d");
+    let mut target =
+        appdata_plugin.with_file_name(format!("twitch.py.streamnook-disabled-{}.bak", date));
+    // Don't overwrite a prior same-day disable; find a free suffix instead.
+    let mut suffix = 1u32;
+    while target.exists() {
+        target = appdata_plugin.with_file_name(format!(
+            "twitch.py.streamnook-disabled-{}-{}.bak",
+            date, suffix
+        ));
+        suffix += 1;
+    }
+
+    match std::fs::rename(&appdata_plugin, &target) {
+        Ok(_) => {
+            debug!(
+                "[Migration] Renamed stale AppData TTVLOL plugin (was {:?}, bundled {:?}) to {:?}",
+                appdata_ver_str, bundled_ver_str, target
+            );
+        }
+        Err(e) => {
+            error!(
+                "[Migration] Failed to rename stale AppData TTVLOL plugin {:?}: {}",
+                appdata_plugin, e
+            );
+        }
+    }
+
+    // The __pycache__ folder caches the compiled .pyc for the old twitch.py and
+    // streamlink will happily load it even after the .py is renamed. Nuke it so
+    // the next streamlink invocation rebuilds against the bundled plugin.
+    let pycache = appdata_plugin.with_file_name("__pycache__");
+    if pycache.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&pycache) {
+            debug!(
+                "[Migration] Could not remove AppData plugin __pycache__ {:?}: {}",
+                pycache, e
+            );
+        }
+    }
+}
+
 /// Clean up leftover files from previous update attempts
 fn cleanup_update_artifacts() {
     if let Ok(current_exe) = std::env::current_exe() {
@@ -115,6 +251,11 @@ fn main() {
 
     // Clean up any leftover files from previous update attempts
     cleanup_update_artifacts();
+
+    // Self-heal stale standalone-Streamlink TTVLOL plugins. See the function
+    // for the full story; tl;dr the resolver used to prefer AppData over the
+    // bundled plugin, silently downgrading every release's ad-block update.
+    migrate_stale_appdata_ttvlol_plugin();
 
     // Migrate emote cache if app version changed (handles format changes like webp → avif)
     // This clears stale emote files that may have the old format
@@ -496,12 +637,6 @@ fn main() {
             set_idle_discord_presence,
             update_discord_presence,
             clear_discord_presence,
-            // Magne commands
-            connect_magne,
-            disconnect_magne,
-            set_idle_magne_presence,
-            update_magne_presence,
-            clear_magne_presence,
             // Settings commands
             load_settings,
             save_settings,
@@ -645,6 +780,7 @@ fn main() {
             reinstall_latest_bundle,
             // Announcements
             fetch_announcements,
+            fetch_user_chat_logs,
             // Layout commands (message history only - height calculation removed)
             get_user_message_history,
             get_user_message_history_limited,

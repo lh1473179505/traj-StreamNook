@@ -1,30 +1,31 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    X,
     Check,
     ExternalLink,
-    ChevronRight,
     ChevronLeft,
-    Sparkles,
-    CheckCircle2,
     Loader2,
     User,
-    Tv,
     Package,
     AlertCircle,
-    Settings,
     FolderOpen,
     MessageCircle,
-    Wand2
+    Wand2,
+    CheckCircle2,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../stores/AppStore';
+import streamnookLogo from '../assets/streamnook-logo.png';
 
 import { Logger } from '../utils/logger';
+
+const STEP_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
+const STEP_DURATION = 0.4;
+const STEP_COUNT = 6;
+
 interface SetupWizardProps {
     isOpen: boolean;
     onClose: () => void;
@@ -64,7 +65,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
     const [whisperImportStarted, setWhisperImportStarted] = useState(false);
     const unlistenRefs = useRef<Array<() => void>>([]);
 
-    // Clean up event listeners on unmount
     useEffect(() => {
         return () => {
             unlistenRefs.current.forEach(fn => fn());
@@ -72,16 +72,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         };
     }, []);
 
-    const steps = [
-        { title: 'Welcome', description: 'Get started with StreamNook', icon: Sparkles },
-        { title: 'Setting Up', description: 'Preparing components', icon: Settings },
-        { title: 'Drops', description: 'Sign in for drops/inventory', icon: Package },
-        { title: 'Login', description: 'Sign in to Twitch', icon: User },
-        { title: 'Whispers', description: 'Import chat history', icon: MessageCircle },
-        { title: 'Ready!', description: 'All set up', icon: Tv }
-    ];
-
-    // Check if components are already installed
     const checkComponentsInstalled = useCallback(async () => {
         try {
             const installed = await invoke('check_components_installed') as boolean;
@@ -94,7 +84,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         }
     }, []);
 
-    // Check if drops authentication is already set up (separate from main auth)
     const checkDropsAuthStatus = useCallback(async () => {
         try {
             const isDropsAuth = await invoke('is_drops_authenticated') as boolean;
@@ -108,7 +97,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         }
     }, []);
 
-    // Extract bundled components
     const extractComponents = useCallback(async () => {
         setIsExtracting(true);
         setStatus(prev => ({ ...prev, extractionError: null }));
@@ -116,7 +104,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
             await invoke('extract_bundled_components');
             setStatus(prev => ({ ...prev, componentsInstalled: true }));
 
-            // Get the bundled streamlink path and update settings
             const bundledPath = await invoke('get_bundled_streamlink_path') as string;
             await updateSettings({
                 ...settings,
@@ -124,7 +111,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
             });
 
             addToast('Components installed successfully!', 'success');
-            // Auto-advance to next step
             setCurrentStep(2);
         } catch (e) {
             Logger.error('Failed to extract components:', e);
@@ -136,35 +122,33 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         }
     }, [settings, updateSettings, addToast]);
 
-    // Handle manual folder selection for custom streamlink installation
+    // streamlinkw.exe directly so we don't grab the CLI variant that would flash a terminal on every launch
     const handleSelectFolder = useCallback(async () => {
         try {
             setIsSelectingFolder(true);
             const selected = await open({
-                directory: true,
                 multiple: false,
-                title: 'Select Streamlink Folder',
+                filters: [{ name: 'streamlinkw.exe', extensions: ['exe'] }],
+                title: 'Select streamlinkw.exe',
             });
 
             if (selected && typeof selected === 'string') {
                 setCustomStreamlinkPath(selected);
             }
         } catch (error) {
-            Logger.error('Failed to open folder picker:', error);
-            addToast('Failed to open folder picker', 'error');
+            Logger.error('Failed to open file picker:', error);
+            addToast('Failed to open file picker', 'error');
         } finally {
             setIsSelectingFolder(false);
         }
     }, [addToast]);
 
-    // Handle using the custom streamlink path
     const handleUseCustomPath = useCallback(async () => {
         if (!customStreamlinkPath) {
-            addToast('Please select a Streamlink folder first', 'warning');
+            addToast('Select streamlinkw.exe first', 'warning');
             return;
         }
 
-        // Update settings with the custom path
         const streamlinkDefaults = {
             low_latency_enabled: true,
             hls_live_edge: 3,
@@ -187,38 +171,40 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
 
         await updateSettings(newSettings);
         setStatus(prev => ({ ...prev, componentsInstalled: true, extractionError: null }));
-        setError(null); // Clear any extraction error
+        setError(null);
         addToast('Custom Streamlink path saved!', 'success');
 
-        // Auto-advance to next step
         setCurrentStep(2);
     }, [customStreamlinkPath, settings, updateSettings, addToast]);
 
-    // Initial check on mount
+    // Initial bundled-component and drops-auth checks fire once per wizard open.
+    // Kept off the isAuthenticated dep on purpose: re-running checkComponentsInstalled
+    // mid-wizard overwrites a user-picked custom streamlink path (which the bundled
+    // check doesn't satisfy), making the Ready step show "skipped" for streamlink even
+    // though the user configured it correctly.
     useEffect(() => {
         if (isOpen) {
             checkComponentsInstalled();
-            // Check drops auth status separately (uses different auth system)
             checkDropsAuthStatus();
-            // Set main auth status from store
-            setStatus(prev => ({ ...prev, mainAuthenticated: isAuthenticated }));
         }
-    }, [isOpen, isAuthenticated, checkComponentsInstalled, checkDropsAuthStatus]);
+    }, [isOpen, checkComponentsInstalled, checkDropsAuthStatus]);
 
-    // Auto-extract when reaching the Setting Up step
+    // Mirror auth state into wizard status separately, so signing in doesn't trigger
+    // the initial-checks effect above.
+    useEffect(() => {
+        setStatus(prev => ({ ...prev, mainAuthenticated: isAuthenticated }));
+    }, [isAuthenticated]);
+
     useEffect(() => {
         if (currentStep === 1 && status.componentsInstalled === false && !isExtracting && !status.extractionError) {
             extractComponents();
         } else if (currentStep === 1 && status.componentsInstalled === true) {
-            // Already installed, skip to next step
             setCurrentStep(2);
         }
     }, [currentStep, status.componentsInstalled, isExtracting, status.extractionError, extractComponents]);
 
-    // Open in-app WebView window for verification
     const openDropsVerificationWindow = useCallback(async (verificationUri: string) => {
         try {
-            // Close any existing drops login window
             const existingWindow = await WebviewWindow.getByLabel('drops-login');
             if (existingWindow) {
                 await existingWindow.close();
@@ -243,19 +229,15 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         });
     }, []);
 
-    // Handle drops authentication (Android client device code flow)
     const handleDropsLogin = useCallback(async () => {
         setIsAuthenticating(true);
         setError(null);
         try {
-            // Start the device code flow
             const deviceInfo = await invoke('start_drops_device_flow') as DropsDeviceCodeInfo;
             setDropsDeviceCode(deviceInfo);
 
-            // Open the verification page in an in-app WebView
             await openDropsVerificationWindow(deviceInfo.verification_uri);
 
-            // Poll for token completion
             try {
                 await invoke('poll_drops_token', {
                     deviceCode: deviceInfo.device_code,
@@ -263,7 +245,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
                     expiresIn: deviceInfo.expires_in,
                 });
 
-                // Success! Close the drops login window
                 try {
                     const dropsWindow = await WebviewWindow.getByLabel('drops-login');
                     if (dropsWindow) {
@@ -278,14 +259,12 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
                 setDropsDeviceCode(null);
                 addToast('Drops login successful!', 'success');
 
-                // Focus the app window so user doesn't have to click back
                 try {
                     await invoke('focus_window');
                 } catch (focusError) {
                     Logger.error('Failed to focus window:', focusError);
                 }
 
-                // Auto-advance to next step after a short delay
                 setTimeout(() => setCurrentStep(3), 500);
             } catch (pollError) {
                 Logger.error('Failed to complete drops login:', pollError);
@@ -298,16 +277,14 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         } finally {
             setIsAuthenticating(false);
         }
-    }, [addToast]);
+    }, [addToast, openDropsVerificationWindow]);
 
-    // Handle main app Twitch login
     const handleMainLogin = useCallback(async () => {
         setIsAuthenticating(true);
         setError(null);
         try {
             await loginToTwitch();
-            
-            // clear existing listeners
+
             unlistenRefs.current.forEach(fn => fn());
             unlistenRefs.current = [];
 
@@ -316,14 +293,12 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
                 setStatus(prev => ({ ...prev, mainAuthenticated: true }));
                 setIsAuthenticating(false);
 
-                // Focus the app window so user doesn't have to click back
                 try {
                     await invoke('focus_window');
                 } catch (focusError) {
                     Logger.error('Failed to focus window:', focusError);
                 }
 
-                // Auto-advance to next step after a short delay
                 setTimeout(() => setCurrentStep(4), 500);
 
                 unlistenRefs.current.forEach(fn => fn());
@@ -335,7 +310,7 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
                 unlistenRefs.current.forEach(fn => fn());
                 unlistenRefs.current = [];
             });
-            
+
             unlistenRefs.current = [unlisten, unlistenError];
         } catch (e) {
             Logger.error('Failed to start login:', e);
@@ -344,7 +319,6 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         }
     }, [loginToTwitch, checkAuthStatus]);
 
-    // Complete setup
     const handleCompleteSetup = useCallback(async () => {
         try {
             await updateSettings({
@@ -358,531 +332,424 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
         }
     }, [settings, updateSettings, onClose, addToast]);
 
+    // Per-step primary CTA that lives bottom-right. null hides it entirely.
+    const primaryAction: { label: string; onClick: () => void; disabled?: boolean } | null = (() => {
+        switch (currentStep) {
+            case 0:
+                return { label: 'Get started', onClick: () => setCurrentStep(1) };
+            case 1:
+                return null;
+            case 2:
+            case 3:
+            case 4:
+                return { label: 'Continue', onClick: () => setCurrentStep(currentStep + 1) };
+            case 5:
+                return { label: 'Start watching', onClick: handleCompleteSetup };
+            default:
+                return null;
+        }
+    })();
+
+    const canGoBack = currentStep > 1 && currentStep < 5;
+
     const renderStepContent = () => {
         switch (currentStep) {
-            case 0: // Welcome
+            case 0:
                 return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className="w-24 h-24 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center mb-6">
-                            <Sparkles size={48} className="text-white" />
-                        </div>
-                        <h2 className="text-2xl font-bold text-textPrimary mb-3">Welcome to StreamNook!</h2>
-                        <p className="text-textSecondary mb-6 max-w-md">
-                            Let's get you set up. This only takes a moment!
+                    <>
+                        <img
+                            src={streamnookLogo}
+                            alt=""
+                            className="h-28 w-auto mb-10 select-none"
+                            draggable={false}
+                        />
+                        <h1 className="text-5xl font-medium text-textPrimary tracking-tight leading-[1.05] mb-5">
+                            Welcome to<br />StreamNook
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-8">
+                            Yeah yeah, another setup wizard. Five clicks and we'll get out of your way, promise.
                         </p>
-                        <div className="flex flex-col gap-3 w-full max-w-xs">
-                            <div className="flex items-center gap-3 text-left p-3 bg-glass rounded-lg">
-                                <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                                    <Settings size={16} className="text-purple-400" />
-                                </div>
-                                <span className="text-sm text-textSecondary">Auto-setup video player & ad blocker</span>
-                            </div>
-                            <div className="flex items-center gap-3 text-left p-3 bg-glass rounded-lg">
-                                <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                                    <Package size={16} className="text-purple-400" />
-                                </div>
-                                <span className="text-sm text-textSecondary">Sign in for Twitch Drops</span>
-                            </div>
-                            <div className="flex items-center gap-3 text-left p-3 bg-glass rounded-lg">
-                                <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                                    <User size={16} className="text-purple-400" />
-                                </div>
-                                <span className="text-sm text-textSecondary">Sign in to your Twitch account</span>
-                            </div>
-                        </div>
-                    </motion.div>
+                        <img
+                            src="https://cdn.7tv.app/emote/01F6NMMEER00015NVG2J8ZH77N/4x.avif"
+                            alt=""
+                            className="h-24 w-auto select-none"
+                            draggable={false}
+                        />
+                    </>
                 );
 
-            case 1: // Setting Up (Auto-extraction)
-                return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${status.componentsInstalled === true
-                            ? 'bg-green-500/20'
-                            : status.extractionError
-                                ? (customStreamlinkPath ? 'bg-green-500/20' : 'bg-yellow-500/20')
-                                : 'bg-purple-500/20'
-                            }`}>
-                            {status.componentsInstalled === true ? (
-                                <CheckCircle2 size={28} className="text-green-400" />
-                            ) : status.extractionError ? (
-                                customStreamlinkPath ? (
-                                    <CheckCircle2 size={28} className="text-green-400" />
-                                ) : (
-                                    <AlertCircle size={28} className="text-yellow-400" />
-                                )
-                            ) : (
-                                <Loader2 size={28} className="text-purple-400 animate-spin" />
-                            )}
-                        </div>
-                        <h2 className="text-xl font-bold text-textPrimary mb-3">
-                            {status.componentsInstalled === true
-                                ? 'Setup Complete!'
-                                : status.extractionError
-                                    ? (customStreamlinkPath ? 'Custom Path Selected' : 'Auto-Setup Failed')
-                                    : 'Setting Up...'}
-                        </h2>
-                        <p className="text-textSecondary mb-4 max-w-md">
-                            {status.componentsInstalled === true
-                                ? 'Streamlink and TTV LOL ad blocker are ready!'
-                                : status.extractionError
-                                    ? (customStreamlinkPath
-                                        ? 'Click "Use Custom Path" below to continue with your Streamlink installation.'
-                                        : 'Bundled components not found. You can try again or select a custom Streamlink installation.')
-                                    : 'Installing Streamlink and TTV LOL ad blocker...'}
-                        </p>
-                        {status.extractionError && (
-                            <div className="flex flex-col items-center gap-4 w-full max-w-sm">
-                                {/* Only show error message if no custom path selected */}
-                                {!customStreamlinkPath && (
-                                    <div className="flex items-center gap-2 text-yellow-400 text-xs p-2 bg-yellow-500/10 rounded-lg w-full">
-                                        <AlertCircle size={14} className="flex-shrink-0" />
-                                        <span className="text-left truncate">{status.extractionError}</span>
-                                    </div>
-                                )}
+            case 1: {
+                if (status.componentsInstalled === true && !status.extractionError) {
+                    return (
+                        <>
+                            <CheckCircle2 size={64} strokeWidth={1.4} className="text-success mb-10" />
+                            <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                                Components ready
+                            </h1>
+                            <p className="text-textSecondary text-base max-w-md">
+                                Streamlink and the ad blocker are in place. Moving on.
+                            </p>
+                        </>
+                    );
+                }
 
-                                {/* Manual Path Selection */}
-                                <div className="w-full p-4 bg-glass rounded-xl border border-borderSubtle">
-                                    <p className="text-sm text-textPrimary font-medium mb-3">
-                                        Select your Streamlink folder:
-                                    </p>
-                                    <div className="flex gap-2 mb-2">
-                                        <input
-                                            type="text"
-                                            value={customStreamlinkPath || ''}
-                                            readOnly
-                                            placeholder="No folder selected..."
-                                            className="flex-1 min-w-0 glass-input text-textPrimary text-sm px-3 py-2 rounded-lg bg-glass border border-borderSubtle truncate"
-                                        />
-                                        <button
-                                            onClick={handleSelectFolder}
-                                            disabled={isSelectingFolder}
-                                            className="px-4 py-2 bg-glass hover:bg-glass-hover text-textPrimary text-sm font-medium rounded-lg flex items-center gap-2 disabled:opacity-50 border border-borderSubtle transition-colors flex-shrink-0"
-                                        >
-                                            <FolderOpen size={16} />
-                                            {isSelectingFolder ? '...' : 'Browse'}
-                                        </button>
-                                    </div>
-                                    {customStreamlinkPath && (
-                                        <p className="text-xs text-green-400 mb-3 break-all">
-                                            ✓ Path selected: <span className="font-mono text-green-300">{customStreamlinkPath.length > 40 ? '...' + customStreamlinkPath.slice(-40) : customStreamlinkPath}</span>
-                                        </p>
-                                    )}
+                if (status.extractionError) {
+                    return (
+                        <>
+                            <AlertCircle
+                                size={56}
+                                strokeWidth={1.4}
+                                className={`mb-10 ${customStreamlinkPath ? 'text-success' : 'text-warning'}`}
+                            />
+                            <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                                {customStreamlinkPath ? 'Path looks good' : "Couldn't auto-install"}
+                            </h1>
+                            <p className="text-textSecondary text-base max-w-md mb-8">
+                                {customStreamlinkPath
+                                    ? 'Confirm the path below to continue with your own Streamlink install.'
+                                    : 'Point at an existing streamlinkw.exe, or retry the auto-install.'}
+                            </p>
+
+                            {!customStreamlinkPath && (
+                                <div className="flex items-start gap-2 text-warning text-xs px-4 py-2.5 rounded-lg mb-6 max-w-md bg-warning/[0.06] border border-warning/20">
+                                    <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+                                    <span className="text-left break-words">{status.extractionError}</span>
+                                </div>
+                            )}
+
+                            <div className="w-full max-w-md glass-panel rounded-xl p-5">
+                                <p className="text-sm text-textPrimary font-medium mb-3 text-left">
+                                    Select streamlinkw.exe
+                                </p>
+                                <div className="flex gap-2 mb-3">
+                                    <input
+                                        type="text"
+                                        value={customStreamlinkPath || ''}
+                                        readOnly
+                                        placeholder="No file selected"
+                                        className="flex-1 min-w-0 glass-input text-textPrimary text-sm px-3 py-2 rounded-lg truncate"
+                                    />
                                     <button
-                                        onClick={handleUseCustomPath}
-                                        disabled={!customStreamlinkPath}
-                                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-500 hover:bg-purple-600 disabled:bg-purple-500/30 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors text-sm"
+                                        onClick={handleSelectFolder}
+                                        disabled={isSelectingFolder}
+                                        className="glass-button px-3.5 py-2 text-textPrimary text-sm font-medium rounded-lg flex items-center gap-2 disabled:opacity-50 flex-shrink-0"
                                     >
-                                        <CheckCircle2 size={16} />
-                                        Use Custom Path
+                                        <FolderOpen size={15} />
+                                        {isSelectingFolder ? '...' : 'Browse'}
                                     </button>
                                 </div>
-
-                                {/* Divider */}
-                                <div className="flex items-center gap-3 w-full">
-                                    <div className="flex-1 h-px bg-borderSubtle" />
-                                    <span className="text-xs text-textMuted">or</span>
-                                    <div className="flex-1 h-px bg-borderSubtle" />
-                                </div>
-
-                                {/* Retry Button */}
+                                {customStreamlinkPath && (
+                                    <p className="text-xs text-textMuted mb-3 break-all text-left">
+                                        <span className="font-mono text-success">
+                                            {customStreamlinkPath.length > 56 ? '...' + customStreamlinkPath.slice(-56) : customStreamlinkPath}
+                                        </span>
+                                    </p>
+                                )}
                                 <button
-                                    onClick={extractComponents}
-                                    disabled={isExtracting}
-                                    className="flex items-center justify-center gap-2 px-6 py-2.5 bg-glass hover:bg-glass-hover border border-borderSubtle text-textPrimary rounded-lg font-medium transition-colors text-sm"
+                                    onClick={handleUseCustomPath}
+                                    disabled={!customStreamlinkPath}
+                                    className="glass-button w-full flex items-center justify-center gap-2 px-4 py-2.5 text-textPrimary rounded-lg font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
-                                    {isExtracting ? (
-                                        <>
-                                            <Loader2 size={16} className="animate-spin" />
-                                            Retrying...
-                                        </>
-                                    ) : (
-                                        'Try Auto-Setup Again'
-                                    )}
+                                    Use this path
                                 </button>
-
-                                {/* Help Link */}
-                                <p className="text-xs text-textMuted mt-2">
-                                    Need Streamlink?{' '}
-                                    <a
-                                        href="https://streamlink.github.io/install.html#windows-portable"
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-purple-400 hover:text-purple-300 inline-flex items-center gap-1"
-                                    >
-                                        Download portable version <ExternalLink size={10} />
-                                    </a>
-                                </p>
                             </div>
-                        )}
-                        {!status.extractionError && !status.componentsInstalled && (
-                            <div className="flex flex-col gap-2 w-full max-w-xs">
-                                <div className="flex items-center gap-3 p-3 bg-glass rounded-lg">
-                                    <Loader2 size={16} className="text-purple-400 animate-spin" />
-                                    <span className="text-sm text-textSecondary">Installing Streamlink...</span>
-                                </div>
-                                <div className="flex items-center gap-3 p-3 bg-glass rounded-lg">
-                                    <Loader2 size={16} className="text-purple-400 animate-spin" />
-                                    <span className="text-sm text-textSecondary">Installing TTV LOL plugin...</span>
-                                </div>
-                            </div>
-                        )}
-                    </motion.div>
-                );
 
-            case 2: // Drops Login (Android client device code flow)
+                            <div className="flex items-center gap-3 w-full max-w-md my-5">
+                                <div className="flex-1 h-px bg-borderSubtle" />
+                                <span className="text-xs text-textMuted">or</span>
+                                <div className="flex-1 h-px bg-borderSubtle" />
+                            </div>
+
+                            <button
+                                onClick={extractComponents}
+                                disabled={isExtracting}
+                                className="glass-button flex items-center justify-center gap-2 px-5 py-2.5 text-textPrimary rounded-lg font-medium text-sm"
+                            >
+                                {isExtracting ? (
+                                    <>
+                                        <Loader2 size={15} className="animate-spin" />
+                                        Retrying
+                                    </>
+                                ) : (
+                                    'Try auto-install again'
+                                )}
+                            </button>
+
+                            <p className="text-xs text-textMuted mt-5">
+                                Need Streamlink?{' '}
+                                <a
+                                    href="https://streamlink.github.io/install.html#windows-portable"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-accent hover:text-accent-hover inline-flex items-center gap-1"
+                                >
+                                    Download portable <ExternalLink size={10} />
+                                </a>
+                            </p>
+                        </>
+                    );
+                }
+
                 return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${status.dropsAuthenticated ? 'bg-green-500/20' : 'bg-purple-500/20'}`}>
-                            {status.dropsAuthenticated ? (
-                                <CheckCircle2 size={28} className="text-green-400" />
-                            ) : (
-                                <Package size={28} className="text-purple-400" />
-                            )}
-                        </div>
-                        <h2 className="text-xl font-bold text-textPrimary mb-3">Drops & Inventory Login</h2>
-                        <p className="text-textSecondary mb-2 max-w-md">
-                            Sign in to access Twitch Drops, inventory, and auto-claim features.
+                    <>
+                        <Loader2 size={56} strokeWidth={1.4} className="text-accent animate-spin mb-10" />
+                        <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                            Setting things up
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-8">
+                            Installing Streamlink and the ad blocker. This only takes a moment.
                         </p>
-                        <p className="text-textMuted text-xs mb-6 max-w-md">
-                            Uses Twitch Device Code login - a code will appear for you to enter on Twitch.
+                        <div className="flex flex-col gap-2 w-full max-w-xs">
+                            <div className="flex items-center gap-3 glass-panel rounded-lg px-4 py-2.5">
+                                <Loader2 size={14} className="text-accent animate-spin flex-shrink-0" />
+                                <span className="text-sm text-textSecondary">Streamlink</span>
+                            </div>
+                            <div className="flex items-center gap-3 glass-panel rounded-lg px-4 py-2.5">
+                                <Loader2 size={14} className="text-accent animate-spin flex-shrink-0" />
+                                <span className="text-sm text-textSecondary">TTV LOL ad blocker</span>
+                            </div>
+                        </div>
+                    </>
+                );
+            }
+
+            case 2:
+                return (
+                    <>
+                        {status.dropsAuthenticated ? (
+                            <CheckCircle2 size={64} strokeWidth={1.4} className="text-success mb-10" />
+                        ) : (
+                            <Package size={56} strokeWidth={1.4} className="text-accent mb-10" />
+                        )}
+                        <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                            {status.dropsAuthenticated ? "You're in for Drops" : 'Drops and inventory'}
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-8">
+                            {status.dropsAuthenticated
+                                ? 'Drops will claim themselves while you watch.'
+                                : 'Sign in to track Twitch Drops, watch your inventory, and auto-claim rewards.'}
                         </p>
 
-                        {/* Device Code Display */}
                         {isAuthenticating && dropsDeviceCode && (
-                            <div className="bg-glass border border-purple-500/30 rounded-xl p-6 mb-4 w-full max-w-sm">
-                                <div className="flex items-center justify-center gap-2 text-purple-400 mb-3">
-                                    <Package size={18} />
-                                    <span className="text-sm font-semibold">Enter this code on Twitch</span>
-                                </div>
-                                <div className="text-4xl font-mono font-bold text-purple-400 tracking-widest py-3">
+                            <div className="glass-panel rounded-xl p-6 mb-6 w-full max-w-sm">
+                                <p className="text-sm text-textSecondary mb-3">Enter this code on Twitch</p>
+                                <div className="text-4xl font-mono font-bold text-accent tracking-[0.3em] py-2 tabular-nums">
                                     {dropsDeviceCode.user_code}
                                 </div>
-                                <div className="pt-3 border-t border-borderSubtle mt-3">
-                                    <p className="text-xs text-textMuted mb-2">
-                                        A login window should have opened automatically.
-                                    </p>
-                                    <button
-                                        onClick={() => openDropsVerificationWindow(dropsDeviceCode.verification_uri)}
-                                        className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-glass hover:bg-glass-hover text-textSecondary hover:text-textPrimary rounded-lg transition-colors text-xs"
-                                    >
-                                        <ExternalLink size={14} />
-                                        <span>Reopen Verification Window</span>
-                                    </button>
+                                <div className="pt-3 border-t border-borderSubtle mt-3 flex items-center justify-center gap-2 text-xs text-textMuted">
+                                    <Loader2 size={13} className="animate-spin" />
+                                    <span>Waiting for authorization</span>
                                 </div>
-                                <div className="flex items-center justify-center gap-2 text-xs text-textMuted mt-3">
-                                    <Loader2 size={14} className="animate-spin" />
-                                    <span>Waiting for authorization...</span>
-                                </div>
+                                <button
+                                    onClick={() => openDropsVerificationWindow(dropsDeviceCode.verification_uri)}
+                                    className="mt-3 inline-flex items-center justify-center gap-1.5 w-full text-xs text-textSecondary hover:text-textPrimary transition-colors"
+                                >
+                                    <ExternalLink size={12} />
+                                    Reopen sign-in window
+                                </button>
                             </div>
                         )}
 
                         {error && (
-                            <div className="flex items-center gap-2 text-red-400 text-sm mb-4 p-3 bg-red-500/10 rounded-lg">
-                                <AlertCircle size={16} />
+                            <div className="flex items-center gap-2 text-error text-sm mb-5 px-3 py-2 rounded-lg bg-error/10">
+                                <AlertCircle size={15} />
                                 <span>{error}</span>
                             </div>
                         )}
-                        <div className="flex flex-col gap-3 w-full max-w-xs">
-                            {!status.dropsAuthenticated ? (
-                                <>
-                                    {!isAuthenticating && (
-                                        <button
-                                            onClick={handleDropsLogin}
-                                            disabled={isAuthenticating}
-                                            className="flex items-center justify-center gap-2 px-6 py-3 glass-button hover:bg-glass-hover text-textPrimary rounded-xl font-medium transition-colors"
-                                        >
-                                            <Package size={18} />
-                                            Sign In for Drops
-                                        </button>
-                                    )}
-                                </>
-                            ) : (
-                                <div className="flex items-center justify-center gap-2 text-green-400">
-                                    <CheckCircle2 size={20} />
-                                    <span className="font-medium">Drops Login Complete!</span>
-                                </div>
-                            )}
-                        </div>
-                        <button
-                            onClick={() => setCurrentStep(3)}
-                            className="mt-4 text-sm text-textSecondary hover:text-textPrimary transition-colors"
-                        >
-                            Skip for now →
-                        </button>
-                    </motion.div>
+
+                        {!status.dropsAuthenticated && !isAuthenticating && (
+                            <button
+                                onClick={handleDropsLogin}
+                                className="glass-button flex items-center justify-center gap-2 px-6 py-3 text-textPrimary rounded-xl font-medium"
+                            >
+                                <Package size={17} />
+                                Sign in for Drops
+                            </button>
+                        )}
+                    </>
                 );
 
-            case 3: // Main App Login
+            case 3:
                 return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${status.mainAuthenticated ? 'bg-green-500/20' : 'bg-purple-500/20'}`}>
-                            {status.mainAuthenticated ? (
-                                <CheckCircle2 size={28} className="text-green-400" />
-                            ) : (
-                                <User size={28} className="text-purple-400" />
-                            )}
-                        </div>
-                        <h2 className="text-xl font-bold text-textPrimary mb-3">Sign In to StreamNook</h2>
-                        <p className="text-textSecondary mb-2 max-w-md">
-                            Sign in to access your followed streams, chat, and more.
+                    <>
+                        {status.mainAuthenticated ? (
+                            <CheckCircle2 size={64} strokeWidth={1.4} className="text-success mb-10" />
+                        ) : (
+                            <User size={56} strokeWidth={1.4} className="text-accent mb-10" />
+                        )}
+                        <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                            {status.mainAuthenticated ? "You're signed in" : 'Sign in to Twitch'}
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-8">
+                            {status.mainAuthenticated
+                                ? 'Your follows, chat, and channel actions are connected.'
+                                : 'Connect your account to see your follows, chat, and use channel features.'}
                         </p>
-                        <p className="text-textMuted text-xs mb-6 max-w-md">
-                            Uses Twitch Device Code login - a code will appear for you to enter on Twitch.
-                        </p>
+
                         {error && (
-                            <div className="flex items-center gap-2 text-red-400 text-sm mb-4 p-3 bg-red-500/10 rounded-lg">
-                                <AlertCircle size={16} />
+                            <div className="flex items-center gap-2 text-error text-sm mb-5 px-3 py-2 rounded-lg bg-error/10">
+                                <AlertCircle size={15} />
                                 <span>{error}</span>
                             </div>
                         )}
-                        {!status.mainAuthenticated ? (
+
+                        {!status.mainAuthenticated && (
                             <button
                                 onClick={handleMainLogin}
                                 disabled={isAuthenticating}
-                                className="flex items-center justify-center gap-2 px-6 py-3 bg-purple-500 hover:bg-purple-600 disabled:bg-purple-500/50 text-white rounded-xl font-medium transition-colors"
+                                className="glass-button flex items-center justify-center gap-2 px-6 py-3 text-textPrimary rounded-xl font-medium disabled:opacity-60"
                             >
                                 {isAuthenticating ? (
                                     <>
-                                        <Loader2 size={18} className="animate-spin" />
-                                        Waiting for Login...
+                                        <Loader2 size={17} className="animate-spin" />
+                                        Waiting for sign-in
                                     </>
                                 ) : (
                                     <>
-                                        <User size={18} />
-                                        Sign In with Twitch
+                                        <User size={17} />
+                                        Sign in with Twitch
                                     </>
                                 )}
                             </button>
-                        ) : (
-                            <div className="flex items-center justify-center gap-2 text-green-400">
-                                <CheckCircle2 size={20} />
-                                <span className="font-medium">Signed In!</span>
-                            </div>
                         )}
-                        <button
-                            onClick={() => setCurrentStep(4)}
-                            className="mt-4 text-sm text-textSecondary hover:text-textPrimary transition-colors"
-                        >
-                            Skip for now →
-                        </button>
-                    </motion.div>
+                    </>
                 );
 
-            case 4: // Whispers Import (Optional)
+            case 4:
                 return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-6 ${whisperImportStarted ? (whisperImportState.result ? 'bg-green-500/20' : 'bg-purple-500/20') : 'bg-purple-500/20'}`}>
-                            {whisperImportState.result ? (
-                                <CheckCircle2 size={28} className="text-green-400" />
-                            ) : whisperImportState.isImporting ? (
-                                <Loader2 size={28} className="text-purple-400 animate-spin" />
-                            ) : (
-                                <MessageCircle size={28} className="text-purple-400" />
-                            )}
-                        </div>
-                        <h2 className="text-xl font-bold text-textPrimary mb-3">
-                            {whisperImportState.result ? 'Whispers Imported!' : whisperImportState.isImporting ? 'Importing Whispers...' : 'Import Whisper History'}
-                        </h2>
-                        <p className="text-textSecondary mb-2 max-w-md">
-                            {whisperImportState.result
-                                ? `Successfully imported ${whisperImportState.result.conversations} conversations with ${whisperImportState.result.messages.toLocaleString()} messages.`
-                                : whisperImportState.isImporting
-                                    ? 'Please wait while we fetch your whisper history...'
-                                    : 'Import your Twitch whisper history to access all your private messages.'}
-                        </p>
-                        {!whisperImportState.isImporting && !whisperImportState.result && (
-                            <p className="text-textMuted text-xs mb-6 max-w-md">
-                                This runs silently in the background and may take a few minutes.
-                            </p>
+                    <>
+                        {whisperImportState.result ? (
+                            <CheckCircle2 size={64} strokeWidth={1.4} className="text-success mb-10" />
+                        ) : whisperImportState.isImporting ? (
+                            <Loader2 size={56} strokeWidth={1.4} className="text-accent animate-spin mb-10" />
+                        ) : (
+                            <MessageCircle size={56} strokeWidth={1.4} className="text-accent mb-10" />
                         )}
+                        <h1 className="text-4xl font-medium text-textPrimary tracking-tight mb-4">
+                            {whisperImportState.result
+                                ? 'Whispers imported'
+                                : whisperImportState.isImporting
+                                    ? 'Importing whispers'
+                                    : 'Import your whispers'}
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-8">
+                            {whisperImportState.result
+                                ? `${whisperImportState.result.conversations.toLocaleString()} conversations, ${whisperImportState.result.messages.toLocaleString()} messages.`
+                                : whisperImportState.isImporting
+                                    ? 'Running in the background. You can keep going.'
+                                    : 'Pull in your private message history so it lives inside the app.'}
+                        </p>
 
-                        {/* Import Progress */}
                         {whisperImportState.isImporting && whisperImportState.progress && (
-                            <div className="w-full max-w-sm mb-4">
-                                <div className="bg-glass border border-borderSubtle rounded-xl p-4">
-                                    <div className="flex items-center gap-3 mb-2">
-                                        <Loader2 size={16} className="text-purple-400 animate-spin" />
-                                        <span className="text-sm text-textPrimary">{whisperImportState.progress.detail}</span>
-                                    </div>
-                                    {whisperImportState.exportProgress && whisperImportState.exportProgress.total > 0 && (
-                                        <div className="mt-2">
-                                            <div className="flex justify-between text-xs text-textMuted mb-1">
-                                                <span>Progress</span>
-                                                <span>{whisperImportState.exportProgress.current + 1}/{whisperImportState.exportProgress.total}</span>
-                                            </div>
-                                            <div className="h-1.5 bg-glass rounded-full overflow-hidden">
-                                                <div
-                                                    className="h-full bg-purple-500 rounded-full transition-all duration-300"
-                                                    style={{ width: `${((whisperImportState.exportProgress.current + 1) / whisperImportState.exportProgress.total) * 100}%` }}
-                                                />
-                                            </div>
-                                        </div>
-                                    )}
+                            <div className="glass-panel rounded-xl p-4 mb-6 w-full max-w-sm">
+                                <div className="flex items-center gap-3 mb-2">
+                                    <Loader2 size={14} className="text-accent animate-spin flex-shrink-0" />
+                                    <span className="text-sm text-textPrimary">{whisperImportState.progress.detail}</span>
                                 </div>
+                                {whisperImportState.exportProgress && whisperImportState.exportProgress.total > 0 && (
+                                    <div className="mt-2">
+                                        <div className="flex justify-between text-xs text-textMuted mb-1 tabular-nums">
+                                            <span>Progress</span>
+                                            <span>{whisperImportState.exportProgress.current + 1}/{whisperImportState.exportProgress.total}</span>
+                                        </div>
+                                        <div className="h-1 bg-borderSubtle rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-accent rounded-full transition-all duration-300"
+                                                style={{ width: `${((whisperImportState.exportProgress.current + 1) / whisperImportState.exportProgress.total) * 100}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
                         {whisperImportState.error && (
-                            <div className="flex items-center gap-2 text-red-400 text-sm mb-4 p-3 bg-red-500/10 rounded-lg">
-                                <AlertCircle size={16} />
+                            <div className="flex items-center gap-2 text-error text-sm mb-5 px-3 py-2 rounded-lg bg-error/10">
+                                <AlertCircle size={15} />
                                 <span>{whisperImportState.error}</span>
                             </div>
                         )}
 
-                        <div className="flex flex-col gap-3 w-full max-w-xs">
-                            {!whisperImportState.isImporting && !whisperImportState.result && (
-                                <button
-                                    onClick={async () => {
-                                        setWhisperImportStarted(true);
-                                        setWhisperImportState({
-                                            isImporting: true,
-                                            error: null,
-                                            result: null,
-                                            progress: { step: 0, status: 'running', detail: 'Starting...', current: 0, total: 4 },
-                                            estimatedEndTime: null,
-                                            totalConversations: 0,
-                                            exportProgress: { current: 0, total: 0, username: '' }
-                                        });
-                                        try {
-                                            await invoke('scrape_whispers');
-                                        } catch (err) {
-                                            Logger.error('[SetupWizard] Whisper import failed:', err);
-                                            setWhisperImportState({
-                                                isImporting: false,
-                                                error: err instanceof Error ? err.message : String(err)
-                                            });
-                                        }
-                                    }}
-                                    className="flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl font-medium transition-all shadow-lg shadow-purple-500/25"
-                                >
-                                    <Wand2 size={18} />
-                                    Start Import
-                                </button>
-                            )}
-                            {whisperImportState.result && (
-                                <div className="flex items-center justify-center gap-2 text-green-400 mb-2">
-                                    <CheckCircle2 size={20} />
-                                    <span className="font-medium">Import Complete!</span>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Features List */}
                         {!whisperImportState.isImporting && !whisperImportState.result && (
-                            <div className="mt-6 flex flex-col gap-2 w-full max-w-xs">
-                                <div className="flex items-center gap-2 text-left p-2 bg-glass/50 rounded-lg">
-                                    <Check size={12} className="text-green-400 flex-shrink-0" />
-                                    <span className="text-xs text-textMuted">Runs silently in background</span>
-                                </div>
-                                <div className="flex items-center gap-2 text-left p-2 bg-glass/50 rounded-lg">
-                                    <Check size={12} className="text-green-400 flex-shrink-0" />
-                                    <span className="text-xs text-textMuted">Your data stays private</span>
-                                </div>
-                            </div>
+                            <button
+                                onClick={async () => {
+                                    setWhisperImportStarted(true);
+                                    setWhisperImportState({
+                                        isImporting: true,
+                                        error: null,
+                                        result: null,
+                                        progress: { step: 0, status: 'running', detail: 'Starting...', current: 0, total: 4 },
+                                        estimatedEndTime: null,
+                                        totalConversations: 0,
+                                        exportProgress: { current: 0, total: 0, username: '' }
+                                    });
+                                    try {
+                                        await invoke('scrape_whispers');
+                                    } catch (err) {
+                                        Logger.error('[SetupWizard] Whisper import failed:', err);
+                                        setWhisperImportState({
+                                            isImporting: false,
+                                            error: err instanceof Error ? err.message : String(err)
+                                        });
+                                    }
+                                }}
+                                className="glass-button flex items-center justify-center gap-2 px-6 py-3 text-textPrimary rounded-xl font-medium"
+                            >
+                                <Wand2 size={17} />
+                                Start import
+                            </button>
                         )}
-
-                        <button
-                            onClick={() => setCurrentStep(5)}
-                            className="mt-4 text-sm text-textSecondary hover:text-textPrimary transition-colors"
-                        >
-                            {whisperImportState.isImporting ? 'Continue in background →' : (whisperImportState.result ? 'Continue →' : 'Skip for now →')}
-                        </button>
-                    </motion.div>
+                    </>
                 );
 
-            case 5: // Complete
+            case 5: {
+                const rows: Array<{ ok: boolean; pending?: boolean; label: string }> = [
+                    { ok: !!status.componentsInstalled, label: 'Streamlink and ad blocker' },
+                    { ok: status.dropsAuthenticated, label: 'Drops sign-in' },
+                    { ok: status.mainAuthenticated, label: 'Twitch sign-in' },
+                    {
+                        ok: !!whisperImportState.result,
+                        pending: whisperImportState.isImporting,
+                        label: 'Whisper history'
+                    },
+                ];
+
                 return (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex flex-col items-center text-center px-8 py-6"
-                    >
-                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center mb-6">
-                            <CheckCircle2 size={40} className="text-white" />
+                    <>
+                        <div className="relative mb-10">
+                            <img
+                                src={streamnookLogo}
+                                alt=""
+                                className="h-24 w-auto select-none"
+                                draggable={false}
+                            />
                         </div>
-                        <h2 className="text-2xl font-bold text-textPrimary mb-3">You're All Set!</h2>
-                        <p className="text-textSecondary mb-6 max-w-md">
-                            StreamNook is ready to use. Enjoy watching your favorite streams!
+                        <h1 className="text-5xl font-medium text-textPrimary tracking-tight leading-[1.05] mb-5">
+                            You're all set
+                        </h1>
+                        <p className="text-textSecondary text-base max-w-md mb-10">
+                            StreamNook is ready. Pick a stream and dive in.
                         </p>
-                        <div className="flex flex-col gap-2 w-full max-w-xs mb-6">
-                            <div className={`flex items-center gap-3 p-3 rounded-lg ${status.componentsInstalled ? 'bg-green-500/10' : 'bg-yellow-500/10'}`}>
-                                {status.componentsInstalled ? (
-                                    <CheckCircle2 size={18} className="text-green-400" />
-                                ) : (
-                                    <AlertCircle size={18} className="text-yellow-400" />
-                                )}
-                                <span className="text-sm text-textSecondary">
-                                    Streamlink & TTV LOL {status.componentsInstalled ? 'ready' : 'not installed'}
-                                </span>
-                            </div>
-                            <div className={`flex items-center gap-3 p-3 rounded-lg ${status.dropsAuthenticated ? 'bg-green-500/10' : 'bg-gray-500/10'}`}>
-                                {status.dropsAuthenticated ? (
-                                    <CheckCircle2 size={18} className="text-green-400" />
-                                ) : (
-                                    <X size={18} className="text-gray-400" />
-                                )}
-                                <span className="text-sm text-textSecondary">
-                                    Drops {status.dropsAuthenticated ? 'signed in' : 'not signed in'}
-                                </span>
-                            </div>
-                            <div className={`flex items-center gap-3 p-3 rounded-lg ${status.mainAuthenticated ? 'bg-green-500/10' : 'bg-gray-500/10'}`}>
-                                {status.mainAuthenticated ? (
-                                    <CheckCircle2 size={18} className="text-green-400" />
-                                ) : (
-                                    <X size={18} className="text-gray-400" />
-                                )}
-                                <span className="text-sm text-textSecondary">
-                                    Twitch {status.mainAuthenticated ? 'signed in' : 'not signed in'}
-                                </span>
-                            </div>
-                            <div className={`flex items-center gap-3 p-3 rounded-lg ${whisperImportState.result ? 'bg-green-500/10' : 'bg-gray-500/10'}`}>
-                                {whisperImportState.result ? (
-                                    <CheckCircle2 size={18} className="text-green-400" />
-                                ) : whisperImportState.isImporting ? (
-                                    <Loader2 size={18} className="text-purple-400 animate-spin" />
-                                ) : (
-                                    <X size={18} className="text-gray-400" />
-                                )}
-                                <span className="text-sm text-textSecondary">
-                                    Whispers {whisperImportState.result ? 'imported' : whisperImportState.isImporting ? 'importing...' : 'not imported'}
-                                </span>
-                            </div>
+                        <div className="flex flex-col gap-1.5 w-full max-w-sm">
+                            {rows.map((row) => (
+                                <div
+                                    key={row.label}
+                                    className="flex items-center justify-between px-4 py-2.5 rounded-lg glass-panel"
+                                >
+                                    <span className="text-sm text-textSecondary">{row.label}</span>
+                                    {row.ok ? (
+                                        <Check size={15} className="text-success" />
+                                    ) : row.pending ? (
+                                        <Loader2 size={15} className="text-accent animate-spin" />
+                                    ) : (
+                                        <span className="text-xs text-textMuted">skipped</span>
+                                    )}
+                                </div>
+                            ))}
                         </div>
-                        <button
-                            onClick={handleCompleteSetup}
-                            className="flex items-center justify-center gap-2 px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-xl font-medium transition-all shadow-lg"
-                        >
-                            <Tv size={18} />
-                            Start Watching
-                        </button>
-                    </motion.div>
+                    </>
                 );
+            }
 
             default:
                 return null;
@@ -896,91 +763,104 @@ const SetupWizard = ({ isOpen, onClose }: SetupWizardProps) => {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            transition={{ duration: 0.45, ease: STEP_EASE }}
+            className="fixed inset-0 z-[60] bg-background overflow-hidden"
         >
-            <motion.div
-                initial={{ scale: 0.95, opacity: 0, y: 20 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-                className="bg-background border border-borderLight rounded-2xl shadow-2xl w-[520px] overflow-hidden"
-            >
-                {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-borderSubtle">
-                    <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
-                            <Sparkles size={16} className="text-purple-400" />
-                        </div>
-                        <span className="text-textPrimary font-semibold">First Time Setup</span>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="p-2 text-textSecondary hover:text-textPrimary hover:bg-glass rounded-lg transition-colors"
-                    >
-                        <X size={18} />
-                    </button>
-                </div>
+            {/* Diffused multi-radial accent wash. Three offset radials at different
+                scales blend into each other so there's no single hard transition for
+                Mach bands to form on. Combined with the grain layer below this is
+                effectively dithered into smoothness. */}
+            <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0"
+                style={{
+                    backgroundImage: [
+                        'radial-gradient(95% 70% at 50% 18%, rgba(151,177,185,0.075), rgba(151,177,185,0) 78%)',
+                        'radial-gradient(65% 50% at 42% 38%, rgba(151,177,185,0.055), rgba(151,177,185,0) 82%)',
+                        'radial-gradient(130% 100% at 58% 55%, rgba(151,177,185,0.028), rgba(151,177,185,0) 92%)',
+                    ].join(','),
+                }}
+            />
 
-                {/* Progress Steps */}
-                <div className="px-6 py-4 border-b border-borderSubtle">
-                    <div className="flex items-center">
-                        {steps.map((step, index) => (
-                            <div key={step.title} className="flex items-center flex-1 last:flex-none">
-                                <div className="flex flex-col items-center">
-                                    <div
-                                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${index < currentStep
-                                            ? 'bg-green-500 text-white'
-                                            : index === currentStep
-                                                ? 'bg-purple-500 text-white'
-                                                : 'bg-glass text-textMuted'
-                                            }`}
-                                    >
-                                        {index < currentStep ? (
-                                            <Check size={14} />
-                                        ) : (
-                                            <step.icon size={14} />
-                                        )}
-                                    </div>
-                                    <span className={`text-[10px] mt-1 whitespace-nowrap ${index === currentStep ? 'text-purple-400' : 'text-textMuted'}`}>
-                                        {step.title}
-                                    </span>
-                                </div>
-                                {index < steps.length - 1 && (
-                                    <div className={`flex-1 h-0.5 mx-2 mt-[-12px] ${index < currentStep ? 'bg-green-500' : 'bg-borderSubtle'}`} />
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                </div>
+            {/* Film grain. SVG fractalNoise tiled at 200px and composited with overlay
+                so it gently lightens and darkens the canvas in equal measure. Opacity
+                tuned low enough that it reads as texture, not visible noise. */}
+            <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0 mix-blend-overlay opacity-[0.18]"
+                style={{
+                    backgroundImage:
+                        "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")",
+                    backgroundRepeat: 'repeat',
+                }}
+            />
 
-                {/* Content */}
-                <div className="min-h-[360px] flex items-center justify-center">
+            <div
+                data-tauri-drag-region
+                className="absolute top-0 left-0 right-0 h-12 z-0"
+            />
+
+            <div className="relative h-full w-full flex flex-col">
+                <div className="flex-1 flex items-center justify-center px-8 py-16 min-h-0">
                     <AnimatePresence mode="wait">
-                        {renderStepContent()}
+                        <motion.div
+                            key={currentStep}
+                            initial={{ opacity: 0, y: 14 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -14 }}
+                            transition={{ duration: STEP_DURATION, ease: STEP_EASE }}
+                            className="w-full max-w-2xl flex flex-col items-center text-center"
+                        >
+                            {renderStepContent()}
+                        </motion.div>
                     </AnimatePresence>
                 </div>
 
-                {/* Footer Navigation */}
-                <div className="flex items-center justify-between px-6 py-4 border-t border-borderSubtle">
-                    <button
-                        onClick={() => setCurrentStep(Math.max(0, currentStep - 1))}
-                        disabled={currentStep === 0 || currentStep === 1 || currentStep === 5}
-                        className="flex items-center gap-2 px-4 py-2 text-textSecondary hover:text-textPrimary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                    >
-                        <ChevronLeft size={16} />
-                        Back
-                    </button>
-                    {currentStep < steps.length - 1 && currentStep !== 1 ? (
-                        <button
-                            onClick={() => setCurrentStep(currentStep + 1)}
-                            className="flex items-center gap-2 px-5 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg font-medium transition-colors"
-                        >
-                            Next
-                            <ChevronRight size={16} />
-                        </button>
-                    ) : null}
+                <div className="relative z-10 flex items-center justify-between px-8 py-6">
+                    <div className="flex items-center gap-2">
+                        {Array.from({ length: STEP_COUNT }).map((_, idx) => {
+                            const isActive = idx === currentStep;
+                            const isPast = idx < currentStep;
+                            return (
+                                <button
+                                    key={idx}
+                                    onClick={() => isPast && setCurrentStep(idx)}
+                                    disabled={!isPast}
+                                    aria-label={`Step ${idx + 1}`}
+                                    aria-current={isActive ? 'step' : undefined}
+                                    className={`h-2 rounded-full transition-all duration-300 ${isActive
+                                        ? 'w-10 bg-accent shadow-[0_0_14px_rgba(151,177,185,0.55),0_0_4px_rgba(151,177,185,0.8)]'
+                                        : isPast
+                                            ? 'w-2 bg-accent/50 hover:bg-accent cursor-pointer'
+                                            : 'w-2 bg-borderSubtle cursor-default'
+                                        }`}
+                                />
+                            );
+                        })}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        {canGoBack && (
+                            <button
+                                onClick={() => setCurrentStep(Math.max(0, currentStep - 1))}
+                                className="flex items-center gap-1 px-3 py-2 text-sm text-textSecondary hover:text-textPrimary transition-colors rounded-lg"
+                            >
+                                <ChevronLeft size={15} />
+                                Back
+                            </button>
+                        )}
+                        {primaryAction && (
+                            <button
+                                onClick={primaryAction.onClick}
+                                disabled={primaryAction.disabled}
+                                className="glass-button px-5 py-2.5 text-textPrimary rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {primaryAction.label}
+                            </button>
+                        )}
+                    </div>
                 </div>
-            </motion.div>
+            </div>
         </motion.div>
     );
 };

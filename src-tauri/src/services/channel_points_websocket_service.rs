@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
@@ -35,6 +36,16 @@ pub struct ChannelPointsWebSocketService {
     channel_mappings: Arc<RwLock<HashMap<String, ChannelMapping>>>,
     // Set of channel IDs the user is currently watching
     active_viewing_channels: Arc<RwLock<HashSet<String>>>,
+    /// JoinHandles for the outer-spawned reader tasks (one per WS connection).
+    /// Stored so `disconnect_all` can actually terminate them. Without this,
+    /// the recursive reconnect at the end of `handle_connection` keeps the
+    /// task alive past disconnect, causing stacked "ghost" connections to
+    /// receive the same PubSub events 2-3 times.
+    reader_task_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
+    /// JoinHandle for the singleton ping-keeper task. Used to avoid spawning
+    /// a duplicate keeper on each connect_to_channels call, and to terminate
+    /// the keeper on disconnect_all.
+    ping_keeper_handle: Arc<TokioMutex<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Debug)]
@@ -73,6 +84,8 @@ impl ChannelPointsWebSocketService {
             app_handle: None,
             channel_mappings: Arc::new(RwLock::new(HashMap::new())),
             active_viewing_channels: Arc::new(RwLock::new(HashSet::new())),
+            reader_task_handles: Arc::new(TokioMutex::new(Vec::new())),
+            ping_keeper_handle: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -143,6 +156,13 @@ impl ChannelPointsWebSocketService {
         auth_token: &str,
         app_handle: AppHandle,
     ) -> Result<()> {
+        // Abort any prior session's reader tasks + ping keeper before starting
+        // a new one. Without this, repeated connect_to_channels calls stack
+        // sockets that all subscribe to the same channels — Twitch then sends
+        // each PubSub event N times, one per stacked socket. The user logs
+        // showed this firing 3× for the same "+10 points" event.
+        self.disconnect_all().await;
+
         self.app_handle = Some(app_handle.clone());
         *self.auth_token.write().await = auth_token.to_string();
         *self.user_id.write().await = user_id.to_string();
@@ -201,7 +221,7 @@ impl ChannelPointsWebSocketService {
             let channel_mappings = self.channel_mappings.clone();
             let active_viewing_channels = self.active_viewing_channels.clone();
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(
                     connection_id.clone(),
                     topics,
@@ -217,6 +237,7 @@ impl ChannelPointsWebSocketService {
                     error!("❌ WebSocket connection {} failed: {}", index, e);
                 }
             });
+            self.reader_task_handles.lock().await.push(handle);
         }
 
         // Start ping/pong keeper
@@ -883,11 +904,21 @@ impl ChannelPointsWebSocketService {
         }
     }
 
-    /// Start ping keeper to maintain connections
-    async fn start_ping_keeper(&self, app_handle: AppHandle) {
-        let connections = self.connections.clone();
+    /// Start ping keeper to maintain connections. Idempotent — if a keeper is
+    /// already running, this is a no-op. `disconnect_all` aborts the keeper so
+    /// the next `connect_to_channels` gets a fresh one.
+    async fn start_ping_keeper(&self, _app_handle: AppHandle) {
+        {
+            let guard = self.ping_keeper_handle.lock().await;
+            if let Some(h) = guard.as_ref() {
+                if !h.is_finished() {
+                    return;
+                }
+            }
+        }
 
-        tokio::spawn(async move {
+        let connections = self.connections.clone();
+        let handle = tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(240)); // Ping every 4 minutes
 
             loop {
@@ -908,13 +939,32 @@ impl ChannelPointsWebSocketService {
                 }
             }
         });
+
+        *self.ping_keeper_handle.lock().await = Some(handle);
     }
 
-    /// Disconnect all WebSocket connections
+    /// Disconnect all WebSocket connections. Aborts the spawned reader tasks
+    /// AND the ping keeper — without this, the recursive reconnect path at
+    /// the bottom of `handle_connection` keeps the task alive past disconnect,
+    /// causing stacked "ghost" sockets to keep firing PubSub events on the
+    /// next connect_to_channels call.
     pub async fn disconnect_all(&self) {
+        // Abort all reader tasks.
+        {
+            let mut handles = self.reader_task_handles.lock().await;
+            for h in handles.drain(..) {
+                h.abort();
+            }
+        }
+
+        // Abort the ping keeper.
+        if let Some(h) = self.ping_keeper_handle.lock().await.take() {
+            h.abort();
+        }
+
         let mut connections = self.connections.write().await;
         connections.clear();
-        debug!("🔌 All WebSocket connections closed");
+        debug!("🔌 All WebSocket connections closed (reader + ping tasks aborted)");
     }
 
     /// Look up channel info by ID via Twitch API (fallback for unknown channels)
@@ -930,7 +980,7 @@ impl ChannelPointsWebSocketService {
             }
         };
 
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let query = r#"
         query GetUserById($userId: ID!) {

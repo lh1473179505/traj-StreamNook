@@ -331,10 +331,22 @@ fn default_theme() -> String {
     "winters-glass".to_string()
 }
 
+// Portable install ships streamlinkw.exe next to StreamNook.exe under streamlink/bin/.
+// Falls back to the legacy system-install location if current_exe() can't resolve
+// (rare, mostly sandboxed dev runs) so we still produce a valid string.
+fn default_streamlink_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join("streamlink").join("bin").join("streamlinkw.exe"))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "C:\\Program Files\\Streamlink\\bin\\streamlinkw.exe".to_string())
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            streamlink_path: "C:\\Program Files\\Streamlink\\bin\\streamlinkw.exe".to_string(),
+            streamlink_path: default_streamlink_path(),
             streamlink_args: "--twitch-proxy-playlist=https://lb-na.cdn-perfprod.com,https://eu.luminous.dev --twitch-proxy-playlist-fallback".to_string(),
             quality: "best".to_string(),
             chat_placement: "right".to_string(),

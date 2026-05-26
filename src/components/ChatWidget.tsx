@@ -74,6 +74,7 @@ import { usemultiNookStore } from '../stores/multiNookStore';
 import type { TwitchStream } from '../types';
 
 import { Logger } from '../utils/logger';
+import { useVisibleInterval } from '../utils/useVisibleInterval';
 // Helper function to format time remaining for Hype Train
 const formatHypeTrainTimeRemaining = (expiresAt: string): string => {
   const now = Date.now();
@@ -508,8 +509,14 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   useEffect(() => {
     initializeBadgeImageCache();
   }, []);
-  const lastProcessedCountRef = useRef<number>(0);
-  const messageIdToIndexRef = useRef<Map<string, number>>(new Map());
+  // Track which messages we've already processed (parsed, added to user
+  // history, sent to chatUserStore). Previously used an integer high-water
+  // mark via `lastProcessedCountRef`, but that silently broke once the
+  // messages array rolled past the store cap (slice(N>length) returns empty,
+  // skipping all new messages). Using a Set of processed IDs is correct
+  // regardless of array rotation and is naturally bounded by `messages.length`
+  // because we prune entries no longer present.
+  const processedMessageIdsRef = useRef<Set<string>>(new Set());
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [isSharedChat, setIsSharedChat] = useState<boolean>(false);
   const [replyingTo, setReplyingTo] = useState<{ messageId: string; username: string } | null>(null);
@@ -614,13 +621,36 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   const visibleMessages = messages;
 
 
-  // Process new messages for user history tracking
+  // Process new messages for user history tracking.
+  // Iterate the full message array and skip any whose ID is already in
+  // processedMessageIdsRef. CRITICAL: extract the message ID cheaply (regex
+  // on raw IRC tags or the object's `id` field) BEFORE invoking the much
+  // more expensive parseMessage. In a fast chat (50+ msg/s) the old code
+  // would parse all 100 cap-bounded messages on every render even though
+  // 99% were already processed — that stalled the main thread and produced
+  // the "burst then freeze" pattern. Now we only parse new messages.
   useEffect(() => {
-    const newMessages = messages.slice(lastProcessedCountRef.current);
-    newMessages.forEach((message, idx) => {
+    const seen = processedMessageIdsRef.current;
+    const currentIds = new Set<string>();
+
+    for (const message of messages) {
+      // Cheap ID extraction first, no full parse.
+      let msgId: string | undefined;
+      if (typeof message === 'string') {
+        const m = message.match(/(?:^@|;)id=([^;\s]+)/);
+        msgId = m ? m[1] : undefined;
+      } else {
+        msgId = message.id;
+      }
+
+      if (msgId) {
+        currentIds.add(msgId);
+        if (seen.has(msgId)) continue; // Already processed — skip the parse + side effects.
+        seen.add(msgId);
+      }
+
       try {
         let parsed: ParsedMessage;
-        let msgId: string | undefined;
         let userId: string | undefined;
         let username: string | undefined;
         let displayName: string | undefined;
@@ -630,7 +660,6 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
           const channelIdMatch = message.match(/room-id=([^;]+)/);
           const channelId = channelIdMatch ? channelIdMatch[1] : undefined;
           parsed = parseMessage(message, channelId);
-          msgId = parsed.tags.get('id');
           userId = parsed.tags.get('user-id');
           username = parsed.username;
           displayName = parsed.tags.get('display-name') || parsed.username;
@@ -638,59 +667,72 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
         } else {
           // Backend message object
           parsed = parseMessage(message);
-          msgId = message.id;
           userId = message.tags['user-id'] || message.user_id;
           username = message.username;
           displayName = message.display_name || message.username;
           userColor = message.color || parsed.color;
         }
 
-        if (msgId) {
-          const actualIndex = lastProcessedCountRef.current + idx;
-          messageIdToIndexRef.current.set(msgId, actualIndex);
-        }
         if (userId) {
           const history = userMessageHistory.current.get(userId) || [];
           history.push(parsed);
           if (history.length > 50) history.shift();
           userMessageHistory.current.set(userId, history);
-          
-          // Add user to mention autocomplete store
+
+          // Add user to mention autocomplete store. Channel context drives
+          // third-party badge resolution inside the store.
           if (username && displayName) {
-            addUser({
-              userId,
-              username,
-              displayName,
-              color: userColor || '#9147FF',
-            });
+            const channelId =
+              parsed.tags.get('source-room-id') ||
+              parsed.tags.get('room-id') ||
+              currentStream?.user_id ||
+              '';
+            const channelName =
+              currentStream?.user_login ||
+              currentStream?.user_name ||
+              parsed.tags.get('room') ||
+              '';
+            addUser(
+              {
+                userId,
+                username,
+                displayName,
+                color: userColor || '#9147FF',
+              },
+              channelId ? { channelId, channelName } : undefined,
+            );
           }
         }
       } catch (err) {
         Logger.error('[ChatWidget] Failed to parse message:', err, message);
       }
-    });
-    lastProcessedCountRef.current = messages.length;
+    }
+
+    // Drop processed-IDs for messages that have rolled out of the array.
+    // Without this the set would grow unbounded across the session.
+    for (const id of seen) {
+      if (!currentIds.has(id)) seen.delete(id);
+    }
   }, [messages, addUser]);
 
-  useEffect(() => {
-    const getViewerCount = async () => {
-      if (currentStream?.user_login) {
-        try {
-          const [clientId, token] = await invoke<[string, string]>('get_twitch_credentials');
-          const count = await fetchStreamViewerCount(currentStream.user_login, clientId, token);
-          setViewerCount(count);
-        } catch (err) {
-          Logger.error('[ChatWidget] Failed to fetch viewer count:', err);
-          setViewerCount(null);
-        }
-      } else {
+  const getViewerCount = useCallback(async () => {
+    if (currentStream?.user_login) {
+      try {
+        const [clientId, token] = await invoke<[string, string]>('get_twitch_credentials');
+        const count = await fetchStreamViewerCount(currentStream.user_login, clientId, token);
+        setViewerCount(count);
+      } catch (err) {
+        Logger.error('[ChatWidget] Failed to fetch viewer count:', err);
         setViewerCount(null);
       }
-    };
-    getViewerCount();
-    const intervalId = setInterval(getViewerCount, 180000);
-    return () => clearInterval(intervalId);
+    } else {
+      setViewerCount(null);
+    }
   }, [currentStream?.user_login]);
+  useEffect(() => {
+    getViewerCount();
+  }, [getViewerCount]);
+  useVisibleInterval(getViewerCount, 180000);
 
   useEffect(() => {
     let headerElement: HTMLElement | null = null;
@@ -1100,32 +1142,32 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     fetchWatchStreak();
   }, [currentStream?.user_id, watchStreakDismissed, channelOverride]);
 
-  // Fetch pinned chat messages for current channel
-  useEffect(() => {
-    const fetchPinnedMessages = async () => {
-      if (!currentStream?.user_id) {
-        setPinnedMessages([]);
-        return;
+  // Fetch pinned chat messages for current channel. Pins change rarely; the
+  // 5s cadence was over-aggressive. 30s + visibility-gating means a tray-
+  // backgrounded window stops polling, and a visible window catches pins
+  // within half a minute of them being set.
+  const fetchPinnedMessages = useCallback(async () => {
+    if (!currentStream?.user_id) {
+      setPinnedMessages([]);
+      return;
+    }
+    try {
+      const messages = await invoke<PinnedMessage[]>('get_pinned_chat_messages', {
+        channelId: currentStream.user_id,
+      });
+      setPinnedMessages(messages || []);
+      if (messages && messages.length > 0) {
+        Logger.debug('[ChatWidget] Pinned messages:', messages.length);
       }
-      try {
-        const messages = await invoke<PinnedMessage[]>('get_pinned_chat_messages', {
-          channelId: currentStream.user_id,
-        });
-        setPinnedMessages(messages || []);
-        if (messages && messages.length > 0) {
-          Logger.debug('[ChatWidget] Pinned messages:', messages.length);
-        }
-      } catch (err) {
-        Logger.warn('[ChatWidget] Failed to fetch pinned messages:', err);
-        setPinnedMessages([]);
-      }
-    };
-
-    fetchPinnedMessages();
-    // Poll every 5s for near-realtime pin updates
-    const pollInterval = setInterval(fetchPinnedMessages, 5000);
-    return () => clearInterval(pollInterval);
+    } catch (err) {
+      Logger.warn('[ChatWidget] Failed to fetch pinned messages:', err);
+      setPinnedMessages([]);
+    }
   }, [currentStream?.user_id]);
+  useEffect(() => {
+    fetchPinnedMessages();
+  }, [fetchPinnedMessages]);
+  useVisibleInterval(fetchPinnedMessages, 30000);
 
   // Listen for channel points updates from backend events
   useEffect(() => {
@@ -1198,22 +1240,24 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     loadDropsForStream();
   }, [currentStream?.game_name]);
 
-  // Listen for mining status changes from anywhere in the app
-  useEffect(() => {
-    const handleMiningStatusChange = async () => {
-      if (!dropsCampaign || !currentStream?.game_name) return;
-      try {
-        const miningStatus = await invoke<MiningStatus>('get_mining_status');
-        const gameName = currentStream.game_name.toLowerCase();
-        const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-          miningStatus.current_channel?.game_name?.toLowerCase();
-        setIsMining(miningStatus.is_mining && miningGameName === gameName);
-      } catch (err) {
-        Logger.warn('[ChatWidget] Failed to check mining status:', err);
-      }
-    };
+  // Listen for mining status changes from anywhere in the app.
+  // Real-time updates arrive via the `mining-status-changed` event listener;
+  // the polling fallback is just a stale-protection net so we use a 60-min
+  // cadence (aligned with the TitleBar backup poll) and visibility-gate it.
+  const handleMiningStatusChange = useCallback(async () => {
+    if (!dropsCampaign || !currentStream?.game_name) return;
+    try {
+      const miningStatus = await invoke<MiningStatus>('get_mining_status');
+      const gameName = currentStream.game_name.toLowerCase();
+      const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
+        miningStatus.current_channel?.game_name?.toLowerCase();
+      setIsMining(miningStatus.is_mining && miningGameName === gameName);
+    } catch (err) {
+      Logger.warn('[ChatWidget] Failed to check mining status:', err);
+    }
+  }, [dropsCampaign, currentStream?.game_name]);
 
-    // Listen for mining events using dynamic import
+  useEffect(() => {
     let unlisten: (() => void) | null = null;
     let isMounted = true;
 
@@ -1232,15 +1276,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     };
     setupListener();
 
-    // Also poll every 5 seconds as backup for state sync
-    const pollInterval = setInterval(handleMiningStatusChange, 5000);
-
     return () => {
       isMounted = false;
       if (unlisten) unlisten();
-      clearInterval(pollInterval);
     };
-  }, [dropsCampaign]);
+  }, [handleMiningStatusChange]);
+
+  useVisibleInterval(handleMiningStatusChange, 60 * 60 * 1000);
 
   // Handler to toggle mining drops for current channel
   const handleToggleMining = async () => {
@@ -2246,13 +2288,27 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const mainWindow = getCurrentWindow();
       const mainPosition = await mainWindow.outerPosition();
-      const mainSize = await mainWindow.outerSize();
-      const cardWidth = 320;
-      const cardHeight = 600;
+      // Popout window width matches the default chat panel width (402px, see
+      // App.tsx:DEFAULT_CHAT_WIDTH) so a docked or side-by-side popout reads
+      // as a familiar chat-shaped surface. Height stays tall to give the
+      // messages view room — message rows are short so height drives capacity.
+      const cardWidth = 402;
+      const cardHeight = 680;
       const gap = 10;
-      let x = mainPosition.x - cardWidth - gap;
-      const y = mainPosition.y;
-      if (x < 0) x = mainPosition.x + mainSize.width + gap;
+      // Anchor the popout to the CURSOR position, not the main window's origin.
+      // Previously the math was `mainPosition.x - cardWidth - gap`, which
+      // placed the popout at a fixed offset to the left of the entire app
+      // regardless of where in chat the user clicked — making it open "far
+      // away for no reason." Convert the click's viewport coords to screen
+      // coords by adding the main window's outer position, then place the
+      // popout just to the left of the cursor with a small gap. If that
+      // would push off-screen left, flip to the right of the cursor.
+      const cursorScreenX = mainPosition.x + event.clientX;
+      const cursorScreenY = mainPosition.y + event.clientY;
+      let x = cursorScreenX - cardWidth - gap;
+      let y = cursorScreenY - Math.floor(cardHeight / 2);
+      if (x < 0) x = cursorScreenX + gap;
+      if (y < 0) y = 0;
       const windowLabel = `profile-${userId}-${Date.now()}`;
       
       // PHASE 3: Fetch message history from Rust LRU cache instead of frontend Map

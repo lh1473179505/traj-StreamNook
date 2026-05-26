@@ -20,6 +20,14 @@ use tokio::sync::RwLock;
 const DEFAULT_STALE_THRESHOLD_SECONDS: u64 = 420; // 7 minutes
 const RELAXED_STALE_THRESHOLD_SECONDS: u64 = 900; // 15 minutes for relaxed mode
 
+/// Result of attempting to pivot to a different live channel within the
+/// current campaign. `Exhausted` means no channels were live — mining has
+/// already been stopped + the user notified, so the caller should `break`.
+enum ChannelSwitchOutcome {
+    Switched,
+    Exhausted,
+}
+
 // Use Android app client ID for drops-related queries
 const CLIENT_ID: &str = env!("TWITCH_ANDROID_CLIENT_ID");
 
@@ -65,6 +73,24 @@ impl MiningService {
     }
 
     /// Set up the WebSocket event listener (only once)
+    /// Bump the session counter and return the new value. Any spawned task
+    /// that captured an earlier session_id sees a mismatch on its next tick
+    /// and exits cleanly. This is how "start a new mining session" or "switch
+    /// mining mode" invalidates all of the prior session's loops without
+    /// needing per-loop JoinHandle bookkeeping.
+    ///
+    /// Combined with the is_running guard on the auto-mining + with-channel
+    /// entry points, this also closes the double-start race: even if two
+    /// callers slip past the guard between its read and its write, they each
+    /// get distinct session_ids, and only the most recent session's tasks
+    /// survive past their next 60s tick.
+    async fn bump_session_id(&self) -> u64 {
+        let mut sid = self.mining_session_id.write().await;
+        *sid += 1;
+        debug!("🆔 New mining session ID: {}", *sid);
+        *sid
+    }
+
     async fn setup_websocket_listener(&self, app_handle: &AppHandle) {
         // Check if listener is already set up
         let has_listener = {
@@ -397,18 +423,19 @@ impl MiningService {
             *is_running = true;
         }
 
-        // Set up WebSocket event listener (only once)
+        let my_session = self.bump_session_id().await;
+
         self.setup_websocket_listener(&app_handle).await;
 
-        // Clone Arc references for the background task
         let client = self.client.clone();
         let drops_service = self.drops_service.clone();
         let mining_status = self.mining_status.clone();
         let eligible_channels = self.eligible_channels.clone();
         let is_running = self.is_running.clone();
         let cached_user_id = self.cached_user_id.clone();
+        let websocket_service = self.websocket_service.clone();
+        let mining_session_id = self.mining_session_id.clone();
 
-        // Spawn the mining loop for a specific campaign with a specific channel
         tokio::spawn(async move {
             debug!(
                 "🎮 Starting manual campaign mining for campaign: {} with channel: {}",
@@ -577,6 +604,7 @@ impl MiningService {
                                 let settings_clone = settings.clone();
                                 let eligible_channels_clone = eligible_channels.clone();
                                 let cached_user_id_clone = cached_user_id.clone();
+                                let mining_session_id_clone = mining_session_id.clone();
 
                                 tokio::spawn(async move {
                                     let mut current_channel = best_channel_clone;
@@ -585,11 +613,81 @@ impl MiningService {
                                         tokio::time::interval(tokio::time::Duration::from_secs(60));
                                     let mut consecutive_failures = 0;
                                     let mut channel_index = 0;
+                                    // Tick counter for explicit liveness check. Twitch's spade
+                                    // endpoint accepts watch payloads for offline streams without
+                                    // erroring, so the failure-based switch path won't trigger.
+                                    // Every 5 ticks (= 5 min) we explicitly verify the channel is
+                                    // still live and force the switch path if it isn't.
+                                    let mut ticks_since_status_check: u32 = 0;
 
                                     loop {
                                         if !*is_running_clone.read().await {
                                             debug!("🛑 Stopping watch payload loop (with channel)");
                                             break;
+                                        }
+
+                                        // Session-id guard: a newer start_*_mining call invalidates
+                                        // prior session's loops here. See bump_session_id.
+                                        if *mining_session_id_clone.read().await != my_session {
+                                            debug!("🛑 Watch payload loop (with channel) exiting (session_id changed)");
+                                            break;
+                                        }
+
+                                        // Every 5 minutes verify the channel is actually live.
+                                        // Twitch's spade endpoint silently accepts watch payloads
+                                        // to offline streams, so we can't rely on payload failures
+                                        // to detect offline. This is our authoritative signal.
+                                        ticks_since_status_check += 1;
+                                        if ticks_since_status_check >= 5 {
+                                            ticks_since_status_check = 0;
+                                            match Self::check_channel_status(
+                                                &client_clone,
+                                                &current_channel.id,
+                                                &token_clone,
+                                            )
+                                            .await
+                                            {
+                                                Ok(None) => {
+                                                    debug!(
+                                                        "📡 Periodic liveness check: {} is offline. Switching.",
+                                                        current_channel.name
+                                                    );
+                                                    match Self::perform_channel_switch(
+                                                        &client_clone,
+                                                        &token_clone,
+                                                        &eligible_channels_clone,
+                                                        &mut current_channel,
+                                                        &mut current_broadcast_id,
+                                                        &mut channel_index,
+                                                        &target_campaign_clone,
+                                                        &settings_clone,
+                                                        &mining_status_clone,
+                                                        &app_handle_clone,
+                                                        &is_running_clone,
+                                                    )
+                                                    .await
+                                                    {
+                                                        ChannelSwitchOutcome::Switched => {
+                                                            consecutive_failures = 0;
+                                                            interval.tick().await;
+                                                            continue;
+                                                        }
+                                                        ChannelSwitchOutcome::Exhausted => break,
+                                                    }
+                                                }
+                                                Ok(Some(_)) => {
+                                                    debug!(
+                                                        "📡 Periodic liveness check: {} still live",
+                                                        current_channel.name
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    debug!(
+                                                        "⚠️ Periodic liveness check failed (network): {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
                                         }
 
                                         debug!(
@@ -731,6 +829,7 @@ impl MiningService {
                                 let mining_status_poll = mining_status.clone();
                                 let app_handle_poll = app_handle.clone();
                                 let is_running_poll = is_running.clone();
+                                let mining_session_id_poll = mining_session_id.clone();
                                 // Get the game name AND campaign name from the target campaign for filtering
                                 let game_name_poll = target_campaign
                                     .first()
@@ -756,6 +855,11 @@ impl MiningService {
                                     loop {
                                         if !*is_running_poll.read().await {
                                             debug!("🛑 Stopping inventory polling loop for {} (mining stopped)", game_name_session);
+                                            break;
+                                        }
+
+                                        if *mining_session_id_poll.read().await != my_session {
+                                            debug!("🛑 Inventory poll loop (with channel) for {} exiting (session_id changed)", game_name_session);
                                             break;
                                         }
 
@@ -1075,17 +1179,18 @@ impl MiningService {
                                     }
                                 });
 
-                                // Connect WebSocket
-                                let websocket_service =
-                                    Arc::new(tokio::sync::Mutex::new(DropsWebSocketService::new()));
-                                let mut ws_service = websocket_service.lock().await;
-                                if let Err(e) = ws_service
-                                    .connect(&user_id, &token, app_handle.clone())
-                                    .await
+                                // Connect WebSocket via the shared service.
+                                // Idempotent — subsequent calls within the
+                                // same mining session no-op.
                                 {
-                                    error!("❌ Failed to connect WebSocket: {}", e);
+                                    let mut ws_service = websocket_service.lock().await;
+                                    if let Err(e) = ws_service
+                                        .connect(&user_id, &token, app_handle.clone())
+                                        .await
+                                    {
+                                        error!("❌ Failed to connect WebSocket: {}", e);
+                                    }
                                 }
-                                drop(ws_service);
                             } else {
                                 debug!(
                                     "⚠️ Selected channel {} not found in eligible channels",
@@ -1130,32 +1235,25 @@ impl MiningService {
         campaign_id: String,
         app_handle: AppHandle,
     ) -> Result<()> {
-        // Increment session ID to invalidate any old running loops
-        let session_id = {
-            let mut sid = self.mining_session_id.write().await;
-            *sid += 1;
-            debug!("🆔 New mining session ID: {}", *sid);
-            *sid
-        };
+        // Invalidate any prior session's loops, then start a new one.
+        let my_session = self.bump_session_id().await;
 
-        // Set running state
         {
             let mut is_running = self.is_running.write().await;
             *is_running = true;
         }
 
-        // Set up WebSocket event listener (only once)
         self.setup_websocket_listener(&app_handle).await;
 
-        // Clone Arc references for the background task
         let client = self.client.clone();
         let drops_service = self.drops_service.clone();
         let mining_status = self.mining_status.clone();
         let eligible_channels = self.eligible_channels.clone();
         let is_running = self.is_running.clone();
         let cached_user_id = self.cached_user_id.clone();
+        let websocket_service = self.websocket_service.clone();
+        let mining_session_id = self.mining_session_id.clone();
 
-        // Spawn the mining loop for a specific campaign
         tokio::spawn(async move {
             debug!(
                 "🎮 Starting manual campaign mining for campaign: {}",
@@ -1411,6 +1509,7 @@ impl MiningService {
                                 let eligible_channels_clone = eligible_channels.clone();
                                 let cached_user_id_clone = cached_user_id.clone();
                                 let watch_session_channel = best_channel.name.clone(); // Track this session's channel
+                                let mining_session_id_clone = mining_session_id.clone();
 
                                 tokio::spawn(async move {
                                     let mut current_channel = best_channel_clone;
@@ -1419,11 +1518,25 @@ impl MiningService {
                                         tokio::time::interval(tokio::time::Duration::from_secs(60));
                                     let mut consecutive_failures = 0;
                                     let mut channel_index = 0; // Track current channel index
+                                                               // Tick counter for explicit liveness check. Twitch's spade
+                                                               // endpoint accepts watch payloads for offline streams without
+                                                               // erroring, so the failure-based switch path won't trigger.
+                                                               // Every 5 ticks (= 5 min) we explicitly verify the channel is
+                                                               // still live and force the switch path if it isn't.
+                                    let mut ticks_since_status_check: u32 = 0;
 
                                     loop {
                                         // Check if still running
                                         if !*is_running_clone.read().await {
                                             debug!("🛑 Stopping watch payload loop for {} (mining stopped)", watch_session_channel);
+                                            break;
+                                        }
+
+                                        // Check if this task belongs to the current mining session.
+                                        // A newer start_*_mining call bumps the session_id, which
+                                        // signals all prior session's loops to exit cleanly here.
+                                        if *mining_session_id_clone.read().await != my_session {
+                                            debug!("🛑 Watch payload loop for {} exiting (session_id changed)", watch_session_channel);
                                             break;
                                         }
 
@@ -1438,6 +1551,63 @@ impl MiningService {
                                                     debug!("🛑 Stopping watch payload loop for {} (switched to {})",
                                                         watch_session_channel, mining_channel.game_name);
                                                     break;
+                                                }
+                                            }
+                                        }
+
+                                        // Every 5 minutes verify the channel is actually live.
+                                        // Twitch's spade endpoint silently accepts watch payloads
+                                        // to offline streams, so we can't rely on payload failures
+                                        // to detect offline. This is our authoritative signal.
+                                        ticks_since_status_check += 1;
+                                        if ticks_since_status_check >= 5 {
+                                            ticks_since_status_check = 0;
+                                            match Self::check_channel_status(
+                                                &client_clone,
+                                                &current_channel.id,
+                                                &token_clone,
+                                            )
+                                            .await
+                                            {
+                                                Ok(None) => {
+                                                    debug!(
+                                                        "📡 Periodic liveness check: {} is offline. Switching.",
+                                                        current_channel.name
+                                                    );
+                                                    match Self::perform_channel_switch(
+                                                        &client_clone,
+                                                        &token_clone,
+                                                        &eligible_channels_clone,
+                                                        &mut current_channel,
+                                                        &mut current_broadcast_id,
+                                                        &mut channel_index,
+                                                        &target_campaign_clone,
+                                                        &settings_clone,
+                                                        &mining_status_clone,
+                                                        &app_handle_clone,
+                                                        &is_running_clone,
+                                                    )
+                                                    .await
+                                                    {
+                                                        ChannelSwitchOutcome::Switched => {
+                                                            consecutive_failures = 0;
+                                                            interval.tick().await;
+                                                            continue;
+                                                        }
+                                                        ChannelSwitchOutcome::Exhausted => break,
+                                                    }
+                                                }
+                                                Ok(Some(_)) => {
+                                                    debug!(
+                                                        "📡 Periodic liveness check: {} still live",
+                                                        current_channel.name
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    debug!(
+                                                        "⚠️ Periodic liveness check failed (network): {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -1583,6 +1753,7 @@ impl MiningService {
                                 let mining_status_poll = mining_status.clone();
                                 let app_handle_poll = app_handle.clone();
                                 let is_running_poll = is_running.clone();
+                                let mining_session_id_poll = mining_session_id.clone();
                                 // Get the game name AND campaign name from the target campaign for filtering
                                 // We need to filter by SPECIFIC campaign, not just game!
                                 let game_name_poll = target_campaign
@@ -1612,6 +1783,11 @@ impl MiningService {
                                     loop {
                                         if !*is_running_poll.read().await {
                                             debug!("🛑 Stopping inventory polling loop for {} (mining stopped)", game_name_session);
+                                            break;
+                                        }
+
+                                        if *mining_session_id_poll.read().await != my_session {
+                                            debug!("🛑 Inventory poll loop for {} exiting (session_id changed)", game_name_session);
                                             break;
                                         }
 
@@ -1957,20 +2133,21 @@ impl MiningService {
                                     }
                                 });
 
-                                // Connect WebSocket AFTER status is fully populated (may provide faster updates if working)
+                                // Connect WebSocket via the shared service.
+                                // Idempotent — subsequent calls within the
+                                // same mining session no-op.
                                 debug!(
                                     "🔌 Connecting WebSocket for drops updates (AFTER status populated)..."
                                 );
-                                let websocket_service =
-                                    Arc::new(tokio::sync::Mutex::new(DropsWebSocketService::new()));
-                                let mut ws_service = websocket_service.lock().await;
-                                if let Err(e) = ws_service
-                                    .connect(&user_id, &token, app_handle.clone())
-                                    .await
                                 {
-                                    error!("❌ Failed to connect WebSocket: {}", e);
+                                    let mut ws_service = websocket_service.lock().await;
+                                    if let Err(e) = ws_service
+                                        .connect(&user_id, &token, app_handle.clone())
+                                        .await
+                                    {
+                                        error!("❌ Failed to connect WebSocket: {}", e);
+                                    }
                                 }
-                                drop(ws_service);
                             } else {
                                 debug!("⚠️ No eligible channels found for this campaign");
                                 let mut status = mining_status.write().await;
@@ -2024,28 +2201,43 @@ impl MiningService {
             *is_running = true;
         }
 
-        // Set up WebSocket event listener (only once)
+        let my_session = self.bump_session_id().await;
+
         self.setup_websocket_listener(&app_handle).await;
 
-        // Clone Arc references for the background task
         let client = self.client.clone();
         let drops_service = self.drops_service.clone();
         let mining_status = self.mining_status.clone();
         let eligible_channels = self.eligible_channels.clone();
         let is_running = self.is_running.clone();
         let cached_user_id = self.cached_user_id.clone();
+        let websocket_service = self.websocket_service.clone();
+        let mining_session_id = self.mining_session_id.clone();
 
-        // Spawn the mining loop
         tokio::spawn(async move {
             debug!(
                 "🎮 Starting automated drops mining (optimized - finds first available channel)"
             );
+
+            // Handles for the per-iteration watch-payload + inventory-poll tasks.
+            // Each 5-min outer-loop cycle spawns a fresh pair (different channel
+            // may be selected); aborting the prior pair before spawning the new
+            // one keeps the active-task count bounded at ~2 instead of growing
+            // by 2 per cycle (~24/hour) for the life of the mining session.
+            let mut prior_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
             loop {
                 // Check if mining should continue
                 let should_continue = *is_running.read().await;
                 if !should_continue {
                     debug!("🛑 Stopping automated mining");
+                    break;
+                }
+
+                // Session-id guard: a newer start_*_mining call (different mode,
+                // re-launch, etc.) invalidates this outer loop's iteration here.
+                if *mining_session_id.read().await != my_session {
+                    debug!("🛑 Auto-mining outer loop exiting (session_id changed)");
                     break;
                 }
 
@@ -2184,18 +2376,21 @@ impl MiningService {
                                     }
                                 };
 
-                                // Connect WebSocket for real-time drops updates
+                                // Connect WebSocket via the shared service.
+                                // The 5-min outer loop re-evaluates channel
+                                // selection, but the WS subscription is to
+                                // user-scoped topics that don't change, so
+                                // the second-iteration call is idempotent.
                                 debug!("🔌 Connecting WebSocket for drops updates...");
-                                let websocket_service =
-                                    Arc::new(tokio::sync::Mutex::new(DropsWebSocketService::new()));
-                                let mut ws_service = websocket_service.lock().await;
-                                if let Err(e) = ws_service
-                                    .connect(&user_id, &token, app_handle.clone())
-                                    .await
                                 {
-                                    error!("❌ Failed to connect WebSocket: {}", e);
+                                    let mut ws_service = websocket_service.lock().await;
+                                    if let Err(e) = ws_service
+                                        .connect(&user_id, &token, app_handle.clone())
+                                        .await
+                                    {
+                                        error!("❌ Failed to connect WebSocket: {}", e);
+                                    }
                                 }
-                                drop(ws_service);
 
                                 // Get the actual stream/broadcast ID for this channel
                                 let broadcast_id = match Self::get_broadcast_id(
@@ -2229,14 +2424,26 @@ impl MiningService {
                                 let token_clone = token.clone();
                                 let is_running_clone = is_running.clone();
                                 let cached_user_id_clone = cached_user_id.clone();
+                                let mining_session_id_clone = mining_session_id.clone();
 
-                                tokio::spawn(async move {
+                                // Abort the prior iteration's watch-payload +
+                                // inventory-poll before spawning the new pair.
+                                for h in prior_handles.drain(..) {
+                                    h.abort();
+                                }
+
+                                let watch_payload_handle = tokio::spawn(async move {
                                     let mut interval =
                                         tokio::time::interval(tokio::time::Duration::from_secs(60));
                                     loop {
                                         // Check if still running
                                         if !*is_running_clone.read().await {
                                             debug!("🛑 Stopping watch payload loop");
+                                            break;
+                                        }
+
+                                        if *mining_session_id_clone.read().await != my_session {
+                                            debug!("🛑 Auto-mining watch payload loop exiting (session_id changed)");
                                             break;
                                         }
 
@@ -2265,17 +2472,20 @@ impl MiningService {
                                     }
                                 });
 
+                                prior_handles.push(watch_payload_handle);
+
                                 // Start periodic inventory polling for automated mining (fallback since WebSocket drops progress is unreliable)
                                 let drops_service_poll = drops_service.clone();
                                 let mining_status_poll = mining_status.clone();
                                 let app_handle_poll = app_handle.clone();
                                 let is_running_poll = is_running.clone();
+                                let mining_session_id_poll = mining_session_id.clone();
                                 let game_name_poll = campaign.game_name.clone();
                                 let campaign_name_poll = campaign.name.clone();
                                 let game_name_session = game_name_poll.clone();
                                 let campaign_name_session = campaign_name_poll.clone();
 
-                                tokio::spawn(async move {
+                                let inventory_poll_handle = tokio::spawn(async move {
                                     let mut poll_interval =
                                         tokio::time::interval(tokio::time::Duration::from_secs(60)); // Poll every minute
                                     poll_interval.tick().await; // Skip first immediate tick
@@ -2283,6 +2493,11 @@ impl MiningService {
                                     loop {
                                         if !*is_running_poll.read().await {
                                             debug!("🛑 Stopping inventory polling loop for auto-mining {} (mining stopped)", game_name_session);
+                                            break;
+                                        }
+
+                                        if *mining_session_id_poll.read().await != my_session {
+                                            debug!("🛑 Auto-mining inventory poll for {} exiting (session_id changed)", game_name_session);
                                             break;
                                         }
 
@@ -2505,6 +2720,7 @@ impl MiningService {
                                         poll_interval.tick().await;
                                     }
                                 });
+                                prior_handles.push(inventory_poll_handle);
                             }
                             Ok(None) => {
                                 debug!("⚠️ No eligible channels found for mining");
@@ -3533,6 +3749,88 @@ impl MiningService {
             Err(e) => {
                 debug!("❌ Failed to refresh eligible channels from API: {}", e);
                 None
+            }
+        }
+    }
+
+    /// Pivot to a different live channel within the campaign. Wraps
+    /// `try_switch_channel_with_refresh` plus the mining-status update + event
+    /// emission + exhaustion handling. Used by the explicit-liveness path in
+    /// the watch-payload loops to switch immediately when the current channel
+    /// goes offline (Twitch's spade endpoint silently accepts watch payloads
+    /// to offline streams, so the failure-counter path never trips on its own).
+    #[allow(clippy::too_many_arguments)]
+    async fn perform_channel_switch(
+        client: &Client,
+        token: &str,
+        eligible_channels: &Arc<RwLock<Vec<MiningChannel>>>,
+        current_channel: &mut MiningChannel,
+        current_broadcast_id: &mut String,
+        channel_index: &mut usize,
+        target_campaign: &[DropCampaign],
+        settings: &DropsSettings,
+        mining_status: &Arc<RwLock<MiningStatus>>,
+        app_handle: &AppHandle,
+        is_running: &Arc<RwLock<bool>>,
+    ) -> ChannelSwitchOutcome {
+        let channels = eligible_channels.read().await.clone();
+        match Self::try_switch_channel_with_refresh(
+            client,
+            token,
+            &channels,
+            &current_channel.id,
+            *channel_index,
+            target_campaign,
+            settings,
+        )
+        .await
+        {
+            Some((new_channel, new_broadcast_id, fresh_channels, new_index)) => {
+                let old_channel_name = current_channel.name.clone();
+                *current_channel = new_channel.clone();
+                *current_broadcast_id = new_broadcast_id;
+                *channel_index = new_index;
+
+                {
+                    let mut eligible = eligible_channels.write().await;
+                    *eligible = fresh_channels.clone();
+                }
+
+                if let Ok(mut status) = mining_status.try_write() {
+                    status.current_channel = Some(new_channel.clone());
+                    status.eligible_channels = fresh_channels;
+                    status.last_update = Utc::now();
+                    if let Some(campaign) =
+                        Self::get_active_campaign_for_channel(&new_channel, target_campaign)
+                    {
+                        status.current_campaign = Some(campaign.name.clone());
+                    }
+                    let current_status = status.clone();
+                    drop(status);
+                    let _ = app_handle.emit("mining-status-update", &current_status);
+                    let _ = app_handle.emit(
+                        "channel-switched",
+                        json!({
+                            "from": old_channel_name,
+                            "to": new_channel.name,
+                            "reason": "offline_or_errors"
+                        }),
+                    );
+                }
+
+                debug!("✅ Successfully switched to {}", new_channel.name);
+                ChannelSwitchOutcome::Switched
+            }
+            None => {
+                debug!("❌ No channels available after API refresh, stopping mining");
+                Self::stop_mining_no_channels(
+                    is_running,
+                    mining_status,
+                    app_handle,
+                    "All streams for this campaign are offline. Mining has been stopped.",
+                )
+                .await;
+                ChannelSwitchOutcome::Exhausted
             }
         }
     }

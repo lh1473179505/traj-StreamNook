@@ -46,7 +46,7 @@ impl ChannelPointsService {
         let session_id = Uuid::new_v4().to_string().replace("-", "");
 
         Self {
-            client: Client::new(),
+            client: crate::services::http::client().clone(),
             balances: Arc::new(RwLock::new(HashMap::new())),
             claim_history: Arc::new(RwLock::new(Vec::new())),
             watching_streams: Arc::new(RwLock::new(HashMap::new())),

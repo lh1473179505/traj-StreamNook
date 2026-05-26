@@ -232,7 +232,7 @@ impl WhisperService {
         user_id: &str,
         access_token: &str,
     ) -> Result<(), String> {
-        let client = reqwest::Client::new();
+        let client = crate::services::http::client().clone();
 
         let body = json!({
             "type": "user.whisper.message",

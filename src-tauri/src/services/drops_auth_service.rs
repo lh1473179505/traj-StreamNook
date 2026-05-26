@@ -1,4 +1,7 @@
-lazy_static::lazy_static! { static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new(); }
+// HTTP_CLIENT below kept as a thin file-local alias for the shared client so
+// existing `HTTP_CLIENT.clone()` call sites continue to work; the underlying
+// instance is the global default in `crate::services::http`.
+lazy_static::lazy_static! { static ref HTTP_CLIENT: reqwest::Client = crate::services::http::client().clone(); }
 
 use crate::services::cookie_jar_service::CookieJarService;
 use anyhow::Result;

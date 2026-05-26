@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Loader2, Github, ChevronDown, ChevronRight, AlertCircle, Sparkles, Bug, Wrench, Package } from 'lucide-react';
+import { Loader2, Github, ChevronDown, ChevronRight, AlertCircle, Sparkles, Bug, Wrench, Package, RefreshCw } from 'lucide-react';
 import { parseInlineMarkdown } from '../../services/markdownService';
 import { Logger } from '../../utils/logger';
 
@@ -16,31 +16,67 @@ interface GitHubRelease {
 
 const REPO = 'winters27/StreamNook';
 const RELEASES_URL = `https://api.github.com/repos/${REPO}/releases?per_page=20`;
-const CACHE_KEY = 'streamnook_whatsnew_cache_v1';
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 min
+// Bumped from _v1 to _v2 when the cache schema gained an etag field. Old v1
+// entries (no etag) won't be picked up, so any user who had stale releases
+// pinned in localStorage from before this fix gets a clean re-fetch on first
+// open.
+const CACHE_KEY = 'streamnook_whatsnew_cache_v2';
 
 interface CachedReleases {
     fetchedAt: number;
+    etag: string | null;
     releases: GitHubRelease[];
 }
 
-const loadCachedReleases = (): GitHubRelease[] | null => {
+const loadCache = (): CachedReleases | null => {
     try {
         const raw = localStorage.getItem(CACHE_KEY);
         if (!raw) return null;
         const parsed: CachedReleases = JSON.parse(raw);
-        if (Date.now() - parsed.fetchedAt > CACHE_TTL_MS) return null;
-        return parsed.releases;
+        if (!parsed.releases || !Array.isArray(parsed.releases)) return null;
+        return parsed;
     } catch {
         return null;
     }
 };
 
-const saveCachedReleases = (releases: GitHubRelease[]) => {
+const saveCache = (data: CachedReleases) => {
     try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify({ fetchedAt: Date.now(), releases } satisfies CachedReleases));
+        localStorage.setItem(CACHE_KEY, JSON.stringify(data));
     } catch {
         // Silently fail; cache is opportunistic.
+    }
+};
+
+// Fetch using GitHub's conditional-request flow. If we have a previous ETag we
+// send `If-None-Match`; GitHub returns 304 when nothing has changed and 304s
+// don't count against the 60/hour unauthenticated rate limit, so we can probe
+// on every mount essentially for free. When `bypassEtag` is true we skip the
+// header so the user can force a true refresh (e.g. if they suspect CDN lag).
+type FetchResult =
+    | { ok: true; kind: 'fresh'; releases: GitHubRelease[]; etag: string | null }
+    | { ok: true; kind: 'not-modified' }
+    | { ok: false; error: string };
+
+const fetchReleases = async (opts: { bypassEtag?: boolean; signal?: AbortSignal } = {}): Promise<FetchResult> => {
+    try {
+        const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+        if (!opts.bypassEtag) {
+            const cached = loadCache();
+            if (cached?.etag) headers['If-None-Match'] = cached.etag;
+        }
+        const response = await fetch(RELEASES_URL, { headers, signal: opts.signal });
+        if (response.status === 304) return { ok: true, kind: 'not-modified' };
+        if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+        const data = (await response.json()) as GitHubRelease[];
+        return {
+            ok: true,
+            kind: 'fresh',
+            releases: data.filter((r) => !r.draft),
+            etag: response.headers.get('ETag'),
+        };
+    } catch (e) {
+        return { ok: false, error: String(e) };
     }
 };
 
@@ -191,40 +227,68 @@ const ReleaseCard = ({
 };
 
 const WhatsNewSettings = () => {
-    const [releases, setReleases] = useState<GitHubRelease[] | null>(() => loadCachedReleases());
-    const [isLoading, setIsLoading] = useState(!loadCachedReleases());
+    const initialCache = loadCache();
+    const [releases, setReleases] = useState<GitHubRelease[] | null>(initialCache?.releases ?? null);
+    const [isLoading, setIsLoading] = useState(!initialCache);
     const [error, setError] = useState<string | null>(null);
+    const [isRefreshing, setIsRefreshing] = useState(false);
 
     useEffect(() => {
-        let cancelled = false;
+        const controller = new AbortController();
         (async () => {
-            try {
-                const response = await fetch(RELEASES_URL, { headers: { Accept: 'application/vnd.github+json' } });
-                if (!response.ok) throw new Error(`GitHub API ${response.status}`);
-                const data = (await response.json()) as GitHubRelease[];
-                const visible = data.filter((r) => !r.draft);
-                if (!cancelled) {
-                    setReleases(visible);
-                    saveCachedReleases(visible);
+            const result = await fetchReleases({ signal: controller.signal });
+            if (controller.signal.aborted) return;
+            if (result.ok) {
+                if (result.kind === 'fresh') {
+                    setReleases(result.releases);
+                    saveCache({ fetchedAt: Date.now(), etag: result.etag, releases: result.releases });
                 }
-            } catch (e) {
-                Logger.warn('Failed to load releases:', e);
-                if (!cancelled && !releases) setError(String(e));
-            } finally {
-                if (!cancelled) setIsLoading(false);
+                // 304 not-modified: keep cached state, nothing to do
+                setError(null);
+            } else {
+                Logger.warn('Failed to load releases:', result.error);
+                if (!releases) setError(result.error);
+                else setError('refresh-failed');
             }
+            setIsLoading(false);
         })();
-        return () => {
-            cancelled = true;
-        };
+        return () => controller.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Manual refresh bypasses the ETag so users can force a true re-pull if
+    // they suspect their cache is stale (CDN lag, deleted release not yet
+    // propagated). Normal mount-time fetches use the ETag for free freshness.
+    const handleRefresh = async () => {
+        setIsRefreshing(true);
+        const result = await fetchReleases({ bypassEtag: true });
+        if (result.ok && result.kind === 'fresh') {
+            setReleases(result.releases);
+            saveCache({ fetchedAt: Date.now(), etag: result.etag, releases: result.releases });
+            setError(null);
+        } else if (!result.ok) {
+            Logger.warn('Refresh failed:', result.error);
+            setError('refresh-failed');
+        }
+        setIsRefreshing(false);
+    };
+
     return (
         <div className="space-y-6">
-            <p className="text-sm text-textMuted">
-                Release history for StreamNook and its bundled components (Streamlink, TTV LOL PRO).
-            </p>
+            <div className="flex items-start justify-between gap-3">
+                <p className="text-sm text-textMuted flex-1">
+                    Release history for StreamNook and its bundled components (Streamlink, TTV LOL PRO).
+                </p>
+                <button
+                    onClick={handleRefresh}
+                    disabled={isRefreshing || isLoading}
+                    className="inline-flex items-center gap-1.5 text-xs text-textSecondary hover:text-textPrimary disabled:opacity-50 transition-colors"
+                    title="Refetch from GitHub"
+                >
+                    <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+                    Refresh
+                </button>
+            </div>
 
             {isLoading && !releases && (
                 <div className="flex items-center justify-center py-8">
@@ -239,6 +303,13 @@ const WhatsNewSettings = () => {
                 <div className="flex items-center gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
                     <AlertCircle size={20} className="text-red-400 flex-shrink-0" />
                     <p className="text-sm text-red-400">Could not load releases: {error}</p>
+                </div>
+            )}
+
+            {error === 'refresh-failed' && releases && (
+                <div className="flex items-center gap-2 text-xs text-amber-400">
+                    <AlertCircle size={12} />
+                    <span>Couldn't reach GitHub. Showing cached list.</span>
                 </div>
             )}
 

@@ -69,9 +69,6 @@ export const broadcastMultiNookPresence = (slots: MultiNookSlot[]) => {
   if (settings?.discord_rpc_enabled) {
     invoke('update_discord_presence', presenceArgs).catch(() => {});
   }
-
-  // Magne (always-on, independent)
-  invoke('update_magne_presence', presenceArgs).catch(() => {});
 };
 
 
@@ -284,9 +281,8 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
       if (settings?.discord_rpc_enabled) {
         invoke('set_idle_discord_presence').catch(() => {});
       }
-      invoke('set_idle_magne_presence').catch(() => {});
     }
-    
+
     set({ isMultiNookActive: newState });
   },
 
@@ -422,9 +418,8 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
       if (settings?.discord_rpc_enabled) {
         invoke('set_idle_discord_presence').catch(() => {});
       }
-      invoke('set_idle_magne_presence').catch(() => {});
     }
-    
+
     await saveSlots();
   },
 

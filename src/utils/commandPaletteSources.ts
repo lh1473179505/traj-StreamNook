@@ -720,7 +720,7 @@ const SETTINGS_CATALOG: SettingsEntry[] = [
   { tab: 'Theme', keywords: 'theme color accent skin dark light' },
 
   // Integrations
-  { tab: 'Integrations', keywords: 'integrations discord rpc magne ttv lol ad block' },
+  { tab: 'Integrations', keywords: 'integrations discord rpc ttv lol ad block' },
   { tab: 'Integrations', section: 'Discord Rich Presence', keywords: 'discord rpc rich presence activity' },
   { tab: 'Integrations', section: 'TTV LOL Ad Blocker Plugin', keywords: 'ttv lol ad block proxy splice' },
 

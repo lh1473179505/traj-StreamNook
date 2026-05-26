@@ -193,25 +193,23 @@ const fullBadgeQueryFields = /* GraphQL */ `
   }
 `;
 
-const fullUserQuery = (id: string) => /* GraphQL */ `{ 
-  users {
-    userByConnection(platform: TWITCH, platformId: "${id}") {
-      id
-      style {
-        activePaint { id }
-        activeBadge { id description }
+// Field selection for `userByConnection`. Reused by the batched drain to build
+// aliased multi-user queries.
+const fullUserSelection = /* GraphQL */ `{
+  id
+  style {
+    activePaint { id }
+    activeBadge { id description }
+  }
+  inventory {
+    paints {
+      to {
+        paint ${fullPaintQueryFields}
       }
-      inventory {
-        paints {
-          to {
-            paint ${fullPaintQueryFields}
-          }
-        }
-        badges {
-          to {
-            badge ${fullBadgeQueryFields}
-          }
-        }
+    }
+    badges {
+      to {
+        badge ${fullBadgeQueryFields}
       }
     }
   }
@@ -359,11 +357,137 @@ export function queueCosmeticForCaching(id: string, url: string) {
   processCosmeticDownloadQueue();
 }
 
-// Fetch user cosmetics from 7TV v4 API
-// IMPORTANT: This is "content-first" - we don't block on cache initialization.
-// Cosmetics load from CDN immediately, cached URLs used only if already in memory.
+// Parse a single user's GraphQL payload (the `userByConnection` value) into
+// the frontend-facing cosmetics shape. Extracted so both single-fetch and
+// batched-fetch paths can share it.
+function parseUserCosmetics(
+  data: any,
+  cachedFiles: Record<string, string>,
+): UserCosmeticsResponse {
+  const seventvUserId = data.id;
+  const activePaintId = data.style?.activePaint?.id;
+  const activeBadgeId = data.style?.activeBadge?.id;
+
+  const paints: PaintV4[] = [];
+  for (const paint of data.inventory?.paints ?? []) {
+    if (paint.to?.paint) {
+      const paintData = paint.to.paint;
+      if (paintData.id === activePaintId) {
+        paintData.selected = true;
+      }
+      if (paintData.data?.layers) {
+        for (const layer of paintData.data.layers) {
+          if (layer.ty.__typename === 'PaintLayerTypeImage' && layer.ty.images) {
+            const localPath = cachedFiles[layer.id];
+            if (localPath) {
+              const localUrl = convertFileSrc(localPath);
+              layer.ty.images.forEach((img: any) => {
+                img.localUrl = localUrl;
+              });
+            }
+          }
+        }
+      }
+      paints.push(paintData);
+    }
+  }
+
+  const badges: BadgeV4[] = [];
+  for (const badge of data.inventory?.badges ?? []) {
+    const badgeData = badge.to?.badge;
+    if (!badgeData) continue;
+    if (badgeData.id === activeBadgeId) {
+      badgeData.selected = true;
+    }
+    const localPath = cachedFiles[badgeData.id];
+    if (localPath) {
+      badgeData.localUrl = convertFileSrc(localPath);
+    }
+    badges.push(badgeData);
+  }
+
+  return {
+    paints: paints.filter((p) => p !== null),
+    badges: badges.filter((b) => b !== null),
+    seventvUserId,
+  };
+}
+
+// Batch coordinator: collects twitchIds requested within the current tick and
+// fires a single aliased GraphQL query at microtask boundary. A flood of 50
+// new chatters (hype train, channel switch, replay) collapses from 50 parallel
+// HTTP round-trips into one. Microtask drain means there's no human-visible
+// delay; the batch fires at end-of-tick.
+//
+// 7TV's `users.userByConnection` is a per-user field, so we use GraphQL
+// aliasing (`u_<id>: users { userByConnection(...) { ... } }`) to multiplex N
+// users into one request. Chunked at BATCH_MAX_SIZE to bound payload size.
+const BATCH_MAX_SIZE = 25;
+type CosmeticsResolver = (data: UserCosmeticsResponse | null) => void;
+const batchQueue = new Map<string, CosmeticsResolver[]>();
+let batchScheduled = false;
+
+const requestUserCosmeticsBatched = (
+  twitchId: string,
+): Promise<UserCosmeticsResponse | null> => {
+  return new Promise((resolve) => {
+    let resolvers = batchQueue.get(twitchId);
+    if (!resolvers) {
+      resolvers = [];
+      batchQueue.set(twitchId, resolvers);
+    }
+    resolvers.push(resolve);
+    if (!batchScheduled) {
+      batchScheduled = true;
+      queueMicrotask(drainBatch);
+    }
+  });
+};
+
+const drainBatch = async () => {
+  batchScheduled = false;
+  if (batchQueue.size === 0) return;
+
+  // Snapshot the queue and clear it so new requests during this drain start a
+  // fresh batch (will get their own microtask).
+  const snapshot = new Map(batchQueue);
+  batchQueue.clear();
+
+  const cachedFiles = cachedCosmeticFiles || {};
+  const ids = Array.from(snapshot.keys());
+
+  for (let i = 0; i < ids.length; i += BATCH_MAX_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_MAX_SIZE);
+    const query = `{ ${chunk
+      .map(
+        (id) =>
+          `u_${id}: users { userByConnection(platform: TWITCH, platformId: "${id}") ${fullUserSelection} }`,
+      )
+      .join(' ')} }`;
+
+    try {
+      const response = await requestGql({ query });
+      for (const id of chunk) {
+        const userByConnection = response?.data?.[`u_${id}`]?.userByConnection;
+        const result = userByConnection
+          ? parseUserCosmetics(userByConnection, cachedFiles)
+          : { paints: [], badges: [], seventvUserId: undefined };
+        snapshot.get(id)?.forEach((r) => r(result));
+      }
+    } catch (error) {
+      Logger.error('[7TV] Batch cosmetics fetch failed:', error);
+      for (const id of chunk) {
+        snapshot.get(id)?.forEach((r) => r(null));
+      }
+    }
+  }
+};
+
+// Fetch user cosmetics from 7TV v4 API.
+// Content-first: lazy cache initialization in the background; cached URLs are
+// used only if already in memory. Requests for distinct users in the same tick
+// are batched into one HTTP round-trip via requestUserCosmeticsBatched above.
 export async function getUserCosmetics(twitchId: string): Promise<UserCosmeticsResponse | null> {
-  // Check cache
   const cached = userCache.get(twitchId);
   const now = Date.now();
 
@@ -371,8 +495,6 @@ export async function getUserCosmetics(twitchId: string): Promise<UserCosmeticsR
     return cached.data;
   }
 
-  // Start cache initialization in the background (non-blocking)
-  // This populates cachedCosmeticFiles for future lookups
   if (cachedCosmeticFiles === null && !filesInitializationPromise) {
     filesInitializationPromise = (async () => {
       try {
@@ -384,93 +506,19 @@ export async function getUserCosmetics(twitchId: string): Promise<UserCosmeticsR
         filesInitializationPromise = null;
       }
     })();
-    // DON'T await - let it run in background
   }
 
-  // Use whatever cached files are already available (may be empty object initially)
-  const cachedFiles = cachedCosmeticFiles || {};
-
-  // Check if there's already a pending request for this user
   const pending = pendingRequests.get(twitchId);
   if (pending) {
     return pending;
   }
 
-  // Create new request
   const request = (async () => {
     try {
-      const userData = await requestGql({ query: fullUserQuery(twitchId) });
-
-      if (!userData?.data?.users?.userByConnection) {
-        userCache.set(twitchId, {
-          data: { paints: [], badges: [], seventvUserId: undefined },
-          timestamp: now
-        });
-        return { paints: [], badges: [], seventvUserId: undefined };
-      }
-
-      const data = userData.data.users.userByConnection;
-      const seventvUserId = data.id; // The user's 7TV profile ID
-      const activePaintId = data.style?.activePaint?.id;
-      const activeBadgeId = data.style?.activeBadge?.id;
-
-      // Process paints
-      const paints: PaintV4[] = [];
-      for (const paint of data.inventory?.paints ?? []) {
-        if (paint.to?.paint) {
-          const paintData = paint.to.paint;
-          if (paintData.id === activePaintId) {
-            paintData.selected = true;
-          }
-
-          // Attach local URLs to image layers ONLY if already cached (non-blocking)
-          if (paintData.data?.layers) {
-            for (const layer of paintData.data.layers) {
-              if (layer.ty.__typename === 'PaintLayerTypeImage' && layer.ty.images) {
-                const localPath = cachedFiles[layer.id];
-                if (localPath) {
-                  const localUrl = convertFileSrc(localPath);
-                  layer.ty.images.forEach((img: any) => {
-                    img.localUrl = localUrl;
-                  });
-                }
-              }
-            }
-          }
-
-          paints.push(paintData);
-        }
-      }
-
-      // Process badges
-      const badges: BadgeV4[] = [];
-      for (const badge of data.inventory?.badges ?? []) {
-        const badgeData = badge.to?.badge;
-        if (!badgeData) continue;
-
-        if (badgeData.id === activeBadgeId) {
-          badgeData.selected = true;
-        }
-
-        // Attach local URL ONLY if already cached (non-blocking lookup)
-        const localPath = cachedFiles[badgeData.id];
-        if (localPath) {
-          badgeData.localUrl = convertFileSrc(localPath);
-        }
-
-        badges.push(badgeData);
-      }
-
-      const result = {
-        paints: paints.filter((p) => p !== null),
-        badges: badges.filter((b) => b !== null),
-        seventvUserId
-      };
-
-      // NO aggressive caching here - cosmetics will be cached lazily when displayed
-
-      userCache.set(twitchId, { data: result, timestamp: now });
-      return result;
+      const result = await requestUserCosmeticsBatched(twitchId);
+      const settled = result ?? { paints: [], badges: [], seventvUserId: undefined };
+      userCache.set(twitchId, { data: settled, timestamp: now });
+      return settled;
     } catch (error) {
       Logger.error('[7TV] Failed to fetch user cosmetics:', error);
       const emptyResult = { paints: [], badges: [], seventvUserId: undefined };
@@ -570,8 +618,15 @@ const computeDropShadows = (shadows: PaintShadow[], mode: PaintShadowMode = 'all
     .join(' ');
 };
 
-// Compute the full CSS style for a paint
-export const computePaintStyle = (
+// Bounded LRU memo for computePaintStyle. A chat with 100 visible messages from
+// 30 distinct chatters used to compute 100 paint styles per render pass; with
+// this cache it's at most one compute per unique (paint, color, shadowMode)
+// combo. Returning the same object reference across calls also lets React's
+// shallow prop comparison short-circuit downstream renders.
+const PAINT_STYLE_CACHE_MAX = 256;
+const paintStyleCache = new Map<string, React.CSSProperties>();
+
+const computePaintStyleUncached = (
   paint: PaintV4,
   userColor?: string,
   shadowMode: PaintShadowMode = 'all',
@@ -631,13 +686,45 @@ export const computePaintStyle = (
   return style;
 };
 
-// Get badge image URL (7TV v4 badges need to be fetched from CDN)
+// Compute the full CSS style for a paint.
+// Memoized: same (paintId, userColor, shadowMode) returns the same object ref.
+export const computePaintStyle = (
+  paint: PaintV4,
+  userColor?: string,
+  shadowMode: PaintShadowMode = 'all',
+): React.CSSProperties => {
+  // Defensive: anonymous/test paints without an id fall through uncached.
+  if (!paint?.id) {
+    return computePaintStyleUncached(paint, userColor, shadowMode);
+  }
+  const key = `${paint.id}|${userColor ?? ''}|${shadowMode}`;
+  const cached = paintStyleCache.get(key);
+  if (cached) {
+    // Touch-on-hit: re-insert to move to most-recent in Map iteration order.
+    paintStyleCache.delete(key);
+    paintStyleCache.set(key, cached);
+    return cached;
+  }
+  const style = computePaintStyleUncached(paint, userColor, shadowMode);
+  paintStyleCache.set(key, style);
+  if (paintStyleCache.size > PAINT_STYLE_CACHE_MAX) {
+    // Evict oldest (first key per insertion order).
+    const oldest = paintStyleCache.keys().next().value;
+    if (oldest !== undefined) paintStyleCache.delete(oldest);
+  }
+  return style;
+};
+
+// Get badge image URL (7TV v4 badges need to be fetched from CDN).
+// The .webp suffix is REQUIRED — 7TV's CDN serves animated badges as
+// animated WebP at that path. Without the extension the CDN returns a
+// default/static representation, breaking animation on badges like the
+// year-streak crowns. See https://cdn.7tv.app/badge/<id>/<res>.webp
 export const getBadgeImageUrl = (badge: BadgeV4): string => {
   if (badge.localUrl) {
     return badge.localUrl;
   }
-  // For v4 API, badges are served from the CDN - use highest quality (4x)
-  return `https://cdn.7tv.app/badge/${badge.id}/4x`;
+  return `https://cdn.7tv.app/badge/${badge.id}/4x.webp`;
 };
 
 // Get all resolution URLs for a 7TV badge (for srcSet)
@@ -648,10 +735,10 @@ export const getBadgeImageUrls = (badge: BadgeV4): { url1x: string; url2x: strin
   }
   const baseUrl = `https://cdn.7tv.app/badge/${badge.id}`;
   return {
-    url1x: `${baseUrl}/1x`,
-    url2x: `${baseUrl}/2x`,
-    url3x: `${baseUrl}/3x`,
-    url4x: `${baseUrl}/4x`,
+    url1x: `${baseUrl}/1x.webp`,
+    url2x: `${baseUrl}/2x.webp`,
+    url3x: `${baseUrl}/3x.webp`,
+    url4x: `${baseUrl}/4x.webp`,
   };
 };
 
@@ -660,10 +747,10 @@ export const getBadgeImageUrls = (badge: BadgeV4): { url1x: string; url2x: strin
 export const getBadgeFallbackUrls = (badgeId: string): string[] => {
   const baseUrl = `https://cdn.7tv.app/badge/${badgeId}`;
   return [
-    `${baseUrl}/4x`,
-    `${baseUrl}/3x`,
-    `${baseUrl}/2x`,
-    `${baseUrl}/1x`,
+    `${baseUrl}/4x.webp`,
+    `${baseUrl}/3x.webp`,
+    `${baseUrl}/2x.webp`,
+    `${baseUrl}/1x.webp`,
   ];
 };
 
@@ -671,7 +758,7 @@ export const getBadgeFallbackUrls = (badgeId: string): string[] => {
 export const getBadgeImageUrlForProvider = (badge: any, provider: '7tv' | 'ffz'): string => {
   if (provider === '7tv') {
     if (badge.localUrl) return badge.localUrl;
-    return `https://cdn.7tv.app/badge/${badge.id}/3x`;
+    return `https://cdn.7tv.app/badge/${badge.id}/3x.webp`;
   } else if (provider === 'ffz') {
     return badge.urls?.['4'] || badge.urls?.['2'] || badge.urls?.['1'] || badge.image;
   }

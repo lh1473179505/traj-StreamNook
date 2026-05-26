@@ -501,11 +501,12 @@ impl IrcService {
                     is_first_message: chat_msg.metadata.is_first_message,
                 };
 
-                // Store message in user history LRU cache for profile cards
+                // Store a compact summary (id/content/timestamp/color) in the user
+                // history LRU for profile cards. Avoids cloning the full ChatMessage.
                 if !chat_msg.user_id.is_empty() {
                     let history_service = UserMessageHistoryService::global();
                     history_service
-                        .add_message(&chat_msg.user_id, chat_msg.clone())
+                        .add_message(&chat_msg.user_id, &chat_msg)
                         .await;
                 }
 
@@ -793,7 +794,7 @@ impl IrcService {
         // Check if this broadcaster is in a shared chat session
         match TwitchService::get_token().await {
             Ok(token) => {
-                let client = reqwest::Client::new();
+                let client = crate::services::http::client().clone();
                 let url = format!(
                     "https://api.twitch.tv/helix/shared_chat/session?broadcaster_id={}",
                     room_id

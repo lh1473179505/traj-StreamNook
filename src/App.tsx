@@ -516,7 +516,7 @@ function App() {
         addToast('Reserved stream went offline - token returned to rotation', 'info');
       });
 
-      // Listen for streamnook:// deep links (e.g. from Magne's "Watch Stream" button)
+      // Listen for streamnook:// deep links (e.g. browser-triggered "Watch Stream" buttons)
       try {
         const { onOpenUrl } = await import('@tauri-apps/plugin-deep-link');
         const unlistenDeepLink = await onOpenUrl((urls: string[]) => {
@@ -578,41 +578,21 @@ function App() {
     }
   }, [settings.theme, settings.custom_themes]);
 
-  // Check if we need to show the first-time setup wizard
+  // Check if we need to show the first-time setup wizard.
+  // Settings default streamlink_path to the bundled location, so verifying streamlink
+  // doesn't tell us anything useful about whether the user has gone through the auth /
+  // drops / whispers steps. Drive purely off setup_complete: if it's false, show the
+  // wizard. Step 1 inside the wizard handles the components check itself and
+  // auto-advances when bundled streamlink is detected.
   useEffect(() => {
-    const checkForFirstTimeSetup = async () => {
-      // Skip if settings haven't loaded yet
-      if (settings.streamlink_path === undefined) return;
-
-      // Skip if setup is already complete
-      if (settings.setup_complete) {
-        Logger.debug('[App] Setup already complete, skipping wizard');
-        return;
-      }
-
-      try {
-        // Check if streamlink is installed at the configured path
-        const isInstalled = await invoke('verify_streamlink_installation', {
-          path: settings.streamlink_path
-        }) as boolean;
-
-        if (!isInstalled) {
-          Logger.debug('[App] Streamlink not found at', settings.streamlink_path, '- showing setup wizard');
-          setShowSetupWizard(true);
-        } else {
-          // Streamlink is installed, mark setup as complete for existing users
-          Logger.debug('[App] Streamlink found, marking setup as complete for existing user');
-          await updateSettings({ ...settings, setup_complete: true });
-        }
-      } catch (error) {
-        Logger.error('[App] Failed to check streamlink installation:', error);
-        // On error, still show setup wizard to be safe
-        setShowSetupWizard(true);
-      }
-    };
-
-    checkForFirstTimeSetup();
-  }, [settings.streamlink_path, settings.setup_complete, updateSettings]);
+    if (settings.streamlink_path === undefined) return;
+    if (settings.setup_complete) {
+      Logger.debug('[App] Setup already complete, skipping wizard');
+      return;
+    }
+    Logger.debug('[App] Setup not complete - showing wizard');
+    setShowSetupWizard(true);
+  }, [settings.streamlink_path, settings.setup_complete]);
 
   // Ctrl+Shift+C → force-open the changelog overlay against the current
   // app version (fetches real release notes from GitHub). Useful for

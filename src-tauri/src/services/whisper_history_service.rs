@@ -174,7 +174,7 @@ impl WhisperHistoryService {
         access_token: &str,
         my_user_id: &str,
     ) -> Result<Vec<WhisperThread>, String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Use the WhispersPage_Whispers query to get all threads
         let body = json!([{
@@ -322,7 +322,7 @@ impl WhisperHistoryService {
         access_token: &str,
         cursor: Option<&str>,
     ) -> Result<(Vec<WhisperThread>, Option<String>), String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Use the undocumented GraphQL query for whisper threads
         let mut variables = json!({
@@ -427,7 +427,7 @@ impl WhisperHistoryService {
         other_user_id: &str,
         cursor: Option<&str>,
     ) -> Result<(Vec<WhisperMessage>, Option<String>), String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         // Thread ID is formatted as "{smaller_id}_{larger_id}"
         let thread_id = if my_user_id < other_user_id {
@@ -515,7 +515,7 @@ impl WhisperHistoryService {
         access_token: &str,
         username: &str,
     ) -> Result<Option<(String, String, String, Option<String>)>, String> {
-        let client = Client::new();
+        let client = crate::services::http::client().clone();
 
         let body = json!([{
             "operationName": "WhispersSearchUsersQuery",

@@ -14,6 +14,7 @@ import { Tooltip } from './ui/Tooltip';
 import { GlassSelect } from './ui/GlassSelect';
 
 import { Logger } from '../utils/logger';
+import { useVisibleInterval } from '../utils/useVisibleInterval';
 // Types for drops data
 interface DropCampaign {
     id: string;
@@ -630,56 +631,53 @@ const Home = () => {
         };
     }, [followedStreams, recommendedStreams, categoryStreams, searchResults, refreshHypeTrainStatuses]);
 
-    // Effect to poll mining status and keep UI in sync with backend
-    useEffect(() => {
-        const syncMiningStatus = async () => {
-            try {
-                const miningStatus = await invoke<MiningStatus>('get_mining_status');
+    // Sync mining status with backend. Real-time updates arrive via the
+    // 'mining-status-changed' event listener below; the periodic call is a
+    // stale-protection net that runs at 60-min cadence (aligned with the
+    // TitleBar + ChatWidget backup polls) and only fires when the window is
+    // visible.
+    const syncMiningStatus = useCallback(async () => {
+        try {
+            const miningStatus = await invoke<MiningStatus>('get_mining_status');
 
-                if (miningStatus.is_mining) {
-                    // Find campaign ID by matching game_name from current_drop or current_channel
-                    const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-                        miningStatus.current_channel?.game_name?.toLowerCase();
+            if (miningStatus.is_mining) {
+                // Find campaign ID by matching game_name from current_drop or current_channel
+                const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
+                    miningStatus.current_channel?.game_name?.toLowerCase();
 
-                    if (miningGameName) {
-                        // Find the campaign for this game
-                        let foundCampaignId: string | null = null;
-                        dropsGameNames.forEach((campaign, gameName) => {
-                            if (gameName === miningGameName) {
-                                foundCampaignId = campaign.id;
-                            }
-                        });
-
-                        if (foundCampaignId) {
-                            setActiveMiningIds(prev => {
-                                if (prev.size === 1 && prev.has(foundCampaignId!)) {
-                                    return prev; // No change needed
-                                }
-                                return new Set([foundCampaignId!]);
-                            });
+                if (miningGameName) {
+                    let foundCampaignId: string | null = null;
+                    dropsGameNames.forEach((campaign, gameName) => {
+                        if (gameName === miningGameName) {
+                            foundCampaignId = campaign.id;
                         }
-                    }
-                } else {
-                    // Not mining - clear the active mining IDs
-                    setActiveMiningIds(prev => {
-                        if (prev.size > 0) {
-                            return new Set<string>();
-                        }
-                        return prev;
                     });
-                }
-            } catch {
-                // Silently fail - might not be authenticated or backend not ready
-            }
-        };
 
-        // Initial sync
+                    if (foundCampaignId) {
+                        setActiveMiningIds(prev => {
+                            if (prev.size === 1 && prev.has(foundCampaignId!)) {
+                                return prev;
+                            }
+                            return new Set([foundCampaignId!]);
+                        });
+                    }
+                }
+            } else {
+                setActiveMiningIds(prev => {
+                    if (prev.size > 0) {
+                        return new Set<string>();
+                    }
+                    return prev;
+                });
+            }
+        } catch {
+            // Silently fail - might not be authenticated or backend not ready
+        }
+    }, [dropsGameNames]);
+
+    useEffect(() => {
         syncMiningStatus();
 
-        // Poll every 5 seconds
-        const interval = setInterval(syncMiningStatus, 5000);
-
-        // Also listen for mining status change events
         let unlisten: (() => void) | null = null;
         let isMounted = true;
         const setupListener = async () => {
@@ -699,10 +697,11 @@ const Home = () => {
 
         return () => {
             isMounted = false;
-            clearInterval(interval);
             if (unlisten) unlisten();
         };
-    }, [dropsGameNames]);
+    }, [syncMiningStatus]);
+
+    useVisibleInterval(syncMiningStatus, 60 * 60 * 1000);
 
     // Update campaign name-to-ID map when drops data loads
     useEffect(() => {
@@ -1252,6 +1251,26 @@ const Home = () => {
         container.addEventListener('scroll', handleScroll);
         return () => container.removeEventListener('scroll', handleScroll);
     }, [handleScroll]);
+
+    // Top-off: if the grid hasn't filled the viewport yet, keep fetching pages
+    // until it does. Without this, an initial fetch that's filtered down (e.g.
+    // followed channels removed) can leave a partial bottom row with no scroll
+    // event to trigger handleScroll.
+    useEffect(() => {
+        if (activeTab !== 'recommended') return;
+        if (!hasMoreRecommended || isLoadingMore || loadingRef.current) return;
+
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        const fillThreshold = 64; // px slack so we don't loop on near-fills
+        if (container.scrollHeight <= container.clientHeight + fillThreshold) {
+            loadingRef.current = true;
+            loadMoreRecommendedStreams().finally(() => {
+                loadingRef.current = false;
+            });
+        }
+    }, [activeTab, recommendedStreams.length, hasMoreRecommended, isLoadingMore, loadMoreRecommendedStreams]);
 
     const displayStreams = activeTab === 'following'
         ? sortStreamsByFavorites(followedStreams)

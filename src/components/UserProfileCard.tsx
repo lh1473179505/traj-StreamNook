@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } from 'react';
-import { MessageCircle, UserPlus, UserMinus, Loader2, ChevronDown, ChevronUp, Pencil, X } from 'lucide-react';
+import { MessageCircle, UserPlus, UserMinus, Loader2, ChevronDown, ChevronUp, Pencil, X, Gift } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { setUserNickname, setUserColor } from '../utils/userChatOverrides';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/AppStore';
-import { openBadgesWithPaintInMain } from '../utils/openBadgesInMain';
+import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain } from '../utils/openBadgesInMain';
 import { computePaintStyle, getBadgeImageUrls, getBadgeFallbackUrls, queueCosmeticForCaching } from '../services/seventvService';
 import { FallbackImage } from './FallbackImage';
 import { formatIVRDate, formatSubTenure } from '../services/ivrService';
@@ -15,17 +16,29 @@ import {
   CachedProfile
 } from '../services/cosmeticsCache';
 import { Tooltip } from './ui/Tooltip';
-import { getStreamNookUserNumber, subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion } from '../services/supabaseService';
+import { getStreamNookUserNumber, subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion, getOwnedCosmeticSlugs, getActiveCosmeticSlug, getCosmeticBySlug, getCosmeticsVersion, subscribeCosmeticsVersion } from '../services/supabaseService';
+import { COSMETIC_ASSET_BY_SLUG } from './cosmeticAssets';
 import { StreamNookBadge } from './StreamNookBadge';
 import streamNookLogo from '../assets/streamnook-logo.png';
 
+// messageHistory arrives from two sources:
+//   1. The frontend's in-session userMessageHistory Map (full ParsedMessage shape
+//      with username/color/badges/tags). Used by the inline-popup fallback path.
+//   2. The Rust user_message_history_service via get_user_message_history,
+//      which returns a compact UserMessageSummary { id, content, timestamp, color }.
+//      Used by the popout window path (the default).
+// The reader below prefers top-level `id`/`timestamp` when present and falls back
+// to the IRC tags map for the frontend-cache shape.
 interface ParsedMessage {
-  username: string;
+  username?: string;
   content: string;
-  color: string;
-  badges: Array<{ key: string; info: any }>;
-  tags: Map<string, string>;
-  emotes: string;
+  color?: string;
+  badges?: Array<{ key: string; info: any }>;
+  tags?: Map<string, string> | Record<string, string>;
+  emotes?: string;
+  // Rust UserMessageSummary fields
+  id?: string;
+  timestamp?: string;
 }
 
 interface UserProfileCardProps {
@@ -169,6 +182,13 @@ interface IVRData {
   mod_since: string | null;
   is_vip: boolean;
   vip_since: string | null;
+  last_broadcast_at: string | null;
+  last_broadcast_title: string | null;
+  follows_count: number | null;
+  sub_tier: string | null;
+  sub_type: string | null;
+  sub_gifter_login: string | null;
+  sub_gifter_display_name: string | null;
   error: string | null;
 }
 
@@ -374,10 +394,45 @@ const UserProfileCard = ({
   const [cachedProfile, setCachedProfile] = useState<CachedProfile | null>(null);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   const [showMessages, setShowMessages] = useState(false);
+  // Historical chat logs pulled from the merged Twitch GQL + Justlog + Robotty
+  // pipeline in Rust. Each entry carries the Twitch IRC message UUID in `id`
+  // (when available) which the frontend uses to dedupe against in-session
+  // messages — without that cross-source dedupe, the same message can appear
+  // both as in-session (we saw it land in chat) and as historical (Robotty or
+  // Twitch's MessageBufferChatHistory included it), showing as a duplicate.
+  const [historicalMessages, setHistoricalMessages] = useState<{ timestamp: string; content: string; id?: string }[]>([]);
+  const [historicalLoading, setHistoricalLoading] = useState(false);
+  const [historicalAttempted, setHistoricalAttempted] = useState(false);
+  const [historicalChannelLogged, setHistoricalChannelLogged] = useState(true);
 
   // Re-render when the StreamNook registry updates so the #N chip appears as soon as it loads
   useSyncExternalStore(subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion, getStreamNookRegistryVersion);
+  // Re-render when the cosmetics registry updates so this user's owned-but-not-active
+  // StreamNook badges appear / refresh as ownership changes (e.g. grant from a Ko-fi
+  // donation lands while the popup is open).
+  useSyncExternalStore(subscribeCosmeticsVersion, getCosmeticsVersion, getCosmeticsVersion);
   const streamNookUserNumber = getStreamNookUserNumber(userId);
+  // Only enumerate owned StreamNook cosmetics for users who are actually in the
+  // registry. `getOwnedCosmeticSlugs` includes every `is_default` cosmetic for
+  // ANY userId by design (so the picker can preview defaults), which means
+  // calling it for a non-StreamNook user returns the defaults set — and any
+  // surface that renders those would falsely show the default badge to people
+  // who aren't members. Gate at the source: empty list when not registered.
+  const isStreamNookMember = streamNookUserNumber !== null;
+  const ownedStreamNookSlugs = useMemo(
+    () => (isStreamNookMember ? Array.from(getOwnedCosmeticSlugs(userId)) : []),
+    [userId, isStreamNookMember, getCosmeticsVersion()],
+  );
+  const activeStreamNookSlug = isStreamNookMember && userId ? getActiveCosmeticSlug(userId) : null;
+  // Non-active owned badges, sorted by catalog sort_order so the UI order stays stable.
+  const inactiveOwnedSlugs = useMemo(() => {
+    return ownedStreamNookSlugs
+      .filter((s) => s !== activeStreamNookSlug && COSMETIC_ASSET_BY_SLUG[s])
+      .map((s) => ({ slug: s, cosmetic: getCosmeticBySlug(s) }))
+      .filter((entry): entry is { slug: string; cosmetic: NonNullable<ReturnType<typeof getCosmeticBySlug>> } => entry.cosmetic !== null)
+      .sort((a, b) => a.cosmetic.sort_order - b.cosmetic.sort_order);
+  }, [ownedStreamNookSlugs, activeStreamNookSlug]);
+  const streamNookBadgeCount = isStreamNookMember ? 1 + inactiveOwnedSlugs.length : 0;
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     (window as any).__snProfileDebug = { userId, username, displayName, streamNookUserNumber };
   }
@@ -447,6 +502,43 @@ const UserProfileCard = ({
     fetchFullProfile();
   }, [userId, username, getChannelContext]);
 
+  // Lazily fetch the user's historical chat logs from Justlog the first time
+  // the messages view is opened. We don't pre-fetch because most popup opens
+  // never expand messages — paying the request cost upfront would be wasteful.
+  useEffect(() => {
+    if (!showMessages || historicalAttempted) return;
+    const { channelName, channelId } = getChannelContext();
+    if (!channelName || !username) return;
+
+    let cancelled = false;
+    setHistoricalAttempted(true);
+    setHistoricalLoading(true);
+    (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        // channelId + userId enable the Twitch GQL source (mod-gated, deep
+        // history). When either is missing the Rust side silently skips
+        // Twitch GQL and falls back to Justlog + Robotty.
+        const messages = await invoke<{ timestamp: string; content: string; id?: string }[]>(
+          'fetch_user_chat_logs',
+          { channel: channelName, username, channelId, userId },
+        );
+        if (!cancelled) {
+          setHistoricalMessages(messages);
+          setHistoricalChannelLogged(messages.length > 0);
+        }
+      } catch (e) {
+        Logger.warn('[UserProfileCard] Historical chat fetch failed:', e);
+        if (!cancelled) setHistoricalChannelLogged(false);
+      } finally {
+        if (!cancelled) setHistoricalLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showMessages, historicalAttempted, getChannelContext, username, userId]);
+
   // Compute selected paint from cached cosmetics (for instant display)
   const selectedPaint = useMemo(() => {
     // Prefer cached cosmetics for instant paint display
@@ -465,7 +557,7 @@ const UserProfileCard = ({
     const badges = cachedProfile?.seventvCosmetics?.badges || profileData?.seventv_cosmetics?.badges || [];
     badges.forEach((badge: any) => {
       if (badge?.id && !badge.localUrl) {
-        const badgeUrl = `https://cdn.7tv.app/badge/${badge.id}/4x`;
+        const badgeUrl = `https://cdn.7tv.app/badge/${badge.id}/4x.webp`;
         queueCosmeticForCaching(badge.id, badgeUrl);
       }
     });
@@ -484,9 +576,35 @@ const UserProfileCard = ({
   }, [cachedProfile?.seventvCosmetics?.badges, profileData?.seventv_cosmetics?.badges, selectedPaint]);
 
   const formatDate = (ds: string) => new Date(ds).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  // Compact relative-time helper for the "Last live" row. Returns short forms
+  // like "3d ago" / "5w ago" / "2mo ago" / "1y ago" that fit cleanly in the
+  // tight stats panel. Falls back to the absolute date if anything fails.
+  const formatRelative = (ds: string) => {
+    try {
+      const date = new Date(ds);
+      const diffMs = Date.now() - date.getTime();
+      const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      if (days < 1) return 'today';
+      if (days < 7) return `${days}d ago`;
+      if (days < 30) return `${Math.floor(days / 7)}w ago`;
+      if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+      const years = Math.floor(days / 365);
+      return years === 1 ? '1y ago' : `${years}y ago`;
+    } catch {
+      return formatDate(ds);
+    }
+  };
 
   useEffect(() => {
-    const cardWidth = 500, padding = 10, gap = 10;
+    // cardWidth MUST match the `w-[402px]` className on the card root below
+    // (matches DEFAULT_CHAT_WIDTH from App.tsx, same as the popout window).
+    // When this literal drifts out of sync with the className the math places
+    // the left edge based on the wrong width — too-large value pushes the
+    // modal far to the left of the cursor (looks like "opens super far away"),
+    // too-small overhangs the cursor on the right. Tailwind JIT requires the
+    // literal in the class string so we can't extract a shared constant — keep
+    // both in lockstep manually.
+    const cardWidth = 402, padding = 10, gap = 10;
     const estimatedHeight = showMessages ? 700 : 400;
     let x = position.x - cardWidth - gap, y = position.y;
     if (x < padding) x = position.x + gap;
@@ -504,7 +622,7 @@ const UserProfileCard = ({
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
-      const cardWidth = cardRef.current?.offsetWidth || 500;
+      const cardWidth = cardRef.current?.offsetWidth || 402;
       const cardHeight = cardRef.current?.offsetHeight || 400;
       const padding = 10;
       setCardPosition({
@@ -590,7 +708,7 @@ const UserProfileCard = ({
       const urls = getBadgeImageUrls(b);
       return {
         id: b.id,
-        src: urls.url4x || `https://cdn.7tv.app/badge/${b.id}/4x`,
+        src: urls.url4x || `https://cdn.7tv.app/badge/${b.id}/4x.webp`,
         fallbackUrls: getBadgeFallbackUrls(b.id).slice(1),
         srcSet: urls.url1x ? `${urls.url1x} 1x, ${urls.url2x} 2x, ${urls.url4x} 4x` : undefined,
         title: b.tooltip || b.description || b.name,
@@ -694,7 +812,7 @@ const UserProfileCard = ({
       )}
       <div
         ref={cardRef}
-        className={`${isStandaloneWindow ? 'w-full h-full' : 'fixed z-50 w-[500px] max-h-[85vh]'} user-profile-card backdrop-blur-xl shadow-2xl border border-borderSubtle rounded-lg overflow-hidden flex flex-col`}
+        className={`${isStandaloneWindow ? 'w-full h-full' : 'fixed z-50 w-[402px] max-h-[88vh]'} user-profile-card backdrop-blur-xl shadow-2xl border border-borderSubtle rounded-lg overflow-hidden flex flex-col`}
         style={isStandaloneWindow ? { backgroundColor: 'rgba(0, 0, 0, 0.75)' } : cardStyle}
         onMouseDown={isStandaloneWindow ? undefined : handleMouseDown}
       >
@@ -773,95 +891,389 @@ const UserProfileCard = ({
                 )}
               </div>
               <p className="text-sm text-textSecondary mt-0.5">@{username}</p>
-              {twitchProfile?.description && (
+              {!showMessages && twitchProfile?.description && (
                 <p className="text-sm text-textPrimary/85 mt-2.5 leading-relaxed">{twitchProfile.description}</p>
               )}
             </div>
 
-            {/* Relationship: joined / following stats + sub/mod/vip pills (one block, no inner divider) */}
-            <div className="space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                {twitchProfile && (
-                  <div className="glass-panel rounded-md px-3 py-2">
-                    <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium">Joined Twitch</p>
-                    <p className="text-sm font-semibold text-textPrimary mt-0.5">{formatDate(twitchProfile.created_at)}</p>
-                  </div>
-                )}
-                {ivrData && (ivrData.following_since || ivrData.status_hidden) ? (
-                  <div className="glass-panel rounded-md px-3 py-2">
-                    <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium">Following since</p>
-                    {ivrData.status_hidden ? (
-                      <p className="text-sm font-semibold text-textSecondary italic mt-0.5">Hidden</p>
-                    ) : (
-                      <p className="text-sm font-semibold text-textPrimary mt-0.5">{formatIVRDate(ivrData.following_since!)}</p>
-                    )}
-                  </div>
-                ) : ivrData && !isLoadingProfile && (
-                  <div className="glass-panel rounded-md px-3 py-2">
-                    <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium">Following</p>
-                    <p className="text-sm font-semibold text-textSecondary mt-0.5">Not following</p>
-                  </div>
-                )}
-              </div>
+            {/* Takeover animation. When showMessages flips true, the messages
+                view slides DOWN from the top while the regular profile body
+                slides UP off the top — a "curtain reveal" feel. AnimatePresence
+                with `mode="wait"` ensures the exit animation completes before
+                the enter animation starts. The wrapper has `overflow-hidden`
+                so the slide-out doesn't leak above the identity section. */}
+            <div className="relative overflow-hidden">
+              <AnimatePresence mode="wait" initial={false}>
+                {showMessages ? (
+                  <motion.div
+                    key="messages-view"
+                    initial={{ y: -16, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: -16, opacity: 0 }}
+                    transition={{ type: 'tween', duration: 0.22, ease: 'easeOut' }}
+                    className="-mx-2"
+                  >
+                    <div className="flex items-center justify-between px-2 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowMessages(false)}
+                        className="inline-flex items-center gap-1 text-[11px] text-textSecondary hover:text-textPrimary transition-colors"
+                      >
+                        <ChevronDown size={14} />
+                        Back to profile
+                      </button>
+                      <span className="text-[10px] text-textSecondary uppercase tracking-wider font-semibold">
+                        Chat history{historicalLoading ? ' · loading…' : ''}
+                      </span>
+                    </div>
+                    {(() => {
+                      // Unified message timeline. Historical (Twitch GQL +
+                      // Justlog + Robotty, merged in Rust) AND in-session
+                      // sources normalize to { ts, content, id }, dedupe by
+                      // Twitch IRC message UUID across BOTH layers, then
+                      // sort + group by day. Same timeline shape 7TV's
+                      // extension uses.
+                      const readTag = (msg: any, key: string): string | undefined => {
+                        const tags = msg?.tags;
+                        if (!tags) return undefined;
+                        if (tags instanceof Map) return tags.get(key);
+                        if (typeof tags === 'object') return tags[key];
+                        return undefined;
+                      };
+                      const sessionTimestamp = (msg: any): number | null => {
+                        // Rust UserMessageSummary path: top-level unix-ms string.
+                        if (typeof msg?.timestamp === 'string') {
+                          const n = parseInt(msg.timestamp, 10);
+                          if (Number.isFinite(n)) return n;
+                        }
+                        // Frontend ParsedMessage path: from IRC tags.
+                        const raw = readTag(msg, 'tmi-sent-ts');
+                        const n = raw ? parseInt(raw, 10) : NaN;
+                        return Number.isFinite(n) ? n : null;
+                      };
+                      const historicalTs = (iso: string): number | null => {
+                        const n = Date.parse(iso);
+                        return Number.isFinite(n) ? n : null;
+                      };
 
-              {ivrData && (ivrData.is_subscribed || ivrData.is_mod || ivrData.is_vip) && (
-                <div className="flex flex-wrap gap-1.5">
-                  {ivrData.is_subscribed && (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-purple-500/10 border border-purple-500/20 text-[11px] text-purple-300">
-                      <span className="font-semibold">Subscriber</span>
-                      <span className="text-purple-300/70">{formatSubTenure(ivrData.sub_streak, ivrData.sub_cumulative)}</span>
-                      {ivrData.is_founder && <span className="px-1 py-px rounded bg-purple-500/20 text-[9px] font-bold tracking-wider">FOUNDER</span>}
-                    </span>
-                  )}
-                  {ivrData.is_mod && (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-green-500/10 border border-green-500/20 text-[11px] text-green-300">
-                      <span className="font-semibold">Moderator</span>
-                      {ivrData.mod_since && <span className="text-green-300/70">since {formatIVRDate(ivrData.mod_since)}</span>}
-                    </span>
-                  )}
-                  {ivrData.is_vip && (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-pink-500/10 border border-pink-500/20 text-[11px] text-pink-300">
-                      <span className="font-semibold">VIP</span>
-                      {ivrData.vip_since && <span className="text-pink-300/70">since {formatIVRDate(ivrData.vip_since)}</span>}
-                    </span>
-                  )}
-                </div>
-              )}
+                      type TimelineEntry = { ts: number; content: string; id?: string };
+                      const rawEntries: TimelineEntry[] = [];
+                      for (const m of historicalMessages) {
+                        const ts = historicalTs(m.timestamp);
+                        if (ts !== null) rawEntries.push({ ts, content: m.content, id: m.id });
+                      }
+                      for (const m of messageHistory) {
+                        const ts = sessionTimestamp(m) ?? Date.now();
+                        // IRC `id` tag is the Twitch message UUID. Prefer the
+                        // top-level field (UserMessageSummary path) and fall
+                        // back to the tags map (ParsedMessage path). Same id
+                        // each historical source carries, so it's the right
+                        // cross-layer dedupe key.
+                        const id = (m as any).id ?? readTag(m, 'id');
+                        rawEntries.push({ ts, content: m.content, id });
+                      }
+
+                      // Dedupe by id when present; fall back to
+                      // (content, ts within 2s) for the rare case a source
+                      // didn't carry an id. The in-session buffer for a busy
+                      // chatter can easily overlap with Robotty's last-100
+                      // or MessageBufferChatHistory's ~30; without this pass
+                      // the same message appears twice in the popup.
+                      const seenIds = new Set<string>();
+                      const entries: TimelineEntry[] = [];
+                      for (const e of rawEntries) {
+                        if (e.id) {
+                          if (seenIds.has(e.id)) continue;
+                          seenIds.add(e.id);
+                        } else {
+                          const dup = entries.find(
+                            (x) => x.content === e.content && Math.abs(x.ts - e.ts) <= 2000,
+                          );
+                          if (dup) continue;
+                        }
+                        entries.push(e);
+                      }
+                      entries.sort((a, b) => a.ts - b.ts);
+
+                      if (entries.length === 0 && !historicalLoading) {
+                        return (
+                          <div className="px-2">
+                            <div className="flex flex-col items-center justify-center py-12 text-center">
+                              <MessageCircle size={32} className="text-textSecondary/30 mb-2" />
+                              <p className="text-sm text-textSecondary">No messages found</p>
+                              <p className="text-xs text-textSecondary/60 mt-1">
+                                {historicalChannelLogged
+                                  ? 'New messages from this user will appear here.'
+                                  : 'No historical messages available for this channel.'}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      // Group entries by calendar day for the timeline separators.
+                      const dayKey = (ts: number) => {
+                        const d = new Date(ts);
+                        return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+                      };
+                      const groups: { key: string; label: string; entries: TimelineEntry[] }[] = [];
+                      const todayKey = dayKey(Date.now());
+                      const yesterdayKey = dayKey(Date.now() - 86_400_000);
+                      const dayLabel = (ts: number, key: string): string => {
+                        if (key === todayKey) return 'Today';
+                        if (key === yesterdayKey) return 'Yesterday';
+                        return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                      };
+                      let currentKey = '';
+                      for (const e of entries) {
+                        const k = dayKey(e.ts);
+                        if (k !== currentKey) {
+                          groups.push({ key: k, label: dayLabel(e.ts, k), entries: [] });
+                          currentKey = k;
+                        }
+                        groups[groups.length - 1].entries.push(e);
+                      }
+
+                      const formatTime = (ts: number) => {
+                        const d = new Date(ts);
+                        const h = d.getHours().toString().padStart(2, '0');
+                        const m = d.getMinutes().toString().padStart(2, '0');
+                        return `${h}:${m}`;
+                      };
+
+                      return (
+                        <div className="px-2">
+                          {groups.map((g) => (
+                            <div key={g.key} className="mb-3 last:mb-0">
+                              <div className="flex items-center gap-2 my-2">
+                                <div className="flex-1 h-px bg-borderSubtle" />
+                                <span className="text-[10px] text-textSecondary/70 uppercase tracking-wider tabular-nums">
+                                  {g.label}
+                                </span>
+                                <div className="flex-1 h-px bg-borderSubtle" />
+                              </div>
+                              <div className="space-y-0.5">
+                                {g.entries.map((e, idx) => (
+                                  <div
+                                    key={`${g.key}-${idx}`}
+                                    className="flex items-baseline gap-2 py-1 px-2 rounded hover:bg-white/[0.03] transition-colors"
+                                  >
+                                    <span className="text-[10px] text-textSecondary/60 tabular-nums shrink-0 mt-px">
+                                      {formatTime(e.ts)}
+                                    </span>
+                                    <span className="text-[13px] font-semibold shrink-0" style={{ color }}>
+                                      {displayName}:
+                                    </span>
+                                    <span className="text-[13px] text-textPrimary break-words leading-snug min-w-0">
+                                      {e.content}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="profile-body"
+                    initial={{ y: -16, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: -16, opacity: 0 }}
+                    transition={{ type: 'tween', duration: 0.22, ease: 'easeOut' }}
+                    className="space-y-4"
+                  >
+                    {/* Everything below the identity section gets hidden during
+                        the messages-takeover view so the message list can fill
+                        the modal body. */}
+
+            {/* Relationship: a single compact stats panel + the sub/mod/vip pills.
+                Each row only renders if we have the data, so the panel grows
+                organically without empty cells. */}
+            <div className="space-y-2">
+              {(() => {
+                // Current-channel context for "Gift a sub" target. Hidden when we're
+                // viewing this user's own channel (you'd be gifting them a sub to
+                // themselves, which is awkward) or when there's no active stream.
+                const { channelName: viewedChannel } = (propChannelId && propChannelName)
+                  ? { channelName: propChannelName }
+                  : { channelName: useAppStore.getState().currentStream?.user_login };
+                const canGiftSub = !!viewedChannel
+                  && !!username
+                  && viewedChannel.toLowerCase() !== username.toLowerCase()
+                  && !ivrData?.is_subscribed;
+                const handleGiftSub = async () => {
+                  try {
+                    const { open } = await import('@tauri-apps/plugin-shell');
+                    // ?giftrecipient= is a best-guess query param. If Twitch ignores
+                    // it the user lands on the subs page and types the name manually,
+                    // which is still a one-click improvement over leaving the app.
+                    await open(`https://www.twitch.tv/subs/${viewedChannel}?giftrecipient=${username}`);
+                  } catch (err) {
+                    Logger.error('Failed to open gift sub URL:', err);
+                  }
+                };
+                const hasAnyStat = !!twitchProfile
+                  || !!ivrData?.following_since
+                  || !!ivrData?.status_hidden
+                  || !!ivrData?.last_broadcast_at
+                  || (ivrData?.follows_count ?? 0) > 0
+                  || (!ivrData?.is_subscribed && (ivrData?.sub_cumulative ?? 0) > 0);
+                return (
+                  <>
+                    {hasAnyStat && (
+                      <div className="glass-panel rounded-md px-3 py-2 space-y-1">
+                        {twitchProfile && (
+                          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+                            <span className="text-textSecondary">Joined Twitch</span>
+                            <span className="text-textPrimary font-medium tabular-nums">{formatDate(twitchProfile.created_at)}</span>
+                          </div>
+                        )}
+                        {ivrData && (ivrData.following_since || ivrData.status_hidden) ? (
+                          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+                            <span className="text-textSecondary">Following since</span>
+                            {ivrData.status_hidden ? (
+                              <span className="text-textSecondary italic">Hidden</span>
+                            ) : (
+                              <span className="text-textPrimary font-medium tabular-nums">{formatDate(ivrData.following_since!)}</span>
+                            )}
+                          </div>
+                        ) : ivrData && !isLoadingProfile && (
+                          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+                            <span className="text-textSecondary">Following</span>
+                            <span className="text-textSecondary italic">Not following</span>
+                          </div>
+                        )}
+                        {(ivrData?.follows_count ?? 0) > 0 && (
+                          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+                            <span className="text-textSecondary">Follows</span>
+                            <span className="text-textPrimary font-medium tabular-nums">{ivrData!.follows_count!.toLocaleString()} channels</span>
+                          </div>
+                        )}
+                        {ivrData && !ivrData.is_subscribed && (ivrData.sub_cumulative ?? 0) > 0 && (
+                          <div className="flex items-baseline justify-between gap-3 text-[11px]">
+                            <span className="text-textSecondary">Past subscriber</span>
+                            <span className="text-textPrimary font-medium tabular-nums">
+                              {ivrData.sub_cumulative === 1 ? '1mo total' : `${ivrData.sub_cumulative}mo total`}
+                            </span>
+                          </div>
+                        )}
+                        {ivrData?.last_broadcast_at && (
+                          <Tooltip content={ivrData.last_broadcast_title ?? formatDate(ivrData.last_broadcast_at)} side="top">
+                            <div className="flex items-baseline justify-between gap-3 text-[11px] cursor-default">
+                              <span className="text-textSecondary">Last live</span>
+                              <span className="text-textPrimary font-medium tabular-nums">{formatRelative(ivrData.last_broadcast_at)}</span>
+                            </div>
+                          </Tooltip>
+                        )}
+                      </div>
+                    )}
+
+                    {(ivrData?.is_subscribed || ivrData?.is_mod || ivrData?.is_vip) && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {ivrData?.is_subscribed && (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-purple-500/10 border border-purple-500/20 text-[11px] text-purple-300">
+                            <span className="font-semibold">
+                              {ivrData.sub_tier === 'Prime' ? 'Prime' : ivrData.sub_tier ? `Tier ${ivrData.sub_tier}` : ''}
+                              {ivrData.sub_tier ? ' ' : ''}Subscriber
+                            </span>
+                            <span className="text-purple-300/70">{formatSubTenure(ivrData.sub_streak, ivrData.sub_cumulative)}</span>
+                            {ivrData.sub_type === 'gift' && ivrData.sub_gifter_display_name && (
+                              <span className="text-purple-300/70">gift from {ivrData.sub_gifter_display_name}</span>
+                            )}
+                            {ivrData.is_founder && <span className="px-1 py-px rounded bg-purple-500/20 text-[9px] font-bold tracking-wider">FOUNDER</span>}
+                          </span>
+                        )}
+                        {ivrData?.is_mod && (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-green-500/10 border border-green-500/20 text-[11px] text-green-300">
+                            <span className="font-semibold">Moderator</span>
+                            {ivrData.mod_since && <span className="text-green-300/70">since {formatIVRDate(ivrData.mod_since)}</span>}
+                          </span>
+                        )}
+                        {ivrData?.is_vip && (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-pink-500/10 border border-pink-500/20 text-[11px] text-pink-300">
+                            <span className="font-semibold">VIP</span>
+                            {ivrData.vip_since && <span className="text-pink-300/70">since {formatIVRDate(ivrData.vip_since)}</span>}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Gift-sub action. Text link, not a chip — keeps the
+                        visual weight light and matches the "View Full Changelog"
+                        / "Open Settings →" pattern. Hover state adds underline +
+                        a small arrow nudge so it reads as clickable without
+                        becoming a border-pill. */}
+                    {canGiftSub && (
+                      <button
+                        type="button"
+                        onClick={handleGiftSub}
+                        className="group inline-flex items-center gap-1.5 text-[11px] text-accent hover:text-accent/90 hover:underline underline-offset-[3px] decoration-accent/60 transition-colors"
+                      >
+                        <Gift size={12} />
+                        <span>Gift {displayName} a sub to {viewedChannel}</span>
+                        <span aria-hidden="true" className="transition-transform group-hover:translate-x-0.5">→</span>
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Badges, provider-grouped inside one panel, no inner scroll.
                 Section also renders when the user has the StreamNook badge but
-                no chat badges, so the StreamNook identity always surfaces. */}
-            {(totalBadgeCount > 0 || streamNookUserNumber !== null) && (
+                no chat badges, so the StreamNook identity always surfaces.
+                Order: StreamNook → Twitch → 7TV → Third-party. StreamNook leads
+                because it's the strongest community signal in our app; Twitch
+                is the platform tier; 7TV/other are cosmetic providers. */}
+            {(totalBadgeCount > 0 || streamNookBadgeCount > 0) && (
               <div>
                 <p className="text-[11px] text-textSecondary uppercase tracking-wider font-semibold mb-2">
-                  Badges <span className="text-textSecondary/60 tabular-nums">{totalBadgeCount + (streamNookUserNumber !== null ? 1 : 0)}</span>
+                  Badges <span className="text-textSecondary/60 tabular-nums">{totalBadgeCount + streamNookBadgeCount}</span>
                 </p>
                 <div className="glass-panel rounded-md px-3 py-3 space-y-3">
+                {/* StreamNook badges. The active selection renders with the full
+                    tier-card tooltip (user identity surface). Other owned-but-
+                    inactive badges render as simple thumbnails alongside it,
+                    matching how 7TV / Third-party expose multiple owned items. */}
+                {streamNookBadgeCount > 0 && (
+                  <div>
+                    <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium mb-2">
+                      StreamNook <span className="text-textSecondary/50 tabular-nums">{streamNookBadgeCount}</span>
+                    </p>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {streamNookUserNumber !== null && (
+                        <StreamNookBadge userId={userId} userNumber={streamNookUserNumber} />
+                      )}
+                      {inactiveOwnedSlugs.map(({ slug, cosmetic }) => {
+                        const asset = COSMETIC_ASSET_BY_SLUG[slug];
+                        return (
+                          <Tooltip key={`sn-${slug}`} content={cosmetic.name} side="top">
+                            <img
+                              src={asset}
+                              alt={cosmetic.name}
+                              className="w-6 h-6 inline-block object-contain cursor-pointer hover:scale-110 transition-transform"
+                              draggable={false}
+                              onClick={openBadgesOnStreamNookInMain}
+                            />
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {renderBadgeGroup('Twitch', twitchBadges, (b, i) => (
                   <Tooltip key={`twitch-${b.id}-${i}`} content={b.description ? `${b.title}\n${b.description}` : b.title} side="top">
                     <img
                       src={b.src}
-                      srcSet={b.srcSet}
                       alt={b.title}
                       className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
                       onError={e => { e.currentTarget.style.display = 'none'; }}
                     />
                   </Tooltip>
                 ))}
-                {/* StreamNook badge. Sits between Twitch (the platform) and 7TV
-                    (cosmetic provider). Default click opens BadgesOverlay on the
-                    StreamNook tab via the badge component's own handler. */}
-                {streamNookUserNumber !== null && (
-                  <div>
-                    <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium mb-2">
-                      StreamNook <span className="text-textSecondary/50 tabular-nums">1</span>
-                    </p>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <StreamNookBadge userId={userId} userNumber={streamNookUserNumber} />
-                    </div>
-                  </div>
-                )}
                 {renderBadgeGroup('7TV', seventvBadges, (b, i) => (
                   <Tooltip key={`7tv-${b.id}-${i}`} content={b.title} side="top">
                     <FallbackImage
@@ -884,7 +1296,6 @@ const UserProfileCard = ({
                   <Tooltip key={`3p-${b.id}-${i}`} content={`${b.title} (${b.provider?.toUpperCase() || 'Other'})`} side="top">
                     <img
                       src={b.src}
-                      srcSet={b.srcSet}
                       alt={b.title}
                       className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
                       onError={e => { e.currentTarget.style.display = 'none'; }}
@@ -958,37 +1369,19 @@ const UserProfileCard = ({
               </a>
             </div>
 
+            {/* Trigger for the messages takeover. Chevron points UP because
+                clicking expands the messages region upward into the body
+                above. No count badge — the local in-session buffer is just
+                one of three sources we pull from, so showing its count would
+                be misleading (often 0 even when Justlog / robotty have
+                plenty of history). */}
             <button
-              onClick={() => setShowMessages(!showMessages)}
-              className={`w-full glass-button text-white text-xs py-2 px-3 rounded-md text-center transition-colors flex items-center justify-center gap-1.5 ${showMessages ? 'bg-accent/15' : 'hover:bg-accent/15'}`}
+              onClick={() => setShowMessages(true)}
+              className="w-full glass-button text-white text-xs py-2 px-3 rounded-md text-center transition-colors flex items-center justify-center gap-1.5 hover:bg-accent/15"
             >
-              {showMessages ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              {showMessages ? 'Hide' : 'Show'} recent messages
-              <span className="text-textSecondary/70">({messageHistory.length})</span>
+              <ChevronUp size={14} />
+              Show recent messages
             </button>
-
-            {showMessages && (
-              <div className="pt-2">
-                {messageHistory.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-6 text-center">
-                    <MessageCircle size={28} className="text-textSecondary/30 mb-2" />
-                    <p className="text-sm text-textSecondary">No messages yet</p>
-                    <p className="text-xs text-textSecondary/60 mt-1">Messages will appear here as they chat</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {messageHistory.slice().reverse().map((msg, idx) => (
-                      <div
-                        key={idx}
-                        className="px-3 py-2 glass-panel rounded-md text-sm hover:bg-white/5 transition-colors"
-                      >
-                        <p className="text-textPrimary break-words leading-relaxed">{msg.content}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
 
             {/* Mod zone. Kept inside body container; red top border is the only divider we keep, as a semantic danger-zone signal */}
@@ -1096,6 +1489,11 @@ const UserProfileCard = ({
                 </div>
               </div>
             )}
+
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </div>
       </div>

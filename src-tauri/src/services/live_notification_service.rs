@@ -169,7 +169,7 @@ impl LiveNotificationService {
 
     async fn get_game_box_art(game_name: &str) -> Result<String> {
         let token = TwitchService::get_token().await?;
-        let client = reqwest::Client::new();
+        let client = crate::services::http::client().clone();
 
         // Search for the game
         let url = format!(

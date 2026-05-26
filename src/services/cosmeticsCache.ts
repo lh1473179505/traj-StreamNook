@@ -21,18 +21,49 @@ export interface CachedProfile {
   lastUpdated: number;
 }
 
-// In-memory cache for 7TV cosmetics (session only) - for SYNCHRONOUS access
-// This mirrors the cache in seventvService but provides instant synchronous reads
-const inMemoryCosmeticsCache = new Map<string, CachedCosmetics>();
+// Small bounded LRU. Touch-on-hit keeps recently-used entries warm; least-recently
+// used falls off when size exceeds maxSize. Designed to match the Map subset this
+// module needs (get / set / clear / size). Exported so other services (emojiService
+// for one) can reuse the same shape rather than re-implementing it.
+export class LruMap<K, V> {
+  private map = new Map<K, V>();
+  constructor(private maxSize: number) {}
+  get(key: K): V | undefined {
+    if (!this.map.has(key)) return undefined;
+    const v = this.map.get(key)!;
+    this.map.delete(key);
+    this.map.set(key, v);
+    return v;
+  }
+  set(key: K, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    if (this.map.size > this.maxSize) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+  }
+  has(key: K): boolean { return this.map.has(key); }
+  clear(): void { this.map.clear(); }
+  get size(): number { return this.map.size; }
+}
 
-// In-memory cache for third-party badges (session only)
-const inMemoryThirdPartyBadgesCache = new Map<string, any[]>();
+// Caps sized for a heavy viewing session. Profile entries are the largest
+// (badges + paints + IVR), so cap them tighter. Cosmetic / badge entries are
+// smaller — 512 covers ~all active chatters in a busy channel.
+const inMemoryCosmeticsCache = new LruMap<string, CachedCosmetics>(512);
+const inMemoryThirdPartyBadgesCache = new LruMap<string, any[]>(512);
+const inMemoryTwitchBadgesCache = new LruMap<string, any[]>(512);
+const inMemoryProfileCache = new LruMap<string, CachedProfile>(256);
 
-// In-memory cache for Twitch badges (session only)
-const inMemoryTwitchBadgesCache = new Map<string, any[]>();
-
-// Full profile cache (combines all badge types for instant profile loading)
-const inMemoryProfileCache = new Map<string, CachedProfile>();
+// Drop fields that no cached-side consumer reads. BadgeDetailOverlay uses the
+// full Twitch badge shape, but it receives `badge` from BadgesOverlay's own
+// catalog, not from these per-user caches — so clickAction/clickUrl can be
+// dropped here. `link` on third-party badges is defined upstream but never read.
+const compactTwitchBadges = (badges: any[]): any[] =>
+  badges.map(({ clickAction: _ca, clickUrl: _cu, ...rest }) => rest);
+const compactThirdPartyBadges = (badges: any[]): any[] =>
+  badges.map(({ link: _link, ...rest }) => rest);
 
 // Track pending requests to prevent duplicate fetches
 const pendingCosmeticsRequests = new Map<string, Promise<CachedCosmetics>>();
@@ -164,7 +195,7 @@ export async function getTwitchBadgesWithFallback(
         }
       });
 
-      const result = Array.from(uniqueBadges.values());
+      const result = compactTwitchBadges(Array.from(uniqueBadges.values()));
 
       Logger.debug(`[cosmeticsCache] Resolved ${result.length} total Twitch badges for ${username}`);
 
@@ -225,17 +256,17 @@ export async function getFullProfileWithFallback(
         getCosmeticsWithFallback(userId)
       ]);
 
-      // Merge display and earned Twitch badges
+      // Merge display and earned Twitch badges, then strip cache-dead fields.
       const uniqueTwitchBadges = new Map<string, any>();
       badgeData.displayBadges.forEach((badge: any) => uniqueTwitchBadges.set(badge.id, badge));
       badgeData.earnedBadges.forEach((badge: any) => {
         if (!uniqueTwitchBadges.has(badge.id)) uniqueTwitchBadges.set(badge.id, badge);
       });
-      const twitchBadges = Array.from(uniqueTwitchBadges.values());
+      const twitchBadges = compactTwitchBadges(Array.from(uniqueTwitchBadges.values()));
 
       // Third-party badges come from the unified service (FFZ, Chatterino, Homies)
       // They're already in the correct format with imageUrl from badgeService.ts
-      const thirdPartyBadges = badgeData.thirdPartyBadges || [];
+      const thirdPartyBadges = compactThirdPartyBadges(badgeData.thirdPartyBadges || []);
 
       Logger.debug(`[cosmeticsCache] Fetched ${twitchBadges.length} Twitch badges and ${thirdPartyBadges.length} third-party badges for ${username}`);
 
@@ -309,15 +340,15 @@ export async function refreshProfileInBackground(
       badgeData.earnedBadges.forEach((badge: any) => {
         if (!uniqueBadges.has(badge.id)) uniqueBadges.set(badge.id, badge);
       });
-      twitchBadges = Array.from(uniqueBadges.values());
+      twitchBadges = compactTwitchBadges(Array.from(uniqueBadges.values()));
 
-      // Transform third-party badges
+      // Transform third-party badges. `link` intentionally omitted — no
+      // consumer reads it; compactThirdPartyBadges would strip it anyway.
       thirdPartyBadges = (badgeData.thirdPartyBadges || []).map((b: any) => ({
         id: b.id,
         title: b.title,
         imageUrl: b.imageUrl,
         provider: b.provider,
-        link: b.link
       }));
     }
 

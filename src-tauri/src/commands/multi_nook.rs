@@ -2,60 +2,16 @@ use crate::models::settings::AppState;
 use crate::services::multi_nook_server::MultiNookServer;
 use crate::services::streamlink_manager::StreamlinkManager;
 use log::debug;
-use std::path::PathBuf;
 use tauri::State;
 
 /// Maximum number of concurrent streams allowed
 const MAX_STREAMS: usize = 25;
 
-/// Check if the ttvlol plugin exists (reused from streaming.rs logic)
-fn is_ttvlol_plugin_installed(custom_folder: Option<&str>) -> bool {
-    // Check custom folder plugins (for Portable versions)
-    if let Some(folder) = custom_folder {
-        if !folder.is_empty() {
-            let custom_plugin = PathBuf::from(folder).join("plugins").join("twitch.py");
-            if custom_plugin.exists() {
-                return true;
-            }
-        }
-    }
-
-    // Check User AppData for installed Streamlink plugins
-    if let Some(config_dir) = dirs::config_dir() {
-        let appdata_plugin = config_dir
-            .join("streamlink")
-            .join("plugins")
-            .join("twitch.py");
-        if appdata_plugin.exists() {
-            return true;
-        }
-    }
-
-    // Check bundled location (production)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let plugin_path = exe_dir.join("streamlink").join("plugins").join("twitch.py");
-            if plugin_path.exists() {
-                return true;
-            }
-        }
-    }
-
-    // Development mode: check CWD and parent
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_plugin = cwd.join("streamlink").join("plugins").join("twitch.py");
-        if cwd_plugin.exists() {
-            return true;
-        }
-        if let Some(parent) = cwd.parent() {
-            let parent_plugin = parent.join("streamlink").join("plugins").join("twitch.py");
-            if parent_plugin.exists() {
-                return true;
-            }
-        }
-    }
-
-    false
+/// Whether the bundled TTVLOL plugin is on disk. Delegates to
+/// `StreamlinkManager::bundled_twitch_plugin_exists` so streaming.rs and
+/// multi_nook agree on what "ttvlol installed" means.
+fn is_ttvlol_plugin_installed(_custom_folder: Option<&str>) -> bool {
+    StreamlinkManager::bundled_twitch_plugin_exists()
 }
 
 /// Start a stream for multi-stream mode
