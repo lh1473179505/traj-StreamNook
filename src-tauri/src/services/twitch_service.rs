@@ -22,11 +22,11 @@ const TWITCH_GQL_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
 const KEYRING_SERVICE: &str = "streamnook_twitch_token";
 const KEYRING_USERNAME: &str = "user"; // Standardized username
 const REDIRECT_URI: &str = "http://localhost:3000/callback";
-const SCOPES: &str = "user:read:follows user:read:email chat:read chat:edit channel:read:redemptions channel:manage:redemptions moderator:read:followers openid user:manage:whispers user:read:whispers user:read:emotes channel:read:hype_train moderator:read:blocked_terms moderator:manage:chat_settings moderator:manage:unban_requests moderator:manage:banned_users moderator:manage:chat_messages moderator:read:moderators moderator:read:vips channel:manage:moderators channel:manage:vips moderator:manage:suspicious_users user:manage:chat_color user:manage:blocked_users user:read:blocked_users moderator:manage:announcements moderator:manage:shoutouts channel:edit:commercial channel:manage:raids channel:manage:broadcast moderation:read";
+const SCOPES: &str = "user:read:follows user:read:email chat:read chat:edit channel:read:redemptions channel:manage:redemptions moderator:read:followers openid user:manage:whispers user:read:whispers user:read:emotes channel:read:hype_train moderator:read:blocked_terms moderator:manage:chat_settings moderator:manage:unban_requests moderator:manage:banned_users moderator:manage:chat_messages moderator:read:warnings moderator:read:moderators moderator:read:vips channel:manage:moderators channel:manage:vips moderator:manage:suspicious_users user:manage:chat_color user:manage:blocked_users user:read:blocked_users moderator:manage:announcements moderator:manage:shoutouts channel:edit:commercial channel:manage:raids channel:manage:broadcast moderation:read user:write:chat";
 const TOKEN_FILE_NAME: &str = ".twitch_token";
 
 /// Get the app data directory (works consistently in dev and release)
-fn get_app_data_dir() -> Result<PathBuf> {
+pub(crate) fn get_app_data_dir() -> Result<PathBuf> {
     // Try to use the standard config directory first
     if let Some(config_dir) = dirs::config_dir() {
         let app_dir = config_dir.join("StreamNook");
@@ -60,10 +60,10 @@ struct DeviceCodeResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct StorableToken {
-    access_token: String,
-    refresh_token: String,
-    expires_at: i64, // Unix timestamp
+pub(crate) struct StorableToken {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+    pub(crate) expires_at: i64, // Unix timestamp
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +397,63 @@ impl TwitchService {
         Ok("Login successful".to_string())
     }
 
+    /// Build the Twitch OAuth authorize URL for linking a NEW account in the
+    /// system browser. `force_verify=true` makes Twitch always show the account
+    /// chooser / login, so the user signs in deliberately as a different account
+    /// rather than silently reusing an existing browser session. `state` is an
+    /// opaque CSRF token the caller verifies against the redirect. This reads
+    /// nothing from the primary's cached token.
+    pub(crate) fn build_authorize_url(state: &str) -> Result<String> {
+        let url = reqwest::Url::parse_with_params(
+            "https://id.twitch.tv/oauth2/authorize",
+            &[
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+                ("response_type", "code"),
+                ("scope", SCOPES),
+                ("force_verify", "true"),
+                ("state", state),
+            ],
+        )?;
+        Ok(url.to_string())
+    }
+
+    /// Exchange an authorization code (from the redirect) for a fresh token.
+    /// Deliberately does NOT persist anything: the caller decides where the token
+    /// goes. For a linked secondary account that is the AccountStore's secondary
+    /// slot, never the primary's cache.
+    pub(crate) async fn exchange_code_for_token(code: &str) -> Result<StorableToken> {
+        let client = crate::services::http::client().clone();
+        let params = [
+            ("client_id", CLIENT_ID),
+            ("client_secret", CLIENT_SECRET),
+            ("code", code),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", REDIRECT_URI),
+        ];
+
+        let response = client
+            .post("https://id.twitch.tv/oauth2/token")
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(anyhow::anyhow!("Token exchange failed: {}", error_text));
+        }
+
+        let token_response: TokenResponse = response.json().await?;
+        let expires_at =
+            Utc::now() + ChronoDuration::seconds(token_response.expires_in.unwrap_or(3600) as i64);
+
+        Ok(StorableToken {
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token.unwrap_or_default(),
+            expires_at: expires_at.timestamp(),
+        })
+    }
+
     async fn start_device_flow(client: &Client) -> Result<DeviceCodeResponse> {
         let params = [("client_id", CLIENT_ID), ("scopes", SCOPES)];
 
@@ -499,7 +556,7 @@ impl TwitchService {
         Ok(())
     }
 
-    async fn refresh_token(refresh_token: &str) -> Result<StorableToken> {
+    pub(crate) async fn refresh_token(refresh_token: &str) -> Result<StorableToken> {
         let client = crate::services::http::client().clone();
         let params = [
             ("grant_type", "refresh_token"),
@@ -1001,6 +1058,13 @@ impl TwitchService {
 
     pub async fn get_user_info() -> Result<UserInfo> {
         let token = Self::get_token().await?;
+        Self::get_user_info_with_token(&token).await
+    }
+
+    /// Fetch the Helix user profile for an arbitrary access token, not just the
+    /// primary login's. Used by the multi-account store to identify a freshly
+    /// linked account from its own token.
+    pub(crate) async fn get_user_info_with_token(token: &str) -> Result<UserInfo> {
         let client = crate::services::http::client().clone();
 
         let response = client
@@ -1020,6 +1084,95 @@ impl TwitchService {
 
         let user_info: UserInfo = serde_json::from_value(data.clone())?;
         Ok(user_info)
+    }
+
+    /// Send a chat message via Helix Send Chat Message. Returns
+    /// (message_id, is_sent, drop_reason). The message_id is the AUTHORITATIVE id
+    /// Twitch assigns, so an own message can be deleted immediately without
+    /// waiting to catch its IRC echo. `is_sent` is false when Twitch accepted the
+    /// request but dropped the message (e.g. AutoMod), with `drop_reason` set.
+    /// Requires the `user:write:chat` scope; callers fall back to IRC on error.
+    pub async fn send_chat_message_helix(
+        broadcaster_id: &str,
+        sender_id: &str,
+        message: &str,
+        reply_parent_msg_id: Option<&str>,
+    ) -> Result<(Option<String>, bool, Option<String>)> {
+        let token = Self::get_token().await?;
+        Self::send_chat_message_helix_with_token(
+            &token,
+            broadcaster_id,
+            sender_id,
+            message,
+            reply_parent_msg_id,
+        )
+        .await
+    }
+
+    /// Same as `send_chat_message_helix`, but with an explicit token so a chosen
+    /// secondary account can send as itself. The caller passes that account's
+    /// token plus its own user id as `sender_id`.
+    pub async fn send_chat_message_helix_with_token(
+        token: &str,
+        broadcaster_id: &str,
+        sender_id: &str,
+        message: &str,
+        reply_parent_msg_id: Option<&str>,
+    ) -> Result<(Option<String>, bool, Option<String>)> {
+        let client = crate::services::http::client().clone();
+
+        let mut body = serde_json::json!({
+            "broadcaster_id": broadcaster_id,
+            "sender_id": sender_id,
+            "message": message,
+        });
+        if let Some(reply) = reply_parent_msg_id {
+            body["reply_parent_message_id"] = serde_json::Value::String(reply.to_string());
+        }
+
+        let response = client
+            .post("https://api.twitch.tv/helix/chat/messages")
+            .header(AUTHORIZATION, format!("Bearer {}", token))
+            .header("Client-Id", CLIENT_ID)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let json = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "Helix send returned HTTP {}: {}",
+                status.as_u16(),
+                json
+            ));
+        }
+
+        let data = json
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first());
+        let message_id = data
+            .and_then(|d| d.get("message_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let is_sent = data
+            .and_then(|d| d.get("is_sent"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let drop_reason = data
+            .and_then(|d| d.get("drop_reason"))
+            .and_then(|dr| {
+                dr.get("message")
+                    .or_else(|| dr.get("code"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(String::from);
+        Ok((message_id, is_sent, drop_reason))
     }
 
     pub async fn get_user_by_login(login: &str) -> Result<UserInfo> {
@@ -2580,7 +2733,7 @@ impl TwitchService {
         let moderator_id = &user_info.id;
 
         let url = format!(
-            "https://api.twitch.tv/helix/chat/messages?broadcaster_id={}&moderator_id={}",
+            "https://api.twitch.tv/helix/moderation/chat?broadcaster_id={}&moderator_id={}",
             broadcaster_id, moderator_id
         );
 
@@ -2608,7 +2761,7 @@ impl TwitchService {
         let moderator_id = &user_info.id;
 
         let url = format!(
-            "https://api.twitch.tv/helix/chat/messages?broadcaster_id={}&moderator_id={}&message_id={}",
+            "https://api.twitch.tv/helix/moderation/chat?broadcaster_id={}&moderator_id={}&message_id={}",
             broadcaster_id, moderator_id, message_id
         );
 
@@ -2620,9 +2773,20 @@ impl TwitchService {
             .await?;
 
         if !response.status().is_success() && response.status() != 204 {
+            let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            error!("[TwitchService] Failed to delete message: {}", error_text);
-            return Err(anyhow::anyhow!("Failed to delete message"));
+            error!(
+                "[TwitchService] Failed to delete message (HTTP {}): {}",
+                status, error_text
+            );
+            // Surface Twitch's status + reason so the caller can tell apart a
+            // restricted delete (broadcaster/other-mod message, >6h old) from a
+            // scope/auth failure instead of an opaque "Failed to delete message".
+            return Err(anyhow::anyhow!(
+                "Twitch rejected delete (HTTP {}): {}",
+                status,
+                error_text
+            ));
         }
 
         Ok(())

@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/AppStore';
 import { TwitchStream } from '../types';
 import StreamerAboutPanel from './StreamerAboutPanel';
+import { Tooltip } from './ui/Tooltip';
 import { Logger } from '../utils/logger';
 
 export const SearchProfileModal = ({ user, onClose }: { user: TwitchStream, onClose: () => void }) => {
@@ -85,9 +86,11 @@ export const SearchProfileModal = ({ user, onClose }: { user: TwitchStream, onCl
                             <div className="flex-1 min-w-0">
                                 <h2 className="text-xl font-bold text-textPrimary leading-tight truncate">{user.user_name}</h2>
                                 {isLive && user.game_name ? (
-                                    <p className="text-sm text-accent truncate w-full" title={user.game_name}>
+                                    <Tooltip content={user.game_name}>
+                                    <p className="text-sm text-accent truncate w-full">
                                         Playing {user.game_name} • {user.viewer_count.toLocaleString()} viewers
                                     </p>
+                                    </Tooltip>
                                 ) : (
                                     <p className="text-sm text-textSecondary">@{user.user_login}</p>
                                 )}

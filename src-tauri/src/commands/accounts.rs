@@ -1,0 +1,83 @@
+//! Tauri commands for the multi-account registry. Phase 1 exposes only the
+//! read side (list + count) that later phases and the "send as" picker build on.
+//! Add / remove / set-primary commands arrive with the add-account flow.
+
+use crate::services::account_store::{AccountStore, StoredAccount};
+use crate::services::twitch_service::TwitchService;
+use crate::utils::oauth_server;
+use std::time::Duration;
+use tauri::AppHandle;
+
+/// Every linked account, primary first. The frontend uses this to render the
+/// account list and the "send as" picker.
+#[tauri::command]
+pub async fn list_twitch_accounts() -> Result<Vec<StoredAccount>, String> {
+    Ok(AccountStore::list())
+}
+
+/// Number of linked accounts. The "send as" picker is only shown when this is
+/// 2 or more, so a single-account user sees no change.
+#[tauri::command]
+pub async fn get_twitch_account_count() -> Result<usize, String> {
+    Ok(AccountStore::count())
+}
+
+/// Link a NEW secondary account via the system browser.
+///
+/// Forces Twitch's account chooser (`force_verify=true`) in the user's default
+/// browser, captures the redirect on the localhost callback, exchanges the code
+/// for that account's own token, and files it as a SECONDARY. This never reads
+/// or writes the primary's cached token, and `add_secondary` rejects the attempt
+/// if the chosen account is already the primary. Resolves with the linked
+/// account, or an error string the UI can surface (cancelled, timed out, etc.).
+#[tauri::command]
+pub async fn add_twitch_account(app: AppHandle) -> Result<StoredAccount, String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    // Opaque CSRF token, verified against the redirect's `state`.
+    let state = format!("{:032x}", rand::random::<u128>());
+
+    // Bind the callback listener BEFORE opening the browser so a fast redirect
+    // can't arrive before we're ready.
+    let listener = oauth_server::start_oauth_listener()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let url = TwitchService::build_authorize_url(&state).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_url(url, None::<String>)
+        .map_err(|e| format!("Failed to open browser: {}", e))?;
+
+    // Wait up to five minutes for the user to finish signing in.
+    let callback = listener
+        .wait(Duration::from_secs(300))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(err) = callback.error {
+        return Err(format!("Sign-in was cancelled or failed: {}", err));
+    }
+    if callback.state.as_deref() != Some(state.as_str()) {
+        return Err(
+            "Sign-in could not be verified (state mismatch). Please try again.".to_string(),
+        );
+    }
+    if callback.code.is_empty() {
+        return Err("Twitch did not return an authorization code.".to_string());
+    }
+
+    let token = TwitchService::exchange_code_for_token(&callback.code)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    AccountStore::add_secondary(token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Unlink a secondary account (removes its stored token and registry entry).
+/// The primary cannot be removed here.
+#[tauri::command]
+pub async fn remove_twitch_account(user_id: String) -> Result<(), String> {
+    AccountStore::remove_secondary(&user_id).map_err(|e| e.to_string())
+}

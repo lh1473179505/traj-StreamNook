@@ -23,6 +23,12 @@ export interface OpenMultiChatOptions {
   /** Display name (proper capitalization) for the channel — used for the tab
    *  label and window title until the popout's own metadata poll lands. */
   channelName?: string;
+  /** Multiple channels to seed/add at once — e.g. popping out every MultiNook
+   *  tile's chat in one click. Takes precedence over the single-channel fields. */
+  channels?: Array<{ channel: string; channelId?: string | null; channelName?: string | null }>;
+  /** Replace the popout's entire tab set with exactly these channels (a fresh
+   *  view) instead of merging/appending into whatever was already open. */
+  replace?: boolean;
   /** Display title (defaults to `StreamNook MultiChat` or includes the channel
    *  name when one is pre-loaded). */
   title?: string;
@@ -35,7 +41,12 @@ export interface OpenMultiChatOptions {
 // for our own chrome (custom title bar + tab strip + send input row), which
 // lands us around 402×620 — compact, comfortable on a second monitor, and
 // resizable from any edge if the user wants more room.
-const DEFAULT_WIDTH = 402;
+// Width of a single chat column. Split layouts (2–4 columns) size the window to
+// a multiple of this so each chat keeps a comfortable single-chat width instead
+// of being squeezed into a fraction of one. Exported so MultiChatWindow's
+// column-aware resize uses the exact same base.
+export const MULTICHAT_BASE_WIDTH = 402;
+const DEFAULT_WIDTH = MULTICHAT_BASE_WIDTH;
 const DEFAULT_HEIGHT = 620;
 
 const WINDOW_ID = 'default';
@@ -72,10 +83,22 @@ export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): P
 
     cleanupOrphanStorage();
 
-    // If a popout already exists, focus it and (if the caller supplied a
-    // channel) ask it to add that channel as a tab. The popout listens for
-    // `multichat-add-channel` and routes the payload through its existing
-    // add/dedup path so this is a no-op when the channel is already a tab.
+    // Normalize to a single channel list, lowercased. `channels` (multi) wins
+    // over the single-channel fields; either way the rest of the flow is uniform.
+    const channelList = (options.channels && options.channels.length > 0
+      ? options.channels
+      : options.channel
+        ? [{ channel: options.channel, channelId: options.channelId, channelName: options.channelName }]
+        : []
+    ).map((c) => ({
+      channel: c.channel.toLowerCase(),
+      channelId: c.channelId ?? null,
+      channelName: c.channelName ?? c.channel,
+    }));
+
+    // If a popout already exists, focus it and ask it to add each requested
+    // channel as a tab. The popout listens for `multichat-add-channel` and
+    // routes each through its add/dedup path, so channels already open are no-ops.
     const existing = await WebviewWindow.getByLabel(WINDOW_LABEL);
     if (existing) {
       try {
@@ -85,24 +108,41 @@ export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): P
       } catch (err) {
         Logger.warn('[MultiChat] focus existing popout failed:', err);
       }
-      if (options.channel) {
+      if (options.replace) {
+        // Replace the popout's whole tab set with exactly this list.
         try {
-          await emit('multichat-add-channel', {
-            channel: options.channel.toLowerCase(),
-            channelId: options.channelId ?? null,
-            channelName: options.channelName ?? options.channel,
-          });
+          await emit('multichat-set-channels', { channels: channelList });
         } catch (err) {
-          Logger.warn('[MultiChat] emit multichat-add-channel failed:', err);
+          Logger.warn('[MultiChat] emit multichat-set-channels failed:', err);
+        }
+      } else {
+        for (const c of channelList) {
+          try {
+            await emit('multichat-add-channel', {
+              channel: c.channel,
+              channelId: c.channelId,
+              channelName: c.channelName,
+            });
+          } catch (err) {
+            Logger.warn('[MultiChat] emit multichat-add-channel failed:', err);
+          }
         }
       }
       return;
     }
 
     const params = new URLSearchParams({ id: WINDOW_ID });
-    if (options.channel) params.set('channel', options.channel.toLowerCase());
-    if (options.channelId) params.set('channelId', options.channelId);
-    if (options.channelName) params.set('channelName', options.channelName);
+    if (options.replace) params.set('replace', '1');
+    if (channelList.length === 1) {
+      // Single channel: use the discrete params (keeps the URL readable).
+      params.set('channel', channelList[0].channel);
+      if (channelList[0].channelId) params.set('channelId', channelList[0].channelId);
+      if (channelList[0].channelName) params.set('channelName', channelList[0].channelName);
+    } else if (channelList.length > 1) {
+      // Multiple channels: seed them all on first mount via a JSON param, so a
+      // brand-new window doesn't race an event listener that isn't up yet.
+      params.set('channels', JSON.stringify(channelList));
+    }
 
     // Try to land the new window next to the main one. Falls back to centered
     // placement if the main-window query fails.
@@ -120,10 +160,13 @@ export async function openMultiChatWindow(options: OpenMultiChatOptions = {}): P
       Logger.debug('[MultiChat] Could not derive main window position:', err);
     }
 
-    const titleChannel = options.channelName || options.channel;
     const title =
       options.title ??
-      (titleChannel ? `StreamNook MultiChat — ${titleChannel}` : 'StreamNook MultiChat');
+      (channelList.length > 1
+        ? `StreamNook MultiChat — ${channelList.length} channels`
+        : channelList.length === 1
+          ? `StreamNook MultiChat — ${channelList[0].channelName}`
+          : 'StreamNook MultiChat');
 
     const win = new WebviewWindow(WINDOW_LABEL, {
       url: `${window.location.origin}/#/multichat?${params.toString()}`,

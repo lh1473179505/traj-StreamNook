@@ -7,7 +7,7 @@
 // popout showing the channel both update independently.
 
 import { injectSystemMessage, refreshChannelEmotes } from '../stores/chatConnectionStore';
-import { getCosmeticsWithFallback, invalidateUserCosmetics } from '../services/cosmeticsCache';
+import { forceRefreshCosmetics } from '../services/cosmeticsCache';
 import { useAppStore } from '../stores/AppStore';
 import { Logger } from '../utils/logger';
 
@@ -69,17 +69,17 @@ export interface CosmeticUpdatePayload {
  * is the resolver.
  */
 export async function handleSeventvCosmeticUpdate(payload: CosmeticUpdatePayload): Promise<void> {
-  const { twitch_id, action } = payload;
+  const { twitch_id } = payload;
   if (!twitch_id) return;
 
-  // 'create' is a fresh delivery (the cache simply fills). 'update'/'delete'
-  // mean an existing selection changed, so drop any stale entry first.
-  if (action !== 'create') {
-    invalidateUserCosmetics(twitch_id);
-  }
-
+  // The WS says this user's cosmetics exist or just changed. Force a genuinely
+  // fresh resolve (clears BOTH cache layers, incl. the lower-level 7TV
+  // userCache) for every action: a 'create' can race a poisoned success-empty
+  // from an earlier fetch, and 'update'/'delete' changed the selection. A plain
+  // invalidate didn't reach the 7TV layer, so the stale entry was served for
+  // its TTL and the change never showed.
   try {
-    await getCosmeticsWithFallback(twitch_id);
+    await forceRefreshCosmetics(twitch_id);
   } catch (e) {
     Logger.warn('[7TV EventAPI] cosmetics resolve failed for', twitch_id, e);
   }

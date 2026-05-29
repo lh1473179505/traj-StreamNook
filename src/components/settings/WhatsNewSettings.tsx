@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Loader2, Github, ChevronDown, ChevronRight, AlertCircle, Sparkles, Bug, Wrench, Package, RefreshCw } from 'lucide-react';
 import { parseInlineMarkdown } from '../../services/markdownService';
 import { Logger } from '../../utils/logger';
+import { Tooltip } from '../ui/Tooltip';
 
 interface GitHubRelease {
     tag_name: string;
@@ -279,15 +280,16 @@ const WhatsNewSettings = () => {
                 <p className="text-sm text-textMuted flex-1">
                     Release history for StreamNook and its bundled components (Streamlink, TTV LOL PRO).
                 </p>
+                <Tooltip content="Refetch from GitHub">
                 <button
                     onClick={handleRefresh}
                     disabled={isRefreshing || isLoading}
                     className="inline-flex items-center gap-1.5 text-xs text-textSecondary hover:text-textPrimary disabled:opacity-50 transition-colors"
-                    title="Refetch from GitHub"
                 >
                     <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
                     Refresh
                 </button>
+                </Tooltip>
             </div>
 
             {isLoading && !releases && (

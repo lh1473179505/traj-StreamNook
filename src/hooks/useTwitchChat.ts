@@ -26,6 +26,7 @@ import {
   type ClearedUserEntry,
   type RoomState,
   type SendUserInfo,
+  type SendAsAccount,
 } from '../stores/chatConnectionStore';
 import { Logger } from '../utils/logger';
 
@@ -40,6 +41,7 @@ export interface UseTwitchChatReturn {
     messageText: string,
     userInfo: SendUserInfo,
     replyParentMsgId?: string,
+    senderAccount?: SendAsAccount | null,
   ) => Promise<void>;
   isConnected: boolean;
   error: string | null;
@@ -92,13 +94,18 @@ export const useTwitchChat = (): UseTwitchChatReturn => {
   }, []);
 
   const sendMessage = useCallback(
-    async (messageText: string, userInfo: SendUserInfo, replyParentMsgId?: string) => {
+    async (
+      messageText: string,
+      userInfo: SendUserInfo,
+      replyParentMsgId?: string,
+      senderAccount?: SendAsAccount | null,
+    ) => {
       const channel = currentChannelRef.current;
       if (!channel) {
         Logger.warn('[useTwitchChat] sendMessage called with no active channel');
         return;
       }
-      await sendChannelMessage(channel, messageText, userInfo, replyParentMsgId);
+      await sendChannelMessage(channel, messageText, userInfo, replyParentMsgId, senderAccount);
     },
     [],
   );

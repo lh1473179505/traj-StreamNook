@@ -1,5 +1,7 @@
 import { useAppStore } from '../../stores/AppStore';
 import { SettingsSection, SettingsRow } from './_primitives';
+import { MOD_LOG_CATEGORIES, MOD_LOG_STYLES, highlightContainerStyle } from '../../utils/modLogCategories';
+import { Tooltip } from '../ui/Tooltip';
 
 const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
   <button
@@ -67,6 +69,89 @@ const ModerationSettings = () => {
             />
           }
         />
+      </SettingsSection>
+
+      <SettingsSection
+        label="Log Highlights"
+        description="Color-code mod-log entries by severity. Choose how the highlight shows, then customize any category's color."
+      >
+        <SettingsRow
+          title="Highlight style"
+          description="How each entry is emphasized by severity. The previews use a sample event."
+        >
+          <div className="grid grid-cols-3 gap-2">
+            {MOD_LOG_STYLES.map(({ key, label }) => {
+              const active = (mod.mod_log_highlight_style ?? 'box') === key;
+              const sample = '#e5484d'; // representative (ban) color
+              return (
+                <button
+                  key={key}
+                  onClick={() => setMod({ mod_log_highlight_style: key })}
+                  className={`flex flex-col items-center gap-1.5 rounded-lg p-1.5 transition-all ${
+                    active ? 'ring-1 ring-white/20 bg-glass/40' : 'opacity-60 hover:opacity-100'
+                  }`}
+                >
+                  <div
+                    className="w-full rounded-md px-2 py-1.5 bg-secondary/60 border border-borderSubtle text-left"
+                    style={highlightContainerStyle(key, sample)}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="h-2 w-2 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: sample }}
+                      />
+                      <span
+                        className={`text-[10px] font-semibold truncate ${key === 'box' ? 'text-text' : ''}`}
+                        style={key === 'box' ? undefined : { color: sample }}
+                      >
+                        Banned
+                      </span>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[11px] ${active ? 'text-text font-medium' : 'text-textSecondary'}`}
+                  >
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </SettingsRow>
+        {MOD_LOG_CATEGORIES.map((c) => {
+          const current = mod.mod_log_colors?.[c.key] || c.defaultColor;
+          const overridden = !!mod.mod_log_colors?.[c.key];
+          return (
+            <SettingsRow key={c.key} title={c.label}>
+              <div className="flex items-center gap-2">
+                <Tooltip content={`${c.label} color`}>
+                <input
+                  type="color"
+                  value={current}
+                  onChange={(e) =>
+                    setMod({
+                      mod_log_colors: { ...(mod.mod_log_colors ?? {}), [c.key]: e.target.value },
+                    })
+                  }
+                  className="h-7 w-10 rounded cursor-pointer bg-transparent border border-borderSubtle"
+                />
+                </Tooltip>
+                {overridden && (
+                  <button
+                    onClick={() => {
+                      const next = { ...(mod.mod_log_colors ?? {}) };
+                      delete next[c.key];
+                      setMod({ mod_log_colors: next });
+                    }}
+                    className="text-[11px] text-textSecondary hover:text-text"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </SettingsRow>
+          );
+        })}
       </SettingsSection>
 
       <SettingsSection

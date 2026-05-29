@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { Settings, TwitchUser, TwitchStream, UserInfo, TwitchCategory, HypeTrainData, TwitchVideo, ModLogEvent } from '../types';
-import { trackActivity, isStreamlinkError, sendStreamlinkDiagnostics } from '../services/logService';
+import { trackActivity } from '../services/logService';
 import { Logger, setDiagnosticsEnabled } from '../utils/logger';
 import { qualitiesEquivalent } from '../utils/quality';
 import { upsertUser } from '../services/supabaseService';
@@ -161,6 +161,10 @@ interface AppState {
   badgesOverlayInitialPaintId: string | null;
   badgesOverlayInitialBadgeId: string | null;
   badgesOverlayInitialStreamNook: boolean;
+  // Generic deep-link target for tabs without a dedicated detail modal (Twitch,
+  // BetterTTV, Chat Clients): open the overlay on `tab` and filter to `query`
+  // (a badge title) so the clicked badge surfaces. Set by openBadgesWithTarget.
+  badgesOverlayInitialTarget: { tab: string; query?: string } | null;
   showWhispersOverlay: boolean;
   showDashboardOverlay: boolean;
   showStreamlinkMissing: boolean;
@@ -225,7 +229,7 @@ interface AppState {
   startStream: (channel: string, streamInfo?: TwitchStream, skipChatRefresh?: boolean) => Promise<void>;
   startOfflineChat: (channel: string, streamInfo?: TwitchStream) => Promise<void>;
   playMedia: (type: 'clip' | 'video', url: string, info: MediaInfo) => Promise<void>;
-  stopStream: () => Promise<void>;
+  stopStream: (options?: { preserveBackend?: boolean }) => Promise<void>;
   restartStream: () => Promise<void>;  // Restart current stream (stops and starts again)
   getAvailableQualities: () => Promise<string[]>;
   changeStreamQuality: (quality: string) => Promise<void>;
@@ -241,6 +245,7 @@ interface AppState {
   openBadgesWithPaint: (paintId: string) => void;
   openBadgesWithBadge: (badgeId: string) => void;
   openBadgesOnStreamNook: () => void;
+  openBadgesWithTarget: (target: { tab: string; query?: string }) => void;
   setShowWhispersOverlay: (show: boolean) => void;
   setShowDashboardOverlay: (show: boolean) => void;
   openWhisperWithUser: (user: { id: string; login: string; display_name: string; profile_image_url?: string }) => void;
@@ -252,7 +257,7 @@ interface AppState {
   toggleFavoriteStreamer: (userId: string) => Promise<void>;
   isFavoriteStreamer: (userId: string) => boolean;
   toggleHome: () => void;
-  exitStream: () => Promise<void>;
+  exitStream: (options?: { preserveBackend?: boolean }) => Promise<void>;
   // Navigation actions for deep linking
   setHomeActiveTab: (tab: HomeTab) => void;
   setHomeSelectedCategory: (category: TwitchCategory | null) => void;
@@ -278,7 +283,13 @@ interface AppState {
   resetWhisperImportState: () => void;
   // Mod Logs State
   modLogs: ModLogEvent[];
+  /** Channels whose persisted history has already been merged in this session (avoids re-loading). */
+  loadedModLogChannels: Set<string>;
   addModLog: (log: ModLogEvent) => void;
+  /** Merge a channel's persisted mod-log history from disk into the live list. */
+  loadModLogsForChannel: (channel: string) => Promise<void>;
+  /** Drop in-memory entries (and the load-guard) for any channel not in the active set. */
+  pruneModLogsToChannels: (activeChannels: string[]) => void;
   clearModLogs: () => void;
 }
 
@@ -296,29 +307,6 @@ let eventSubConnectionId = 0;
 // for the same data. Cache for 1 hour; refetch only after that.
 const WATCH_STREAKS_TTL_MS = 60 * 60 * 1000;
 let lastWatchStreaksFetchAt = 0;
-
-// Helper to save user context to localStorage for error reporting
-const saveUserContextToLocalStorage = (currentUser: TwitchUser | null, currentStream: TwitchStream | null) => {
-  try {
-    const context = {
-      currentUser: currentUser ? {
-        display_name: currentUser.display_name,
-        login: currentUser.login,
-        user_id: currentUser.user_id,
-      } : null,
-      currentStream: currentStream ? {
-        user_name: currentStream.user_name,
-        user_login: currentStream.user_login,
-        game_name: currentStream.game_name,
-        title: currentStream.title,
-      } : null,
-    };
-    localStorage.setItem('streamnook-app-state', JSON.stringify(context));
-  } catch {
-    // Ignore localStorage errors
-  }
-};
-
 
 export const useAppStore = create<AppState>((set, get) => ({
   settings: {} as Settings,
@@ -350,6 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   badgesOverlayInitialPaintId: null,
   badgesOverlayInitialBadgeId: null,
   badgesOverlayInitialStreamNook: false,
+  badgesOverlayInitialTarget: null,
   showWhispersOverlay: false,
   showDashboardOverlay: false,
   showStreamlinkMissing: false,
@@ -392,14 +381,110 @@ export const useAppStore = create<AppState>((set, get) => ({
   cachedTopGamesTimestamp: 0,
   chatRefreshKey: 0,
   modLogs: [],
-  addModLog: (log) => set((state) => {
-    Logger.debug(`[ModLogs] Adding new log: ${log.action} for ${log.target_user_name}`);
-    // Keep max 100 logs
-    const currentLogs = state.modLogs || [];
-    const newLogs = [log, ...currentLogs].slice(0, 100);
-    return { modLogs: newLogs };
+  loadedModLogChannels: new Set<string>(),
+  addModLog: (log) => {
+    const MOD_LOG_CAP = 300; // newest-first, in-memory ceiling across channels
+    // Decide the dedup outcome, then persist the FINAL entry so the on-disk
+    // per-channel history matches what's shown.
+    let toPersist: ModLogEvent | null = null;
+    set((state) => {
+      const currentLogs = state.modLogs || [];
+
+      // IRC (CLEARCHAT/CLEARMSG/NOTICE) and EventSub channel.moderate both report
+      // the same actions. IRC is universal but anonymized; EventSub carries the
+      // moderator identity. De-dupe so the feeds don't double-log, and let a
+      // richer EventSub entry upgrade a matching IRC one (or drop the IRC dup).
+      const DEDUP_MS = 5000;
+      const normAction = (a?: string) => {
+        const s = (a || '').toLowerCase();
+        return s === 'clear_chat' ? 'clear' : s;
+      };
+      const keyOf = (l: ModLogEvent) =>
+        `${(l.channel || '').toLowerCase()}|${normAction(l.action)}|${(l.target_user_name || '').toLowerCase()}`;
+      const newKey = keyOf(log);
+      const now = Date.now();
+      const dupIdx = currentLogs.findIndex(
+        (l) => keyOf(l) === newKey && now - new Date(l.timestamp).getTime() < DEDUP_MS,
+      );
+
+      if (dupIdx !== -1) {
+        if (log.source === 'eventsub' && currentLogs[dupIdx].source !== 'eventsub') {
+          // Upgrade the anonymized IRC entry with EventSub detail, keeping its slot + id.
+          // Preserve the message/reason the IRC entry captured (e.g. the timed-out
+          // user's last message, which channel.moderate doesn't carry) when the
+          // EventSub upgrade doesn't supply its own.
+          const merged = currentLogs.slice();
+          merged[dupIdx] = {
+            ...log,
+            id: currentLogs[dupIdx].id,
+            message: log.message ?? currentLogs[dupIdx].message,
+            reason: log.reason ?? currentLogs[dupIdx].reason,
+          };
+          toPersist = merged[dupIdx];
+          return { modLogs: merged };
+        }
+        // Existing entry is as-good-or-better — drop the duplicate, persist nothing.
+        return { modLogs: currentLogs };
+      }
+
+      toPersist = log;
+      return { modLogs: [log, ...currentLogs].slice(0, MOD_LOG_CAP) };
+    });
+
+    // Durably store for this channel (slim copy, no raw `details`). Fire and
+    // forget; the disk store dedups/replaces by id and caps per channel.
+    if (toPersist && (toPersist as ModLogEvent).channel) {
+      const slim: ModLogEvent = { ...(toPersist as ModLogEvent) };
+      delete slim.details; // raw payload isn't rendered; keep the stored copy lean
+      invoke('append_mod_log', { channel: slim.channel, entry: slim }).catch(() => {});
+    }
+  },
+  loadModLogsForChannel: async (channel) => {
+    const key = (channel || '').toLowerCase();
+    if (!key) return;
+    if (get().loadedModLogChannels.has(key)) return;
+    // Mark loaded up-front so a re-render doesn't kick off a duplicate load.
+    set((state) => ({ loadedModLogChannels: new Set(state.loadedModLogChannels).add(key) }));
+    try {
+      const entries = await invoke<ModLogEvent[]>('load_mod_logs', { channel: key });
+      if (!entries || entries.length === 0) return;
+      set((state) => {
+        const seen = new Set(state.modLogs.map((l) => l.id));
+        const fresh = entries.filter((e) => e && e.id && !seen.has(e.id));
+        if (fresh.length === 0) return { modLogs: state.modLogs };
+        const merged = [...state.modLogs, ...fresh]
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, 300);
+        return { modLogs: merged };
+      });
+    } catch (e) {
+      Logger.warn(`[ModLogs] Failed to load history for ${key}:`, e);
+    }
+  },
+  pruneModLogsToChannels: (activeChannels) => set((state) => {
+    const active = new Set(activeChannels.map((c) => c.toLowerCase()));
+    const modLogs = state.modLogs.filter((l) => l.channel && active.has(l.channel.toLowerCase()));
+    const loadedModLogChannels = new Set(
+      Array.from(state.loadedModLogChannels).filter((c) => active.has(c)),
+    );
+    // No-op if nothing changed, to avoid render churn on every channel-set tick.
+    if (
+      modLogs.length === state.modLogs.length &&
+      loadedModLogChannels.size === state.loadedModLogChannels.size
+    ) {
+      return {};
+    }
+    return { modLogs, loadedModLogChannels };
   }),
-  clearModLogs: () => set({ modLogs: [] }),
+  clearModLogs: () => {
+    const loaded = Array.from(get().loadedModLogChannels);
+    set({ modLogs: [], loadedModLogChannels: new Set<string>() });
+    // Make "Clear" durable: wipe the persisted history for the channels in view
+    // so it doesn't just reappear on the next load.
+    for (const channel of loaded) {
+      invoke('clear_mod_logs', { channel }).catch(() => {});
+    }
+  },
   triggerChatRefresh: () => set((state) => ({ chatRefreshKey: state.chatRefreshKey + 1 })),
   dropsSearchTerm: '',
   // Centralized drops cache
@@ -938,47 +1023,55 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ isLoading: false });
     }
   },
-  stopStream: async () => {
+  stopStream: async (options) => {
+    const preserveBackend = options?.preserveBackend ?? false;
     trackActivity('Stopped stream');
     try {
       await invoke('stop_stream');
-      await invoke('stop_chat');
 
-      // Stop drops monitoring
-      try {
-        await invoke('stop_drops_monitoring');
-        Logger.debug('🛑 Stopped drops monitoring');
-      } catch (e) {
-        Logger.warn('Could not stop drops monitoring:', e);
-      }
+      // preserveBackend: handing the channel off to MultiNook, which keeps
+      // watching it. Leave the chat bridge, EventSub, drops monitoring and
+      // active-channel registration running so MultiNook inherits them intact.
+      // Tearing the chat bridge down here would race MultiNook's re-acquire of
+      // the same channel and leave chat stuck "connecting" (the IRC connection
+      // would already be gone — hence the "IRC connection not established" PART).
+      if (!preserveBackend) {
+        await invoke('stop_chat');
 
-      const currentStream = get().currentStream;
-      if (currentStream?.user_id) {
-         invoke('unregister_active_channel', { channelId: currentStream.user_id }).catch(() => {});
-      }
+        // Stop drops monitoring
+        try {
+          await invoke('stop_drops_monitoring');
+          Logger.debug('🛑 Stopped drops monitoring');
+        } catch (e) {
+          Logger.warn('Could not stop drops monitoring:', e);
+        }
 
-      // Clean up EventSub listeners
-      Logger.debug('[EventSub] Cleaning up listeners on stop...');
-      for (const cleanup of eventSubListenerCleanup) {
-        cleanup();
-      }
-      eventSubListenerCleanup = [];
+        const currentStream = get().currentStream;
+        if (currentStream?.user_id) {
+           invoke('unregister_active_channel', { channelId: currentStream.user_id }).catch(() => {});
+        }
 
-      // Disconnect EventSub
-      try {
-        await invoke('disconnect_eventsub');
-        Logger.debug('🛑 Disconnected EventSub');
-      } catch (e) {
-        Logger.warn('Could not disconnect EventSub:', e);
+        // Clean up EventSub listeners
+        Logger.debug('[EventSub] Cleaning up listeners on stop...');
+        for (const cleanup of eventSubListenerCleanup) {
+          cleanup();
+        }
+        eventSubListenerCleanup = [];
+
+        // Disconnect EventSub
+        try {
+          await invoke('disconnect_eventsub');
+          Logger.debug('🛑 Disconnected EventSub');
+        } catch (e) {
+          Logger.warn('Could not disconnect EventSub:', e);
+        }
       }
 
       set({ streamUrl: null, activeQuality: null, currentStream: null, currentMediaType: null, currentHypeTrain: null, streamOriginCategory: null });
 
-      // Update user context for error reporting (stream stopped)
-      saveUserContextToLocalStorage(get().currentUser, null);
-
-      // Set idle Discord presence when not watching
-      if (get().settings.discord_rpc_enabled) {
+      // Set idle Discord presence when not watching (skip during a MultiNook
+      // handoff — MultiNook publishes its own presence for the grid).
+      if (!preserveBackend && get().settings.discord_rpc_enabled) {
         try {
           await invoke('set_idle_discord_presence');
         } catch (e) {
@@ -1191,9 +1284,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       set({ streamUrl: result.url, activeQuality: result.quality, currentStream: info, currentMediaType: 'live', originalMediaUrl: null, isHomeActive: false });
-
-      // Save user context for error reporting
-      saveUserContextToLocalStorage(get().currentUser, info);
 
       // Start chat first - only if authenticated and not skipping refresh
       if (get().isAuthenticated && !skipChatRefresh) {
@@ -1418,27 +1508,26 @@ export const useAppStore = create<AppState>((set, get) => ({
           });
           eventSubListenerCleanup.push(unlistenUpdate);
 
-          // Listen for moderation events via EventSub (High Fidelity)
-          const unlistenModerate = await listen<Record<string, unknown>>('eventsub://channel-moderate', (event) => {
-            const data = event.payload;
-            const action = data.action as string || 'unknown';
-            
-            // Extract the timestamp based on the action, or use a default
-            const eventDetails = data[action] as Record<string, unknown> | undefined;
-            const targetUserFallback = String(data.target_user_name || data.target_user_login || '');
-            
-            get().addModLog({
-              id: String(data.id || Date.now() + Math.random()),
-              action,
-              timestamp: new Date().toISOString(),
-              moderator_name: String(data.moderator_user_name || data.moderator_user_login || 'Unknown'),
-              target_user_name: eventDetails?.user_name as string || targetUserFallback,
-              reason: eventDetails?.reason as string || undefined,
-              duration: eventDetails?.expires_at ? undefined : ((eventDetails?.duration as number) ?? (eventDetails?.wait_time_seconds as number)),
-              details: data
-            });
+          // NOTE: the `eventsub://channel-moderate` listener is NOT here anymore.
+          // The mod view is now driven by the dedicated, chat-tied moderation
+          // socket, so its listener is mounted persistently (App.tsx for the main
+          // window, MultiChatWindow.tsx for popouts) rather than per-stream. See
+          // utils/applyModerateEvent.ts.
+
+          // Surface EventSub subscription failures (e.g. channel.moderate dying
+          // on a missing scope) instead of letting the mod-log pane sit silently
+          // empty. Only channel.moderate is user-facing here; the rest just log.
+          const unlistenSubFailed = await listen<{ type: string; status: number; error: string }>('eventsub://subscription-failed', (event) => {
+            const { type, status, error } = event.payload;
+            Logger.error(`[EventSub] Subscription failed: ${type} (HTTP ${status}): ${error}`);
+            if (type === 'channel.moderate') {
+              get().addToast(
+                `Mod logs unavailable: ${error || 'subscription failed'} (HTTP ${status})`,
+                'warning'
+              );
+            }
           });
-          eventSubListenerCleanup.push(unlistenModerate);
+          eventSubListenerCleanup.push(unlistenSubFailed);
 
           // Start Hype Train GQL polling (works for any channel, no moderator access needed)
           // Adaptive polling: 15s when idle, 5s when train active
@@ -1530,14 +1619,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
       Logger.error('Failed to start stream:', errorMessage);
-
-      // Check if this is a streamlink-related error and send diagnostics
-      if (isStreamlinkError(errorMessage)) {
-        Logger.debug('[Stream] Streamlink error detected, sending diagnostics to Discord...');
-        sendStreamlinkDiagnostics(errorMessage).catch(err => {
-          Logger.warn('[Stream] Failed to send streamlink diagnostics:', err);
-        });
-      }
 
       // Show toast error to user
       get().addToast(`Failed to start stream: ${errorMessage}`, 'error');
@@ -1697,19 +1778,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       badgesOverlayInitialPaintId: show ? get().badgesOverlayInitialPaintId : null,
       badgesOverlayInitialBadgeId: show ? get().badgesOverlayInitialBadgeId : null,
       badgesOverlayInitialStreamNook: show ? get().badgesOverlayInitialStreamNook : false,
+      badgesOverlayInitialTarget: show ? get().badgesOverlayInitialTarget : null,
     });
   },
   openBadgesWithPaint: (paintId: string) => {
     trackActivity('Opened Badges with Paint');
-    set({ showBadgesOverlay: true, badgesOverlayInitialPaintId: paintId, badgesOverlayInitialBadgeId: null, badgesOverlayInitialStreamNook: false });
+    set({ showBadgesOverlay: true, badgesOverlayInitialPaintId: paintId, badgesOverlayInitialBadgeId: null, badgesOverlayInitialStreamNook: false, badgesOverlayInitialTarget: null });
   },
   openBadgesWithBadge: (badgeId: string) => {
     trackActivity('Opened Badges with Badge');
-    set({ showBadgesOverlay: true, badgesOverlayInitialBadgeId: badgeId, badgesOverlayInitialPaintId: null, badgesOverlayInitialStreamNook: false });
+    set({ showBadgesOverlay: true, badgesOverlayInitialBadgeId: badgeId, badgesOverlayInitialPaintId: null, badgesOverlayInitialStreamNook: false, badgesOverlayInitialTarget: null });
   },
   openBadgesOnStreamNook: () => {
     trackActivity('Opened Badges on StreamNook');
-    set({ showBadgesOverlay: true, badgesOverlayInitialStreamNook: true, badgesOverlayInitialPaintId: null, badgesOverlayInitialBadgeId: null });
+    set({ showBadgesOverlay: true, badgesOverlayInitialStreamNook: true, badgesOverlayInitialPaintId: null, badgesOverlayInitialBadgeId: null, badgesOverlayInitialTarget: null });
+  },
+  openBadgesWithTarget: (target: { tab: string; query?: string }) => {
+    trackActivity('Opened Badges with Target');
+    set({ showBadgesOverlay: true, badgesOverlayInitialTarget: target, badgesOverlayInitialPaintId: null, badgesOverlayInitialBadgeId: null, badgesOverlayInitialStreamNook: false });
   },
   setShowWhispersOverlay: (show: boolean) => {
     if (show) trackActivity('Opened Whispers');
@@ -1871,9 +1957,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       await invoke('twitch_logout');
       set({ isAuthenticated: false, currentUser: null, followedStreams: [] });
 
-      // Clear user context for error reporting
-      saveUserContextToLocalStorage(null, get().currentStream);
-
       get().addToast('Successfully logged out from Twitch', 'success');
     } catch (e) {
       Logger.error('Logout failed:', e);
@@ -1929,9 +2012,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
 
       set({ isAuthenticated: true, currentUser: user });
-
-      // Save user context for error reporting
-      saveUserContextToLocalStorage(user, get().currentStream);
 
       // Track user in Supabase for analytics (only on initial login, not periodic checks)
       if (!wasAuthenticated) {
@@ -2052,15 +2132,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ isHomeActive: newHomeActive });
   },
 
-  exitStream: async () => {
+  exitStream: async (options) => {
     trackActivity('Exited stream');
     const state = get();
     // Exit theater mode if active so window restores to normal size
     if (state.isTheaterMode) {
       state.toggleTheaterMode();
     }
-    await state.stopStream();
-    set({ isHomeActive: true, streamOriginCategory: null });
+    await state.stopStream(options);
+    // During a MultiNook handoff the grid is already on screen — don't raise the
+    // Home view on top of it. Otherwise return to Home as usual.
+    if (options?.preserveBackend) {
+      set({ streamOriginCategory: null });
+    } else {
+      set({ isHomeActive: true, streamOriginCategory: null });
+    }
   },
 
   // Navigation actions for deep linking

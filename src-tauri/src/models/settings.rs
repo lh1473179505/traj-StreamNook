@@ -325,6 +325,10 @@ pub struct Settings {
     pub multi_nook_slots: Vec<MultiNookSlot>,
     #[serde(default)]
     pub multi_nook_chat_hidden: bool,
+    /// Whether the Moderator Logs pane is shown. Persisted so it survives app
+    /// restarts and settings reloads instead of resetting to off each session.
+    #[serde(default)]
+    pub show_mod_logs: bool,
 }
 
 fn default_theme() -> String {
@@ -373,6 +377,7 @@ impl Default for Settings {
             error_reporting_enabled: true, // Diagnostics enabled by default
             multi_nook_slots: Vec::new(),
             multi_nook_chat_hidden: false,
+            show_mod_logs: false,
         }
     }
 }

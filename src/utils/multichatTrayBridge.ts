@@ -158,6 +158,13 @@ if (!isPopout && typeof window !== 'undefined') {
         useAppStore.getState().openBadgesOnStreamNook();
       });
 
+      await listen<{ tab: string; query?: string }>('open-badges-with-target', async (event) => {
+        Logger.debug('[TrayBridge] open-badges-with-target received', event.payload);
+        await showAndFocusMain();
+        const { useAppStore } = await import('../stores/AppStore');
+        useAppStore.getState().openBadgesWithTarget(event.payload);
+      });
+
       // Restore-to-main flow: popout asks main to show itself + start watching
       // a channel. Used by:
       //   - Restore-to-main button (single-tab popouts) — popout closes itself

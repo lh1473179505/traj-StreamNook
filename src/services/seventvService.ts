@@ -610,6 +610,18 @@ export async function getUserCosmetics(twitchId: string): Promise<UserCosmeticsR
   return request;
 }
 
+/**
+ * Drop this user's entry from the low-level 7TV cosmetics cache so the next
+ * getUserCosmetics call genuinely re-hits the API. The cosmeticsCache-layer
+ * invalidate does NOT reach this map, so a poisoned success-empty (e.g. an
+ * app-mount prefetch that raced 7TV's warmup, cached hardFail=false for the
+ * full CACHE_DURATION) would otherwise keep being served even after a
+ * "force refresh". Pairs with cosmeticsCache.forceRefreshCosmetics.
+ */
+export function invalidateUserCosmeticsCache(twitchId: string): void {
+  userCache.delete(twitchId);
+}
+
 // Legacy function for backwards compatibility — unwraps to the historical
 // `UserCosmeticsResponse | null` shape (null = hard failure).
 export async function fetch7TVUserData(twitchUserId: string): Promise<UserCosmeticsResponse | null> {

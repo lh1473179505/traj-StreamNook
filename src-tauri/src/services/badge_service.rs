@@ -175,10 +175,11 @@ pub struct UserBadge {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-#[allow(clippy::upper_case_acronyms)] // FFZ is an established acronym (FrankerFaceZ)
+#[allow(clippy::upper_case_acronyms)] // FFZ / BTTV are established acronyms (FrankerFaceZ / BetterTTV)
 pub enum BadgeProvider {
     Twitch,
     FFZ,
+    BTTV,
     Chatterino,
     Homies,
     Chatsen,
@@ -231,6 +232,26 @@ struct FFZBadge {
     title: Option<String>,
     name: Option<String>,
     urls: HashMap<String, String>,
+}
+
+// BetterTTV: GET https://api.betterttv.net/3/cached/badges (bare JSON array).
+// One entry PER USER (not per distinct badge): `provider_id` is the holder's
+// Twitch user id, and the nested `badge` carries the single SVG image plus its
+// description (which doubles as the title). The feed is small (~160 entries
+// across only 4 distinct badge types: Translator, Emote Approver, NightDev
+// Developer, Support Volunteer), so the gallery's (provider, title) dedupe
+// collapses it to one tile per type.
+#[derive(Debug, Clone, Deserialize)]
+struct BttvBadge {
+    #[serde(rename = "providerId")]
+    provider_id: String,
+    badge: BttvBadgeInner,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BttvBadgeInner {
+    description: String,
+    svg: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -337,6 +358,7 @@ pub struct HelixBadgeVersion {
 
 struct ThirdPartyCache {
     ffz: Option<FFZBadgesResponse>,
+    bttv: Option<Vec<BttvBadge>>,
     chatterino: Option<ChatterinoBadgesResponse>,
     homies: Option<HomiesBadgesResponse>,
     chatsen: Option<Vec<ChatsenBadge>>,
@@ -360,6 +382,7 @@ impl BadgeCache {
             channel_badges: LruCache::new(NonZeroUsize::new(50).unwrap()),
             third_party: ThirdPartyCache {
                 ffz: None,
+                bttv: None,
                 chatterino: None,
                 homies: None,
                 chatsen: None,
@@ -507,6 +530,22 @@ impl BadgeService {
             None
         };
 
+        // Fetch BetterTTV badges (bare array; one entry per user).
+        let bttv_result = self
+            .http_client
+            .get("https://api.betterttv.net/3/cached/badges")
+            .send()
+            .await;
+        let bttv_badges = if let Ok(response) = bttv_result {
+            if response.status().is_success() {
+                response.json::<Vec<BttvBadge>>().await.ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Fetch Chatterino badges
         let chatterino_result = self
             .http_client
@@ -591,6 +630,7 @@ impl BadgeService {
         // Update cache
         let mut cache = self.cache.write().await;
         cache.third_party.ffz = ffz_badges;
+        cache.third_party.bttv = bttv_badges;
         cache.third_party.chatterino = chatterino_badges;
         cache.third_party.homies = homies_badges;
         cache.third_party.chatsen = chatsen_badges;
@@ -1175,6 +1215,30 @@ impl BadgeService {
             }
         }
 
+        // BetterTTV badges. One feed entry per holder; `provider_id` is the
+        // Twitch user id and the SVG is the only image (no size variants).
+        if let Some(bttv) = &cache.third_party.bttv {
+            for badge in bttv {
+                if badge.provider_id == user_id {
+                    badges.push(UserBadge {
+                        badge_info: BadgeInfo {
+                            id: format!("bttv-{}", badge.badge.description),
+                            set_id: "bttv".to_string(),
+                            version: "1".to_string(),
+                            title: badge.badge.description.clone(),
+                            description: String::new(),
+                            image_1x: badge.badge.svg.clone(),
+                            image_2x: badge.badge.svg.clone(),
+                            image_4x: badge.badge.svg.clone(),
+                            click_action: None,
+                            click_url: Some("https://betterttv.com".to_string()),
+                        },
+                        provider: BadgeProvider::BTTV,
+                    });
+                }
+            }
+        }
+
         // Chatterino badges
         if let Some(chatterino) = &cache.third_party.chatterino {
             for badge in &chatterino.badges {
@@ -1373,6 +1437,28 @@ impl BadgeService {
             }
         }
 
+        // BetterTTV. One entry per holder; the (provider, title) dedupe below
+        // collapses the ~160 entries into one tile per distinct badge type and
+        // sums the holder counts.
+        if let Some(bttv) = &cache.third_party.bttv {
+            for badge in bttv {
+                let owned = viewer_user_id
+                    .map(|uid| badge.provider_id == uid)
+                    .unwrap_or(false);
+                out.push(ThirdPartyGalleryBadge {
+                    id: format!("bttv-{}", badge.badge.description),
+                    provider: BadgeProvider::BTTV,
+                    title: badge.badge.description.clone(),
+                    image_1x: badge.badge.svg.clone(),
+                    image_2x: badge.badge.svg.clone(),
+                    image_4x: badge.badge.svg.clone(),
+                    user_count: 1,
+                    owned,
+                    click_url: Some("https://betterttv.com".to_string()),
+                });
+            }
+        }
+
         // Chatterino
         if let Some(chatterino) = &cache.third_party.chatterino {
             for badge in &chatterino.badges {
@@ -1553,6 +1639,7 @@ impl BadgeService {
         cache.global_badges = None;
         cache.channel_badges.clear();
         cache.third_party.ffz = None;
+        cache.third_party.bttv = None;
         cache.third_party.chatterino = None;
         cache.third_party.homies = None;
         cache.third_party.chatsen = None;

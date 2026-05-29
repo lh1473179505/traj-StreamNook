@@ -34,6 +34,7 @@ import Sidebar from './components/Sidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import { StreamContextMenu } from './components/StreamContextMenu';
 import { listen } from '@tauri-apps/api/event';
+import { applyModerateEvent } from './utils/applyModerateEvent';
 import { handleSeventvEmoteSetUpdate, handleSeventvCosmeticUpdate, type EmoteSetUpdatePayload, type CosmeticUpdatePayload } from './services/seventvEventApi';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
@@ -83,7 +84,7 @@ function App() {
       unlisten?.();
     };
   }, []);
-  const { loadSettings, chatPlacement, isLoading, streamUrl, currentMediaType, checkAuthStatus, addToast, showBadgesOverlay, setShowBadgesOverlay, badgesOverlayInitialPaintId, badgesOverlayInitialBadgeId, badgesOverlayInitialStreamNook, showWhispersOverlay, setShowWhispersOverlay, settings, updateSettings, isTheaterMode, isHomeActive, loadActiveDropsCache, profileModalUser, setProfileModalUser } = useAppStore();
+  const { loadSettings, chatPlacement, isLoading, streamUrl, currentMediaType, checkAuthStatus, addToast, showBadgesOverlay, setShowBadgesOverlay, badgesOverlayInitialPaintId, badgesOverlayInitialBadgeId, badgesOverlayInitialStreamNook, badgesOverlayInitialTarget, showWhispersOverlay, setShowWhispersOverlay, settings, updateSettings, isTheaterMode, isHomeActive, loadActiveDropsCache, profileModalUser, setProfileModalUser, openSettings } = useAppStore();
   // Channels owned by StreamNook MultiChat popouts. When the currently-watched
   // channel is in here, the in-app chat panel collapses so the popout becomes
   // the sole chat surface — no duplicate chat across windows.
@@ -391,13 +392,20 @@ function App() {
       const { currentUser, isAuthenticated } = useAppStore.getState();
       if (isAuthenticated && currentUser?.user_id) {
         Logger.debug('[App] Pre-fetching cosmetics for current user...');
-        const { getCosmeticsWithFallback, getThirdPartyBadgesWithFallback } = await import('./services/cosmeticsCache');
-        Promise.all([
-          getCosmeticsWithFallback(currentUser.user_id),
-          getThirdPartyBadgesWithFallback(currentUser.user_id)
-        ]).catch((err: Error) =>
-          Logger.error('[App] Failed to pre-fetch user cosmetics:', err)
-        );
+        const { forceRefreshCosmetics, getFullProfileWithFallback } = await import('./services/cosmeticsCache');
+        // Resolve YOUR cosmetics cleanly first (deep refresh clears anything cached
+        // empty while 7TV was still warming at launch), THEN assemble + cache your
+        // FULL profile — Twitch badges + 7TV paint/badges + third-party badges — so
+        // opening Profile Settings paints instantly from a warm cache instead of
+        // re-fetching every cosmetic and every badge provider on open.
+        const selfLogin = currentUser.login || currentUser.username;
+        forceRefreshCosmetics(currentUser.user_id)
+          .then(() =>
+            getFullProfileWithFallback(currentUser.user_id, selfLogin, currentUser.user_id, selfLogin),
+          )
+          .catch((err: Error) =>
+            Logger.error('[App] Failed to pre-fetch user profile:', err),
+          );
       }
 
       // Set up event listeners for drops and channel points
@@ -424,6 +432,14 @@ function App() {
       // same EventAPI socket. Re-resolves via GQL into the shared cosmetics cache.
       await addListener<CosmeticUpdatePayload>('7tv://cosmetic-update', (event) => {
         void handleSeventvCosmeticUpdate(event.payload);
+      });
+
+      // Moderator view: channel.moderate events from the dedicated, chat-tied
+      // moderation socket (Rust). Enriches the mod log with the acting
+      // moderator's identity. Mounted here (not per-stream) so it works in
+      // offline chat and MultiNook with no stream open.
+      await addListener<Record<string, unknown>>('eventsub://channel-moderate', (event) => {
+        applyModerateEvent(event.payload);
       });
 
       await addListener<{ points_earned: number }>('channel-points-claimed', (event) => {
@@ -1333,14 +1349,23 @@ function App() {
                       style={{ overflow: 'hidden' }}
                     >
                       <Tooltip content={chatPlacement === 'right' ? 'Drag to resize chat width' : 'Drag to resize chat height'} delay={100}>
+                        {/* 4px invisible grab area keeps dragging easy; the
+                            visible separator is a single 1px hairline. */}
                         <div
                           onMouseDown={handleMouseDown}
                           className={`
+                            group flex items-center justify-center flex-shrink-0 z-10
                             ${chatPlacement === 'right' ? 'w-1 cursor-ew-resize' : 'h-1 cursor-ns-resize'}
-                            bg-borderLight hover:bg-accent transition-colors flex-shrink-0 z-10
-                            ${isResizing ? 'bg-accent' : ''}
                           `}
-                        />
+                        >
+                          <div
+                            className={`
+                              ${chatPlacement === 'right' ? 'w-px h-full' : 'h-px w-full'}
+                              bg-borderLight group-hover:bg-accent transition-colors
+                              ${isResizing ? 'bg-accent' : ''}
+                            `}
+                          />
+                        </div>
                       </Tooltip>
                       <div
                         className="flex-shrink-0 flex flex-col h-full overflow-hidden bg-background"
@@ -1362,20 +1387,30 @@ function App() {
                   {settings.show_mod_logs && (
                     <motion.div
                       initial={{ opacity: 0, [chatPlacement === 'right' ? 'height' : 'width']: 0 }}
-                      animate={{ opacity: 1, [chatPlacement === 'right' ? 'height' : 'width']: 'auto' }}
+                      animate={{ opacity: 1, [chatPlacement === 'right' ? 'height' : 'width']: modLogsSize + 4 }}
                       exit={{ opacity: 0, [chatPlacement === 'right' ? 'height' : 'width']: 0 }}
+                      transition={isResizingModLogs ? { duration: 0 } : { type: 'spring', stiffness: 350, damping: 30 }}
                       className={`flex ${chatPlacement === 'right' ? 'flex-col' : 'flex-row'} flex-shrink-0 relative overflow-hidden`}
                     >
                       {/* Resizer */}
                       <Tooltip content={chatPlacement === 'right' ? 'Drag to resize mod logs height' : 'Drag to resize mod logs width'} delay={100}>
+                        {/* 4px invisible grab area keeps dragging easy; the
+                            visible separator is a single 1px hairline. */}
                         <div
                           onMouseDown={handleModLogsMouseDown}
                           className={`
+                            group flex items-center justify-center flex-shrink-0 z-10
                             ${chatPlacement === 'right' ? 'h-1 cursor-ns-resize w-full' : 'w-1 cursor-ew-resize h-full'}
-                            bg-borderLight hover:bg-accent transition-colors flex-shrink-0 z-10
-                            ${isResizingModLogs ? 'bg-accent' : ''}
                           `}
-                        />
+                        >
+                          <div
+                            className={`
+                              ${chatPlacement === 'right' ? 'h-px w-full' : 'w-px h-full'}
+                              bg-borderLight group-hover:bg-accent transition-colors
+                              ${isResizingModLogs ? 'bg-accent' : ''}
+                            `}
+                          />
+                        </div>
                       </Tooltip>
                       <div 
                         className="bg-background overflow-hidden relative"
@@ -1383,7 +1418,7 @@ function App() {
                           [chatPlacement === 'right' ? 'height' : 'width']: `${modLogsSize}px`
                         }}
                       >
-                         <ModLogsWidget />
+                         <ModLogsWidget onOpenSettings={() => openSettings('Moderation')} />
                       </div>
                     </motion.div>
                   )}
@@ -1411,6 +1446,7 @@ function App() {
             initialPaintId={badgesOverlayInitialPaintId}
             initialBadgeId={badgesOverlayInitialBadgeId}
             initialStreamNook={badgesOverlayInitialStreamNook}
+            initialTarget={badgesOverlayInitialTarget}
           />
         )}
       </AnimatePresence>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Tooltip } from './ui/Tooltip';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
@@ -289,12 +290,13 @@ const StreamlinkMissingDialog = () => {
                                                                         </span>
                                                                     )}
                                                                 </div>
+                                                                <Tooltip content={install.path}>
                                                                 <p
                                                                     className="mt-0.5 truncate font-mono text-[11px] text-textMuted"
-                                                                    title={install.path}
                                                                 >
                                                                     {install.path}
                                                                 </p>
+                                                                </Tooltip>
                                                             </div>
                                                         </div>
                                                         <div
@@ -344,12 +346,13 @@ const StreamlinkMissingDialog = () => {
                                                     className="text-textPrimary"
                                                 />
                                             </span>
+                                            <Tooltip content={selectedPath!}>
                                             <p
                                                 className="min-w-0 flex-1 truncate font-mono text-[12px] text-textPrimary"
-                                                title={selectedPath!}
                                             >
                                                 {selectedPath}
                                             </p>
+                                            </Tooltip>
                                             <div className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 border-accent">
                                                 <div className="h-2 w-2 rounded-full bg-accent" />
                                             </div>

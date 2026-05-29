@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { EmoteTabCandidate } from '../../utils/chatInputWord';
+import { Tooltip } from '../ui/Tooltip';
 
 interface EmoteAutocompleteProps {
   current: EmoteTabCandidate;
@@ -29,7 +30,6 @@ const EmoteThumb: React.FC<{ tok: EmoteTabCandidate; size: number }> = ({ tok, s
   if (!emote) {
     return (
       <div
-        title={tok.name}
         className="flex items-center justify-center px-2 text-textSecondary text-[11px] font-semibold"
         style={{ height: size }}
       >
@@ -41,10 +41,10 @@ const EmoteThumb: React.FC<{ tok: EmoteTabCandidate; size: number }> = ({ tok, s
     ? `https://cdn.7tv.app/emote/${emote.id}/2x.avif`
     : (emote.localUrl || emote.url);
   return (
+    <Tooltip content={emote.name}>
     <img
       src={src}
       alt={emote.name}
-      title={emote.name}
       loading="lazy"
       draggable={false}
       style={{ maxHeight: size, maxWidth: size }}
@@ -58,6 +58,7 @@ const EmoteThumb: React.FC<{ tok: EmoteTabCandidate; size: number }> = ({ tok, s
         if (emote.localUrl && t.src !== emote.url) t.src = emote.url;
       }}
     />
+    </Tooltip>
   );
 };
 
@@ -100,7 +101,6 @@ const EmoteAutocomplete: React.FC<EmoteAutocompleteProps> = ({ current, backward
 
         <div
           className="px-3 py-1.5 rounded-md flex items-center justify-center bg-white/10 border border-white/15 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
-          title={current.name}
         >
           <EmoteThumb tok={current} size={52} />
         </div>

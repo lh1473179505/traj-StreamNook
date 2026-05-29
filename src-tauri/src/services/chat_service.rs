@@ -2,8 +2,22 @@
 // Simply re-exports the IrcService as ChatService for backwards compatibility
 
 use crate::models::settings::AppState;
+use crate::services::account_store::AccountStore;
 use crate::services::irc_service::IrcService;
+use crate::services::twitch_service::TwitchService;
 use anyhow::Result;
+
+/// Result of a send. `message_id` is Twitch's authoritative id when the message
+/// went out over Helix (so the optimistic copy can be stamped and deleted
+/// without waiting on the IRC echo); it is None on the IRC fallback path
+/// (slash-commands, or Helix unavailable). `is_sent` is false when Twitch
+/// dropped the message (e.g. AutoMod), with `drop_reason` set.
+#[derive(serde::Serialize)]
+pub struct SendResult {
+    pub message_id: Option<String>,
+    pub is_sent: bool,
+    pub drop_reason: Option<String>,
+}
 
 pub struct ChatService;
 
@@ -16,8 +30,116 @@ impl ChatService {
         message: &str,
         reply_parent_msg_id: Option<&str>,
         target_channel: Option<&str>,
-    ) -> Result<()> {
-        IrcService::send_message(message, reply_parent_msg_id, target_channel).await
+        broadcaster_id: Option<&str>,
+        sender_id: Option<&str>,
+        sender_account_id: Option<&str>,
+    ) -> Result<SendResult> {
+        // Slash-commands (/ban, /me, /timeout, ...) MUST go over IRC so Twitch
+        // executes them. Helix Send Chat Message would post them as literal text.
+        let is_command = message.trim_start().starts_with('/');
+
+        // Is this being sent from a NON-primary (secondary) account? The primary
+        // owns the IRC connection and the cached token; secondaries send via Helix
+        // with their own token only.
+        let primary_id = AccountStore::primary().map(|p| p.user_id);
+        let is_secondary = match (sender_account_id, primary_id.as_deref()) {
+            (Some(acc), Some(pid)) => acc != pid,
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        if is_secondary {
+            let account_id = sender_account_id.unwrap();
+
+            // Slash-commands need the account's own IRC connection, which only the
+            // primary has. Don't silently post them as literal text from an alt.
+            if is_command {
+                return Ok(SendResult {
+                    message_id: None,
+                    is_sent: false,
+                    drop_reason: Some(
+                        "Slash commands can only be sent from your main account.".to_string(),
+                    ),
+                });
+            }
+
+            let bid = broadcaster_id.ok_or_else(|| {
+                anyhow::anyhow!("broadcaster_id required to send from a secondary account")
+            })?;
+            // The account id IS the Twitch user id; prefer an explicit sender_id.
+            let sid = sender_id.unwrap_or(account_id);
+            let token = AccountStore::get_token_for(account_id).await?;
+
+            return match TwitchService::send_chat_message_helix_with_token(
+                &token,
+                bid,
+                sid,
+                message,
+                reply_parent_msg_id,
+            )
+            .await
+            {
+                Ok((message_id, true, _)) => Ok(SendResult {
+                    message_id,
+                    is_sent: true,
+                    drop_reason: None,
+                }),
+                Ok((_, false, drop_reason)) => Ok(SendResult {
+                    message_id: None,
+                    is_sent: false,
+                    drop_reason,
+                }),
+                // No IRC fallback for secondaries: the IRC connection belongs to the
+                // primary, so falling back would send the message from the wrong
+                // account. Surface the failure instead.
+                Err(e) => Ok(SendResult {
+                    message_id: None,
+                    is_sent: false,
+                    drop_reason: Some(format!("Could not send from this account: {}", e)),
+                }),
+            };
+        }
+
+        // ----- PRIMARY path (unchanged behavior) -----
+        if !is_command {
+            if let (Some(bid), Some(sid)) = (broadcaster_id, sender_id) {
+                match TwitchService::send_chat_message_helix(bid, sid, message, reply_parent_msg_id)
+                    .await
+                {
+                    Ok((message_id, true, _)) => {
+                        // Authoritative id straight from the send; deletes no
+                        // longer depend on catching the IRC echo.
+                        return Ok(SendResult {
+                            message_id,
+                            is_sent: true,
+                            drop_reason: None,
+                        });
+                    }
+                    Ok((_, false, drop_reason)) => {
+                        // Twitch accepted the request but dropped the message
+                        // (AutoMod, etc.). Report it; do NOT also send over IRC.
+                        return Ok(SendResult {
+                            message_id: None,
+                            is_sent: false,
+                            drop_reason,
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("[Chat] Helix send failed ({}); falling back to IRC", e);
+                        // fall through to the IRC path below
+                    }
+                }
+            }
+        }
+
+        // IRC path: slash-commands, or Helix unavailable / errored. No id here, so
+        // the optimistic copy keeps its local id and relies on echo matching.
+        IrcService::send_message(message, reply_parent_msg_id, target_channel).await?;
+        Ok(SendResult {
+            message_id: None,
+            is_sent: true,
+            drop_reason: None,
+        })
     }
 
     pub async fn stop() -> Result<()> {

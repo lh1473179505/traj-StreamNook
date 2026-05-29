@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, Users, MessageSquare, Clock, Slash, Hash } from 'lucide-react';
+import { Shield, Users, MessageSquare, Clock, Slash, Hash, Settings, ChevronRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Tooltip } from '../ui/Tooltip';
 import { GlassSelect } from '../ui/GlassSelect';
@@ -19,7 +19,7 @@ interface ModeratorMenuProps {
 }
 
 const ModeratorMenu: React.FC<ModeratorMenuProps> = ({ broadcasterId, roomState }) => {
-  const { settings, updateSettings } = useAppStore();
+  const { settings, updateSettings, openSettings } = useAppStore();
   const [isOpen, setIsOpen] = useState(false);
   const [isConfirmingClear, setIsConfirmingClear] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -216,6 +216,18 @@ const ModeratorMenu: React.FC<ModeratorMenuProps> = ({ broadcasterId, roomState 
                 }}
                 disabled={false}
               />
+              <button
+                onClick={() => { openSettings('Moderation'); setIsOpen(false); }}
+                className="w-full text-left px-2.5 py-2 rounded-md flex items-center justify-between hover:bg-white/5 transition-colors group"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="flex items-center justify-center text-white/40 group-hover:text-accent transition-colors">
+                    <Settings size={14} />
+                  </div>
+                  <span className="text-sm text-white/70 group-hover:text-white">Mod Log Settings</span>
+                </div>
+                <ChevronRight size={14} className="text-white/30 group-hover:text-white/60" />
+              </button>
             </div>
           </div>
 

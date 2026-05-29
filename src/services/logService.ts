@@ -48,7 +48,7 @@ const forwardToRust = async (level: LogLevel, args: unknown[]): Promise<void> =>
 };
 
 // Initialize the log capture by wrapping console methods
-// Forwards logs to Rust backend for storage and Discord webhook handling
+// Forwards warnings/errors to the Rust backend for local storage and crash logging
 export const initLogCapture = (): void => {
     console.log = (...args: unknown[]) => {
         // Don't forward regular logs to backend - only WARN and ERROR are meaningful for debugging
@@ -269,17 +269,8 @@ export const isStreamlinkError = (errorMessage: string): boolean => {
     return STREAMLINK_ERROR_PATTERNS.some(pattern => pattern.test(errorMessage));
 };
 
-// Streamlink diagnostics - now just logs an error since diagnostics are handled by Rust backend
-export const sendStreamlinkDiagnostics = async (errorMessage: string): Promise<void> => {
-    // This function is kept for compatibility but the actual diagnostics
-    // are now handled automatically by the Rust backend when errors are logged
-    originalConsole.log('[LogService] Streamlink error detected:', errorMessage);
-    originalConsole.log('[LogService] Error will be automatically reported to Discord by Rust backend');
-};
-
-// NOTE: Discord webhook functionality is now handled entirely in the Rust backend.
-// Errors are automatically sent to Discord via background tasks with proper
-// rate limiting and batching.
+// Errors logged via console.error are captured by the Rust backend and written
+// to a local crash log only. Nothing is sent off the user's machine.
 
 export default {
     initLogCapture,
@@ -294,5 +285,4 @@ export default {
     copyBugReportToClipboard,
     saveBugReportToFile,
     isStreamlinkError,
-    sendStreamlinkDiagnostics,
 };

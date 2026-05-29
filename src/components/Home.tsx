@@ -199,6 +199,49 @@ const MultiNookToggle = () => {
     );
 };
 
+// Top-nav entry point for the MultiChat popout, sitting beside MultiNook so the
+// two "multi" workspaces live together. Clicking opens the popout window — or
+// focuses it if one's already open — via openMultiChatWindow with no channel
+// (which seeds an empty window, or restores its previous tabs). The count badge
+// mirrors MultiNook's: it shows how many channels are currently popped out,
+// which main tracks through the `channelsInPopouts` aggregate the popout
+// broadcasts. No outer glow on the active state (no-glow aesthetic); the badge
+// uses the approved soft-shadow notification recipe.
+const MultiChatButton = () => {
+    const channelsInPopouts = useAppStore((s) => s.channelsInPopouts);
+    const count = channelsInPopouts.size;
+    const active = count > 0;
+
+    const handleOpen = async () => {
+        try {
+            const { openMultiChatWindow } = await import('../utils/multichatWindow');
+            await openMultiChatWindow({});
+        } catch (err) {
+            Logger.error('[Home] openMultiChatWindow failed:', err);
+        }
+    };
+
+    return (
+        <Tooltip content="Open MultiChat" side="bottom">
+            <button
+                onClick={handleOpen}
+                className={`relative px-3 py-1.5 text-sm font-medium rounded-lg transition-all whitespace-nowrap mr-0.5 ${
+                    active
+                        ? 'glass-button text-accent'
+                        : 'text-textSecondary hover:text-textPrimary'
+                }`}
+            >
+                MultiChat
+                {count > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full glass-button !bg-accent/30 text-[9px] font-extrabold text-white !shadow-[0_2px_10px_rgba(var(--color-accent-rgb),0.35),inset_0_1px_rgba(255,255,255,0.2)] z-50">
+                        {count}
+                    </span>
+                )}
+            </button>
+        </Tooltip>
+    );
+};
+
 const QuickAddButton = ({ stream }: { stream: TwitchStream }) => {
     const { addSlot, slots, triggerAddAnimation } = usemultiNookStore();
     const [rotation, setRotation] = useState(0); 
@@ -1468,6 +1511,7 @@ const Home = () => {
                         <LayoutGroup>
                         <div className={`flex items-center gap-1 transition-opacity duration-300 ${isSearchExpanded ? 'opacity-0' : 'opacity-100'}`}>
                             <MultiNookToggle />
+                            <MultiChatButton />
                             <div className="border-l border-borderSubtle h-5 mx-0.5" />
                             {isAuthenticated && (
                                 <button

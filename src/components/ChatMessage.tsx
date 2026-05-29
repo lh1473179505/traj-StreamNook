@@ -251,6 +251,11 @@ const chatMessageAreEqual = (prevProps: ChatMessageProps, nextProps: ChatMessage
   return true;
 };
 
+// Stable empty reference for the third-party badge read below, so the zustand
+// selector returns the same array identity for every non-member chatter (a
+// fresh [] each render would re-render every row on any store change).
+const EMPTY_THIRD_PARTY: ThirdPartyBadgeType[] = [];
+
 // Memoized ChatMessage component to prevent unnecessary re-renders
 // This is critical for preventing animation restarts when new messages arrive
 const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, onUsernameClick, onReplyClick, isHighlighted = false, moderationContext = null, onEmoteRightClick, onMessageCopy, onUsernameRightClick, onBadgeClick, emotes, isModerator = false, broadcasterId }: ChatMessageProps) {
@@ -466,12 +471,15 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
   const seventvBadge = useChatUserStore(
     (s) => (userId ? s.users.get(userId)?.seventvBadge : undefined),
   ) as SevenTVBadgeWithSelection | null | undefined;
-  // Third-party chat-client badges (FFZ / Chatterino / Homies / Chatsen / Chatty /
-  // DankChat) are intentionally NOT shown in chat. They are resolved only when a
-  // user's profile is opened (avoids a per-chatter network round-trip and keeps
-  // chat to Twitch + 7TV + StreamNook badges). Kept as an empty array so the
-  // badge-render blocks below stay structurally intact.
-  const thirdPartyBadges: ThirdPartyBadgeType[] = [];
+  // A StreamNook member's curated third-party badges (BTTV / FFZ / Chatterino /
+  // Homies / Chatsen / Chatty / DankChat). Read synchronously from chatUserStore,
+  // where ChatWidget's addUser resolves them ONCE per unique member via the
+  // Identity API — never a network call in this per-message hot path (the cause
+  // of the earlier lag/paint-starvation). Empty for non-members and for members
+  // who haven't opted any badge into their loadout.
+  const thirdPartyBadges = useChatUserStore((s) =>
+    userId ? s.users.get(userId)?.thirdPartyBadges ?? EMPTY_THIRD_PARTY : EMPTY_THIRD_PARTY,
+  );
   const [broadcasterType] = useState<string | null>(null);
   const [isMentioned, setIsMentioned] = useState(false);
   const [isReplyToMe, setIsReplyToMe] = useState(false);
@@ -620,6 +628,21 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
     // Use the new computePaintStyle function
     return computePaintStyle(seventvPaint, effectiveColor, paintShadowMode);
   }, [seventvPaint, effectiveColor, paintShadowMode]);
+
+  // TEMP DIAGNOSTIC [selfpaint] — logs only for the current user's own messages.
+  useEffect(() => {
+    if (!currentUser?.user_id || userId !== currentUser.user_id) return;
+    const entry = useChatUserStore.getState().users.get(userId);
+    Logger.info('[selfpaint] render own', {
+      userId,
+      username: parsed.username,
+      seventvPaintTruthy: !!seventvPaint,
+      storePaintId: (entry?.paint as any)?.id ?? null,
+      storeBadgeId: (entry?.seventvBadge as any)?.id ?? null,
+      hasStoreEntry: !!entry,
+      styleIsPaint: !!(usernameStyle as any)?.WebkitBackgroundClip,
+    });
+  }, [userId, currentUser?.user_id, seventvPaint, usernameStyle, parsed.username]);
 
 
   const renderSegment = (segment: EmoteSegment, key: string, inGrid: boolean, isOverlay: boolean = false) => {
@@ -1879,6 +1902,7 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
             {fetchedChannelName && (
               <>
                 <span className="text-xs text-textSecondary">-</span>
+                <Tooltip content={`Switch to ${fetchedChannelName}'s stream`}>
                 <button
                   onClick={async () => {
                     try {
@@ -1893,10 +1917,10 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
                     }
                   }}
                   className="text-xs text-blue-400 font-semibold hover:underline cursor-pointer"
-                  title={`Switch to ${fetchedChannelName}'s stream`}
                 >
                   {fetchedChannelName}
                 </button>
+                </Tooltip>
               </>
             )}
           </div>
@@ -2339,7 +2363,6 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
               <button
                 onClick={(e) => { e.preventDefault(); onMessageCopy(parsed.content); }}
                 className="p-1.5 m-0.5 rounded-md hover:bg-stone-500/20 text-white/50 hover:text-white transition-colors"
-                title="Copy message to input"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
               </button>

@@ -871,25 +871,6 @@ body {
   animation: hype-marquee 12s linear forwards;
 }
 
-/* Confetti falling animation */
-@keyframes confetti-fall {
-  0% {
-    transform: translateY(-10px) rotate(0deg);
-    opacity: 1;
-  }
-  50% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(50px) rotate(720deg);
-    opacity: 0;
-  }
-}
-
-.animate-confetti {
-  animation: confetti-fall 1.5s ease-out forwards;
-}
-
 /* Animated wavy edge for hype train progress bar */
 @keyframes wave-flow {
   0% {

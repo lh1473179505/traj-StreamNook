@@ -1,6 +1,6 @@
 use crate::models::chat_layout::ChatMessage;
 use crate::models::settings::AppState;
-use crate::services::chat_service::ChatService;
+use crate::services::chat_service::{ChatService, SendResult};
 use crate::services::irc_service::IrcService;
 use anyhow::Result;
 use tauri::State;
@@ -22,11 +22,17 @@ pub async fn send_chat_message(
     message: String,
     reply_parent_msg_id: Option<String>,
     target_channel: Option<String>,
-) -> Result<(), String> {
+    broadcaster_id: Option<String>,
+    sender_id: Option<String>,
+    sender_account_id: Option<String>,
+) -> Result<SendResult, String> {
     ChatService::send_message(
         &message,
         reply_parent_msg_id.as_deref(),
         target_channel.as_deref(),
+        broadcaster_id.as_deref(),
+        sender_id.as_deref(),
+        sender_account_id.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())

@@ -1,7 +1,9 @@
 pub mod background_service;
 pub mod badge_polling_service;
 pub mod badge_service;
+pub mod bttv_pro_service;
 
+pub mod account_store;
 pub mod auth_proxy;
 pub mod cache_service;
 pub mod channel_points_service;
@@ -16,6 +18,7 @@ pub mod drops_websocket_service;
 pub mod embedded_dashboard;
 pub mod emoji_service;
 pub mod emote_service;
+pub mod eventsub_moderation;
 pub mod eventsub_service;
 pub mod http;
 pub mod irc_service;
@@ -23,6 +26,7 @@ pub mod layout_service;
 pub mod live_notification_service;
 pub mod log_service;
 pub mod mining_service;
+pub mod mod_log_storage_service;
 pub mod multi_nook_server;
 pub mod profile_cache_service;
 pub mod proxy_health;

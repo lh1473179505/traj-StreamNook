@@ -105,6 +105,30 @@ export function invalidateUserCosmetics(userId: string): void {
   hardFailTimestamps.delete(userId);
 }
 
+/**
+ * Force a genuinely fresh cosmetics resolution: clear BOTH cache layers (this
+ * module's LRU + the lower-level seventvService userCache) and re-fetch.
+ *
+ * Plain invalidateUserCosmetics only clears this layer, so a poisoned
+ * success-empty in the seventvService cache (e.g. an early prefetch that raced
+ * 7TV's warmup) survives its 5-minute TTL and gets re-served, defeating the
+ * "force refresh" intent. Clearing both BEFORE the fetch, sequenced inside one
+ * async fn (so there's no clear-then-read race), guarantees the next read
+ * actually hits 7TV. The result publishes to listeners (chatUserStore et al.)
+ * exactly like getCosmeticsWithFallback, so a repaint follows.
+ */
+export async function forceRefreshCosmetics(userId: string): Promise<CachedCosmetics> {
+  inMemoryCosmeticsCache.delete(userId);
+  hardFailTimestamps.delete(userId);
+  try {
+    const { invalidateUserCosmeticsCache } = await import('./seventvService');
+    invalidateUserCosmeticsCache(userId);
+  } catch (e) {
+    Logger.warn('[cosmeticsCache] forceRefresh: failed to clear 7TV cache:', e);
+  }
+  return getCosmeticsWithFallback(userId);
+}
+
 // Caps sized for a heavy viewing session. Profile entries are the largest
 // (badges + paints + IVR), so cap them tighter. Cosmetic / badge entries are
 // smaller — 512 covers ~all active chatters in a busy channel.

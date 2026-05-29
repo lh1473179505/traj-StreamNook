@@ -351,15 +351,39 @@ impl IrcService {
                 }
             }
 
-            // Join initial channel
+            // Join every channel we're tracking — not just the initial one. On a
+            // fresh connect `current_channels` holds only the initial channel; on a
+            // reconnect it also holds every additional channel added during the
+            // session (MultiNook tiles, MultiChat tabs) via `join_channel`. Those
+            // must be re-JOINed here or they stay silently PARTed after a reconnect:
+            // `join_channel` won't re-issue a JOIN for them because their refcount
+            // is still > 0, and `run_irc_connection` previously only re-joined the
+            // initial channel. That left every extra channel dead after the first
+            // IRC drop.
             {
+                let mut channels: Vec<String> = get_current_channels()
+                    .lock()
+                    .await
+                    .iter()
+                    .cloned()
+                    .collect();
+                // On a fresh connect the set already holds the initial channel;
+                // this fallback only covers the unexpected-empty case so we never
+                // connect with zero joins.
+                if channels.is_empty() {
+                    channels.push(initial_channel.to_lowercase());
+                }
                 let mut w = writer.lock().await;
-                w.write_all(format!("JOIN #{}\r\n", initial_channel.to_lowercase()).as_bytes())
-                    .await?;
+                for ch in &channels {
+                    w.write_all(format!("JOIN #{}\r\n", ch).as_bytes()).await?;
+                }
                 w.flush().await?;
+                debug!(
+                    "[IRC Chat] Joined {} channel(s): {:?}",
+                    channels.len(),
+                    channels
+                );
             }
-
-            debug!("[IRC Chat] Joined channel: #{}", initial_channel);
 
             // Fetch channel emotes
             let initial_channel_id =
@@ -370,6 +394,10 @@ impl IrcService {
             // a no-op for an already-subscribed channel.
             if let Some(cid) = initial_channel_id {
                 crate::services::seventv_eventapi::subscribe_channel(initial_channel, &cid).await;
+                // Subscribe the moderator view (channel.moderate) for this chat.
+                // Silently skipped server-side if you don't moderate the channel.
+                crate::services::eventsub_moderation::subscribe_channel(initial_channel, &cid)
+                    .await;
             }
 
             // Send connection success notification
@@ -708,12 +736,17 @@ impl IrcService {
 
             if let Some(target_msg_id) = Self::extract_tag_value(trimmed, "target-msg-id") {
                 let channel_name = extract_channel_from_irc_line(trimmed);
+                // The deleted message text is the trailing param after the last " :".
+                let deleted_text = trimmed
+                    .rfind(" :")
+                    .map(|idx| trimmed[idx + 2..].trim().to_string());
                 // Send deletion event to frontend, tagged with channel for routing
                 let delete_event = json!({
                     "type": "CLEARMSG",
                     "channel": channel_name,
                     "target_msg_id": target_msg_id,
-                    "login": Self::extract_tag_value(trimmed, "login").unwrap_or_default()
+                    "login": Self::extract_tag_value(trimmed, "login").unwrap_or_default(),
+                    "message": deleted_text
                 });
                 let _ = tx.send(delete_event.to_string());
             }
@@ -759,6 +792,7 @@ impl IrcService {
 
             let notice_event = serde_json::json!({
                 "type": "NOTICE",
+                "channel": extract_channel_from_irc_line(trimmed),
                 "msg_id": msg_id,
                 "message": notice_text,
             });
@@ -1051,6 +1085,27 @@ impl IrcService {
         Ok(())
     }
 
+    /// Wait up to `max_attempts` × 50ms for the IRC writer to be set. `start`
+    /// spawns `run_irc_connection` (which sets the writer once the TCP socket is
+    /// up) and returns the WS port *before* that task has connected. So a JOIN
+    /// issued right after a fresh `start_chat` — e.g. several chats opening at
+    /// once, where the first channel's connection is still in flight — can
+    /// momentarily see no writer. Polling smooths over that startup window
+    /// instead of failing the JOIN outright.
+    async fn wait_for_irc_writer(
+        max_attempts: u32,
+    ) -> Option<Arc<Mutex<tokio::io::WriteHalf<TcpStream>>>> {
+        for attempt in 0..max_attempts {
+            if let Some(writer) = get_irc_writer().lock().await.as_ref() {
+                return Some(writer.clone());
+            }
+            if attempt + 1 < max_attempts {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+        }
+        None
+    }
+
     pub async fn join_channel(channel: &str) -> Result<()> {
         let key = channel.to_lowercase();
 
@@ -1073,12 +1128,28 @@ impl IrcService {
             return Ok(());
         }
 
-        let writer_lock = get_irc_writer().lock().await;
-        let writer = writer_lock
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("IRC connection not established"))?
-            .clone();
-        drop(writer_lock);
+        // The connection may still be establishing: start_chat spawns the IRC
+        // task and returns before the writer is set, so when several chats open
+        // at once an additional channel's JOIN can arrive before the first
+        // channel finishes connecting. Wait for the writer instead of failing —
+        // bailing here would also skip the per-channel mod-view / 7TV
+        // subscriptions below, which is exactly why a second chat opened in the
+        // same burst would silently receive no moderator events.
+        let writer = match Self::wait_for_irc_writer(100).await {
+            Some(w) => w,
+            None => {
+                // Give back the consumer slot we claimed so a later retry or the
+                // reconnect path can JOIN cleanly instead of seeing refcount > 1.
+                let mut refcounts = get_channel_refcount().lock().await;
+                if let Some(entry) = refcounts.get_mut(&key) {
+                    *entry = entry.saturating_sub(1);
+                    if *entry == 0 {
+                        refcounts.remove(&key);
+                    }
+                }
+                return Err(anyhow::anyhow!("IRC connection not established"));
+            }
+        };
 
         let mut w = writer.lock().await;
         w.write_all(format!("JOIN #{}\r\n", key).as_bytes()).await?;
@@ -1093,6 +1164,8 @@ impl IrcService {
         if let Ok(broadcaster_info) = TwitchService::get_user_by_login(channel).await {
             Self::check_shared_chat_status(&broadcaster_info.id).await;
             crate::services::seventv_eventapi::subscribe_channel(&key, &broadcaster_info.id).await;
+            crate::services::eventsub_moderation::subscribe_channel(&key, &broadcaster_info.id)
+                .await;
         }
 
         Ok(())
@@ -1150,6 +1223,8 @@ impl IrcService {
 
         // Stop receiving 7TV EventAPI updates for this channel.
         crate::services::seventv_eventapi::unsubscribe_channel(&key).await;
+        // Stop the moderator-view subscription for this channel.
+        crate::services::eventsub_moderation::unsubscribe_channel(&key).await;
 
         debug!("[IRC Chat] Left channel: #{} (last consumer)", key);
 
@@ -2137,6 +2212,8 @@ impl IrcService {
         // Drop all 7TV EventAPI subscriptions so the idle socket stops
         // receiving updates for channels nobody is viewing anymore.
         crate::services::seventv_eventapi::clear_all().await;
+        // Same for the moderator-view subscriptions.
+        crate::services::eventsub_moderation::clear_all().await;
 
         // Drop the WS port marker so the next start_chat does a full cold
         // bring-up rather than thinking a stale port is still serving.

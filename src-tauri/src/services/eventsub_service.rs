@@ -3,6 +3,7 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, RwLock};
@@ -234,6 +235,13 @@ pub struct EventSubService {
     connected: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<Option<String>>>,
     subscriptions: Arc<RwLock<Vec<String>>>,
+    // Extra channels (besides the main stream) the user moderates and currently
+    // has open in MultiNook. We subscribe channel.moderate for each so the mod
+    // view lights up there too. This SET is the desired state, re-applied on every
+    // (re)connect by subscribe_to_events. `mod_sub_ids` maps broadcaster_id -> the
+    // live subscription id so we can tear a single one down between reconnects.
+    mod_channels: Arc<RwLock<HashSet<String>>>,
+    mod_sub_ids: Arc<RwLock<HashMap<String, String>>>,
     // Shutdown signal sender - when dropped or sent, the background task will stop
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
 }
@@ -244,6 +252,8 @@ impl EventSubService {
             connected: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(None)),
             subscriptions: Arc::new(RwLock::new(Vec::new())),
+            mod_channels: Arc::new(RwLock::new(HashSet::new())),
+            mod_sub_ids: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
         }
     }
@@ -355,6 +365,8 @@ impl EventSubService {
         let connected = self.connected.clone();
         let session_id = self.session_id.clone();
         let subscriptions = self.subscriptions.clone();
+        let mod_channels = self.mod_channels.clone();
+        let mod_sub_ids = self.mod_sub_ids.clone();
 
         // Create a shutdown channel
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
@@ -378,6 +390,8 @@ impl EventSubService {
                     connected.clone(),
                     session_id.clone(),
                     subscriptions.clone(),
+                    mod_channels.clone(),
+                    mod_sub_ids.clone(),
                 ) => {
                     match result {
                         Ok(_) => {
@@ -410,6 +424,8 @@ impl EventSubService {
         connected: Arc<RwLock<bool>>,
         session_id: Arc<RwLock<Option<String>>>,
         subscriptions: Arc<RwLock<Vec<String>>>,
+        mod_channels: Arc<RwLock<HashSet<String>>>,
+        mod_sub_ids: Arc<RwLock<HashMap<String, String>>>,
     ) -> Result<()> {
         debug!("🔌 Connecting to Twitch EventSub...");
 
@@ -500,11 +516,20 @@ impl EventSubService {
 
         // Subscribe to events using the session ID
         let sess_id = session_info.id.clone();
+        let app_handle_subs = app_handle.clone();
         tokio::spawn(async move {
             // Wait a moment for the connection to stabilize
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            if let Err(e) = Self::subscribe_to_events(&broadcaster_id, &sess_id).await {
+            if let Err(e) = Self::subscribe_to_events(
+                &broadcaster_id,
+                &sess_id,
+                &app_handle_subs,
+                mod_channels,
+                mod_sub_ids,
+            )
+            .await
+            {
                 error!("❌ Failed to subscribe to EventSub events: {}", e);
             }
         });
@@ -780,7 +805,13 @@ impl EventSubService {
         Ok(())
     }
 
-    async fn subscribe_to_events(broadcaster_id: &str, session_id: &str) -> Result<()> {
+    async fn subscribe_to_events(
+        broadcaster_id: &str,
+        session_id: &str,
+        app_handle: &AppHandle,
+        mod_channels: Arc<RwLock<HashSet<String>>>,
+        mod_sub_ids: Arc<RwLock<HashMap<String, String>>>,
+    ) -> Result<()> {
         let token = TwitchService::get_token().await?;
         let client_id = env!("TWITCH_APP_CLIENT_ID");
         let client = crate::services::http::client().clone();
@@ -829,15 +860,12 @@ impl EventSubService {
                     "broadcaster_user_id": broadcaster_id
                 }),
             ),
-            // Channel moderation events (bans, timeouts, deletes, etc.)
-            (
-                "channel.moderate",
-                "2",
-                serde_json::json!({
-                    "broadcaster_user_id": broadcaster_id,
-                    "moderator_user_id": current_user_id
-                }),
-            ),
+            // NOTE: channel.moderate (the "mod view") is intentionally NOT here.
+            // It is owned by the dedicated, chat-driven `eventsub_moderation`
+            // service (one persistent socket, subscribed per open chat channel via
+            // the IRC refcount) so the mod view follows chat, not the watched
+            // stream, and works in offline chat / MultiNook / popouts. Keeping it
+            // here too would double-subscribe the watched channel (409).
             // Hype Train events (V2)
             (
                 "channel.hype_train.begin",
@@ -895,6 +923,16 @@ impl EventSubService {
                     debug!("ℹ️ Skipped {} (requires moderator access)", event_type);
                 } else {
                     error!("❌ Failed to subscribe to {}: {}", event_type, error_text);
+                    // Surface the failure to the UI so a silently-broken feed
+                    // (e.g. channel.moderate missing a scope) isn't invisible.
+                    let _ = app_handle.emit(
+                        "eventsub://subscription-failed",
+                        serde_json::json!({
+                            "type": event_type,
+                            "status": status.as_u16(),
+                            "error": error_text,
+                        }),
+                    );
                 }
             }
 
@@ -940,7 +978,147 @@ impl EventSubService {
             }
         }
 
+        // Extra channel.moderate subscriptions for other channels the user
+        // moderates and currently has open (MultiNook). Re-applied here on every
+        // (re)connect. The main broadcaster is already covered above. A 403 just
+        // means you don't moderate that channel, so subscribe_channel_moderate
+        // skips it silently (no error toast, unlike the main-stream sub).
+        if !current_user_id.is_empty() {
+            let extras: Vec<String> = mod_channels.read().await.iter().cloned().collect();
+            for extra_id in extras {
+                if extra_id.is_empty() || extra_id.as_str() == broadcaster_id {
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_millis(SUBSCRIPTION_DELAY_MS)).await;
+                if let Some(sub_id) =
+                    Self::subscribe_channel_moderate(&extra_id, &current_user_id, session_id).await
+                {
+                    mod_sub_ids.write().await.insert(extra_id, sub_id);
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Subscribe to channel.moderate v2 for a single broadcaster on the given
+    /// session. Returns Some(subscription_id) on success, or None on any failure.
+    /// A 403 means you don't moderate that channel (expected), so we stay quiet
+    /// and do NOT surface it the way the main-stream sub does.
+    async fn subscribe_channel_moderate(
+        broadcaster_id: &str,
+        moderator_user_id: &str,
+        session_id: &str,
+    ) -> Option<String> {
+        if broadcaster_id.is_empty() || moderator_user_id.is_empty() {
+            return None;
+        }
+
+        let token = TwitchService::get_token().await.ok()?;
+        let client_id = env!("TWITCH_APP_CLIENT_ID");
+        let client = crate::services::http::client().clone();
+
+        let body = serde_json::json!({
+            "type": "channel.moderate",
+            "version": "2",
+            "condition": {
+                "broadcaster_user_id": broadcaster_id,
+                "moderator_user_id": moderator_user_id
+            },
+            "transport": { "method": "websocket", "session_id": session_id }
+        });
+
+        let response = client
+            .post("https://api.twitch.tv/helix/eventsub/subscriptions")
+            .header("Client-ID", client_id)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+
+        if response.status().is_success() {
+            let json: serde_json::Value = response.json().await.ok()?;
+            let id = json
+                .get("data")
+                .and_then(|d| d.get(0))
+                .and_then(|s| s.get("id"))
+                .and_then(|i| i.as_str())
+                .map(|s| s.to_string());
+            debug!(
+                "✅ Subscribed to channel.moderate for broadcaster {}",
+                broadcaster_id
+            );
+            id
+        } else {
+            debug!(
+                "ℹ️ Skipped channel.moderate for broadcaster {} (HTTP {})",
+                broadcaster_id,
+                response.status().as_u16()
+            );
+            None
+        }
+    }
+
+    /// Track a channel the user moderates and, if a session is live, subscribe to
+    /// its moderation events now. Idempotent (re-adding a tracked channel is a
+    /// no-op). Persisted in `mod_channels` so it's re-subscribed on every
+    /// reconnect by `subscribe_to_events`.
+    pub async fn add_mod_channel(&self, broadcaster_id: String) {
+        if broadcaster_id.is_empty() {
+            return;
+        }
+        {
+            let mut set = self.mod_channels.write().await;
+            if !set.insert(broadcaster_id.clone()) {
+                return; // already tracked
+            }
+        }
+
+        // If a session is live right now, subscribe immediately; otherwise it gets
+        // picked up the next time a session connects.
+        let session_id = self.session_id.read().await.clone();
+        if let Some(sess_id) = session_id {
+            let moderator_user_id = TwitchService::get_user_info()
+                .await
+                .map(|u| u.id)
+                .unwrap_or_default();
+            if let Some(sub_id) =
+                Self::subscribe_channel_moderate(&broadcaster_id, &moderator_user_id, &sess_id)
+                    .await
+            {
+                self.mod_sub_ids
+                    .write()
+                    .await
+                    .insert(broadcaster_id, sub_id);
+            }
+        }
+    }
+
+    /// Stop tracking a moderated channel and tear down its live subscription.
+    pub async fn remove_mod_channel(&self, broadcaster_id: String) {
+        self.mod_channels.write().await.remove(&broadcaster_id);
+        let sub_id = self.mod_sub_ids.write().await.remove(&broadcaster_id);
+        if let Some(sub_id) = sub_id {
+            if let Ok(token) = TwitchService::get_token().await {
+                let client_id = env!("TWITCH_APP_CLIENT_ID");
+                let client = crate::services::http::client().clone();
+                let _ = client
+                    .delete(format!(
+                        "https://api.twitch.tv/helix/eventsub/subscriptions?id={}",
+                        sub_id
+                    ))
+                    .header("Client-ID", client_id)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .send()
+                    .await;
+                debug!(
+                    "🗑️ Removed channel.moderate sub for broadcaster {}",
+                    broadcaster_id
+                );
+            }
+        }
     }
 
     pub async fn disconnect(&self) {
@@ -969,6 +1147,14 @@ impl EventSubService {
         {
             let mut subs = self.subscriptions.write().await;
             subs.clear();
+        }
+
+        // Live moderation sub ids belong to the session that's going away; drop
+        // them. The desired channel set in `mod_channels` is intentionally kept so
+        // those channels are re-subscribed when a new session connects.
+        {
+            let mut sub_ids = self.mod_sub_ids.write().await;
+            sub_ids.clear();
         }
 
         // Give the task a moment to clean up

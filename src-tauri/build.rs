@@ -14,7 +14,6 @@ fn main() {
         "TWITCH_APP_CLIENT_SECRET",
         "TWITCH_ANDROID_CLIENT_ID",
         "TWITCH_WEB_CLIENT_ID",
-        "DISCORD_WEBHOOK_URL",
     ];
 
     // Try loading from project root .env file

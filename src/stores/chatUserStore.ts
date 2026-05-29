@@ -4,18 +4,36 @@ import {
   getCosmeticsWithFallback,
   subscribeToCosmetics,
 } from '../services/cosmeticsCache';
+import { isStreamNookUser } from '../services/supabaseService';
+import {
+  getResolvedIdentity,
+  getResolvedIdentityFromCache,
+  getIdentityWithCache,
+  subscribeResolvedIdentity,
+  type ResolvedBadge,
+} from '../services/identityService';
+import type { ThirdPartyBadge } from '../services/badgeService';
+import {
+  BTTV_PRO_LOADOUT_KEY,
+  BTTV_PRO_BADGE_ID,
+  buildBttvProBadge,
+  resolveBttvProUrl,
+} from '../services/bttvProBadge';
 import { snapshotOverrides } from '../utils/userChatOverrides';
 
 /**
  * Represents a user who has chatted in the current channel.
  * Used for @ mention autocomplete suggestions and as the canonical store for
- * a user's 7TV paint + 7TV badge. Per-message components subscribe to these
- * instead of each maintaining its own useState + cosmetics-fetch effect.
+ * a user's 7TV paint + 7TV badge + StreamNook third-party badge loadout.
+ * Per-message components subscribe to these instead of each maintaining its
+ * own useState + fetch effect.
  *
  * Third-party chat-client badges (FFZ / Chatterino / Homies / Chatsen / Chatty /
- * DankChat) are intentionally NOT resolved here: doing it per chatter meant a
- * network round-trip per user just for badges that clutter chat. They now load
- * only when a user's profile is opened (see UserProfileCard).
+ * DankChat / BTTV) are resolved here ONLY for StreamNook members, ONCE per
+ * unique chatter, via the Identity API (the server returns the member's curated
+ * set already resolved to images). That keeps the per-message render path free
+ * of network calls — the lag/paint-starvation that an earlier per-message
+ * resolve caused. Non-members never trigger a fetch.
  */
 export interface ChatUser {
   userId: string;
@@ -28,6 +46,9 @@ export interface ChatUser {
   paint?: any;
   /** Currently-selected 7TV badge if available */
   seventvBadge?: any;
+  /** StreamNook member's curated third-party badges, resolved to images.
+   *  Undefined until resolved; empty array = member with nothing opted in. */
+  thirdPartyBadges?: ThirdPartyBadge[];
 }
 
 interface ChatUserStore {
@@ -38,11 +59,11 @@ interface ChatUserStore {
   
   /**
    * Add or update a user when they send a message. channelContext is accepted
-   * for call-site compatibility but no longer used (third-party badges are not
-   * resolved in chat anymore).
+   * for call-site compatibility but no longer used (third-party badges are
+   * resolved by twitch_user_id through the Identity API, not by channel).
    */
   addUser: (
-    user: Omit<ChatUser, 'lastSeen' | 'paint' | 'seventvBadge'>,
+    user: Omit<ChatUser, 'lastSeen' | 'paint' | 'seventvBadge' | 'thirdPartyBadges'>,
     channelContext?: { channelId: string; channelName: string },
   ) => void;
   
@@ -101,6 +122,114 @@ function enqueueCosmeticUpdate(userId: string, paint: any, seventvBadge: any) {
   scheduleStoreFlush();
 }
 
+// ── StreamNook third-party badge loadout ─────────────────────────────────────
+// Same once-per-user, read-synchronously contract as the 7TV cosmetics above,
+// but sourced from the Identity API's resolved bundle (the member's curated
+// badges already resolved to images, server-side ownership-checked). Its own
+// microtask coalescer so a burst of members resolving collapses into one
+// setState instead of one clone+commit per user.
+const pendingThirdPartyUpdates = new Map<string, ThirdPartyBadge[]>();
+let pendingThirdPartyFlushScheduled = false;
+
+function scheduleThirdPartyFlush() {
+  if (pendingThirdPartyFlushScheduled) return;
+  pendingThirdPartyFlushScheduled = true;
+  queueMicrotask(() => {
+    pendingThirdPartyFlushScheduled = false;
+    if (pendingThirdPartyUpdates.size === 0) return;
+    const updates = new Map(pendingThirdPartyUpdates);
+    pendingThirdPartyUpdates.clear();
+    useChatUserStore.setState((state) => {
+      const newUsers = new Map(state.users);
+      for (const [uid, badges] of updates) {
+        const current = newUsers.get(uid);
+        if (current) newUsers.set(uid, { ...current, thirdPartyBadges: badges });
+      }
+      return { users: newUsers };
+    });
+  });
+}
+
+// The resolve endpoint already ownership-checks and orders these; map its
+// minimal {key,provider,title,image_url} shape onto the ThirdPartyBadge shape
+// the chat badge row renders (it reads only id / imageUrl / title / provider).
+function mapResolvedBadges(badges: ResolvedBadge[]): ThirdPartyBadge[] {
+  return badges.map((b) => ({
+    id: b.key,
+    title: b.title,
+    imageUrl: b.image_url,
+    image1x: b.image_url,
+    image2x: b.image_url,
+    image4x: b.image_url,
+    provider: b.provider,
+  }));
+}
+
+// Resolve a member's curated badges once and push them into the store. Cache
+// hit → enqueue immediately; miss → kick the fetch and let the resolved-identity
+// listener below enqueue when it lands (so we never write the store twice).
+// Non-members and empty ids are no-ops, so chat only ever fetches for members.
+function ensureThirdPartyResolved(userId: string | undefined) {
+  if (!userId || !isStreamNookUser(userId)) return;
+  const cached = getResolvedIdentityFromCache(userId);
+  if (cached) {
+    pendingThirdPartyUpdates.set(userId, mapResolvedBadges(cached.badges));
+    scheduleThirdPartyFlush();
+  } else {
+    void getResolvedIdentity(userId).catch(() => {});
+  }
+  // BTTV Pro is WebSocket-only, so the Identity API can't resolve it like the
+  // other providers (its loadout key passes through unresolved). Resolve it
+  // client-side and merge it into this member's row if they opted it in.
+  ensureBttvProResolved(userId);
+}
+
+// Resolve + merge a member's BTTV Pro badge when their loadout opted it in.
+// Kept ADDITIVE and separate from the resolved-badge flush (which REPLACES the
+// array) so the two never clobber each other: the flush lands the server-resolved
+// contributor badges first (microtask), then this appends Pro after the socket
+// lookup returns (network). We read the RAW loadout — not the resolved bundle,
+// which drops the unresolved Pro key — to know whether the member opted in.
+function ensureBttvProResolved(userId: string) {
+  void getIdentityWithCache(userId)
+    .then((loadout) => {
+      if (!loadout.badges.includes(BTTV_PRO_LOADOUT_KEY)) {
+        removeBttvPro(userId);
+        return;
+      }
+      return resolveBttvProUrl(userId).then((url) => {
+        if (url) mergeBttvPro(userId, buildBttvProBadge(url));
+        else removeBttvPro(userId);
+      });
+    })
+    .catch(() => {});
+}
+
+function mergeBttvPro(userId: string, badge: ThirdPartyBadge) {
+  useChatUserStore.setState((state) => {
+    const u = state.users.get(userId);
+    if (!u) return {};
+    const existing = u.thirdPartyBadges ?? [];
+    if (existing.some((b) => b.id === badge.id)) return {}; // already present
+    const newUsers = new Map(state.users);
+    newUsers.set(userId, { ...u, thirdPartyBadges: [...existing, badge] });
+    return { users: newUsers };
+  });
+}
+
+function removeBttvPro(userId: string) {
+  useChatUserStore.setState((state) => {
+    const u = state.users.get(userId);
+    if (!u?.thirdPartyBadges?.some((b) => b.id === BTTV_PRO_BADGE_ID)) return {};
+    const newUsers = new Map(state.users);
+    newUsers.set(userId, {
+      ...u,
+      thirdPartyBadges: u.thirdPartyBadges.filter((b) => b.id !== BTTV_PRO_BADGE_ID),
+    });
+    return { users: newUsers };
+  });
+}
+
 export const useChatUserStore = create<ChatUserStore>((set, get) => ({
   users: new Map(),
   usernameToId: new Map(),
@@ -138,6 +267,7 @@ export const useChatUserStore = create<ChatUserStore>((set, get) => ({
         lastSeen: Date.now(),
         paint: existingUser?.paint,
         seventvBadge: existingUser?.seventvBadge,
+        thirdPartyBadges: existingUser?.thirdPartyBadges,
       });
       newUsernameToId.set(user.username.toLowerCase(), user.userId);
       return { users: newUsers, usernameToId: newUsernameToId };
@@ -161,6 +291,9 @@ export const useChatUserStore = create<ChatUserStore>((set, get) => ({
         .then(applyCosmetics)
         .catch(() => {});
     }
+
+    // Resolve this member's curated third-party badges once (no-op for non-members).
+    ensureThirdPartyResolved(user.userId);
   },
   
   getUserByUsername: (username: string) => {
@@ -225,4 +358,13 @@ subscribeToCosmetics((userId, cosmetics) => {
   }
 
   enqueueCosmeticUpdate(userId, nextPaint, nextBadge);
+});
+
+// Repaint chat rows when a member's resolved identity lands or changes. Fires on
+// the initial per-user fetch (above) and on a member editing their own loadout
+// (setIdentity clears the resolved cache, which re-resolves here). Only touches
+// users already in this channel's store; others propagate on their next fetch.
+subscribeResolvedIdentity((userId) => {
+  if (!useChatUserStore.getState().users.has(userId)) return;
+  ensureThirdPartyResolved(userId);
 });

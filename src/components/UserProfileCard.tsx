@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } from 'react';
 import { MessageCircle, UserPlus, UserMinus, Loader2, ChevronDown, ChevronUp, Pencil, X, Gift } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useScroll, useTransform, useReducedMotion, useMotionValue, animate } from 'framer-motion';
 import { setUserNickname, setUserColor } from '../utils/userChatOverrides';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/AppStore';
-import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain } from '../utils/openBadgesInMain';
+import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain, openBadgesWithBadgeInMain, openBadgesWithTargetInMain } from '../utils/openBadgesInMain';
 import { computePaintStyle, getBadgeImageUrls, getBadgeFallbackUrls, queueCosmeticForCaching } from '../services/seventvService';
 import { FallbackImage } from './FallbackImage';
 import { formatIVRDate, formatSubTenure } from '../services/ivrService';
@@ -19,6 +19,12 @@ import { Tooltip } from './ui/Tooltip';
 import { getStreamNookUserNumber, subscribeStreamNookRegistryVersion, getStreamNookRegistryVersion, getOwnedCosmeticSlugs, getActiveCosmeticSlug, getCosmeticBySlug, getCosmeticsVersion, subscribeCosmeticsVersion } from '../services/supabaseService';
 import { COSMETIC_ASSET_BY_SLUG } from './cosmeticAssets';
 import { StreamNookBadge } from './StreamNookBadge';
+import {
+  getIdentityWithCache,
+  getIdentityFromMemoryCache,
+  subscribeIdentityVersion,
+  getIdentityVersion,
+} from '../services/identityService';
 import streamNookLogo from '../assets/streamnook-logo.png';
 
 // messageHistory arrives from two sources:
@@ -214,6 +220,23 @@ function normalizeHex(input: string | null | undefined): string {
   return TWITCH_DEFAULT_COLOR;
 }
 
+// Friendly labels + display order for third-party chat-client badge providers.
+// In the profile path `provider` is the Rust enum's Debug form (PascalCase),
+// e.g. "FFZ" / "BTTV" / "DankChat" — see user_profile.rs `format!("{:?}", ..)`.
+// We group the badges under these per-provider headers instead of one flat
+// "Other" pile so each badge keeps its provenance, mirroring the Attainables
+// "Chat Clients" gallery. Any provider not listed here falls through to a
+// catch-all "Other" group, so a new Rust-side provider can't silently vanish.
+const THIRD_PARTY_PROVIDER_GROUPS: { key: string; label: string }[] = [
+  { key: 'FFZ', label: 'FrankerFaceZ' },
+  { key: 'BTTV', label: 'BetterTTV' },
+  { key: 'Chatterino', label: 'Chatterino' },
+  { key: 'Chatsen', label: 'Chatsen' },
+  { key: 'Chatty', label: 'Chatty' },
+  { key: 'DankChat', label: 'DankChat' },
+  { key: 'Homies', label: 'Homies' },
+];
+
 // Inline editor for the nickname + color overrides we expose on each user.
 // Reads the current override from the settings store on mount (lazy init)
 // and on userId change. Nickname saves on blur or Enter; color saves on the
@@ -393,6 +416,12 @@ const UserProfileCard = ({
   const [profileData, setProfileData] = useState<UserProfileComplete | null>(null);
   const [cachedProfile, setCachedProfile] = useState<CachedProfile | null>(null);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
+  // BetterTTV Pro loyalty badge. Resolved separately from the main profile
+  // fetch because BTTV only serves Pro badges over a WebSocket and non-Pro
+  // users never reply (so the lookup can take up to its timeout). Keeping it
+  // off the critical path lets the card render immediately and the badge pop in
+  // when/if it resolves. See bttv_pro_service.rs.
+  const [bttvProBadge, setBttvProBadge] = useState<{ url: string; started_at: string | null; glow: boolean } | null>(null);
   const [showMessages, setShowMessages] = useState(false);
   // Historical chat logs pulled from the merged Twitch GQL + Justlog + Robotty
   // pipeline in Rust. Each entry carries the Twitch IRC message UUID in `id`
@@ -441,6 +470,49 @@ const UserProfileCard = ({
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [cardPosition, setCardPosition] = useState({ x: 0, y: 0 });
   const cardRef = useRef<HTMLDivElement>(null);
+
+  // Scroll-driven collapsing header. As the body scrolls, the banner shrinks +
+  // darkens and the avatar scales down and tucks up toward the now-compact
+  // header, so it gives way to content instead of staying fixed. Pure
+  // framer-motion useScroll -> useTransform (GPU transforms + one animated
+  // height, no scroll listeners). The expanded (scrollY 0) values are pinned to
+  // the original layout so nothing changes until you actually scroll, and
+  // prefers-reduced-motion keeps everything in the expanded state.
+  const scrollBodyRef = useRef<HTMLDivElement>(null);
+  const prefersReducedMotion = useReducedMotion();
+  const { scrollY } = useScroll({ container: scrollBodyRef });
+  const HEADER_COLLAPSE_PX = 90; // body scroll distance to fully collapse
+  // Collapse runs off a single 0->1 progress so two triggers can share it: the
+  // body scrolling, and the recent-messages view opening (which forces a full
+  // collapse so the message list gets the room — the avatar no longer overhangs
+  // there). messagesForce eases between 0 and 1 on that toggle; collapseProgress
+  // is whichever trigger is further along.
+  const scrollProgress = useTransform(scrollY, [0, HEADER_COLLAPSE_PX], [0, 1], { clamp: true });
+  const messagesForce = useMotionValue(0);
+  const collapseProgress = useTransform(() => Math.max(scrollProgress.get(), messagesForce.get()));
+  useEffect(() => {
+    const controls = animate(messagesForce, showMessages ? 1 : 0, { duration: 0.3, ease: [0.22, 1, 0.36, 1] });
+    return () => controls.stop();
+  }, [showMessages, messagesForce]);
+  const bannerHeight = useTransform(collapseProgress, [0, 1], [96, 56]);
+  const bannerZoom = useTransform(collapseProgress, [0, 1], [1, 1.1]);
+  const bannerScrim = useTransform(collapseProgress, [0, 1], [0, 0.45]);
+  // Banner image blurs as it collapses so the compact name row reads on top of it.
+  const bannerBlur = useTransform(collapseProgress, [0, 1], ['blur(0px)', 'blur(5px)']);
+  // 0.6 shrink + a -44px lift lands the 80px avatar centered vertically in the
+  // 56px collapsed banner (transform-origin keeps it pinned to the left edge).
+  const avatarScale = useTransform(collapseProgress, [0, 1], [1, 0.6]);
+  const avatarLift = useTransform(collapseProgress, [0, 1], [0, -44]);
+  // Compact name+chips row: fades in over the back half of the collapse (once the
+  // body's full identity block has scrolled up under the header) and only takes
+  // pointer events once it's actually visible, so its chips aren't click targets
+  // while invisible in the expanded state.
+  const collapsedNameOpacity = useTransform(collapseProgress, [0.6, 1], [0, 1]);
+  const collapsedNamePointer = useTransform(collapseProgress, (v) => (v > 0.78 ? 'auto' : 'none'));
+  // Body top padding tightens in the messages view since the avatar isn't
+  // overhanging there; tied to messagesForce only so plain scrolling doesn't
+  // pull content up while the overhang still needs that space.
+  const bodyPadTop = useTransform(messagesForce, [0, 1], [48, 12]);
 
   // Follow state
   const [isFollowing, setIsFollowing] = useState<boolean | null>(null);
@@ -501,6 +573,18 @@ const UserProfileCard = ({
 
     fetchFullProfile();
   }, [userId, username, getChannelContext]);
+
+  // Resolve the BetterTTV Pro loyalty badge in parallel (non-blocking). Pops
+  // into the BetterTTV badge group when/if it resolves; silent for non-Pro users.
+  useEffect(() => {
+    let cancelled = false;
+    setBttvProBadge(null);
+    if (!userId) return;
+    invoke<{ url: string; started_at: string | null; glow: boolean } | null>('get_bttv_pro_badge', { userId })
+      .then((badge) => { if (!cancelled) setBttvProBadge(badge); })
+      .catch((err) => Logger.debug('[UserProfileCard] BTTV Pro lookup failed:', err));
+    return () => { cancelled = true; };
+  }, [userId]);
 
   // Lazily fetch the user's historical chat logs from Justlog the first time
   // the messages view is opened. We don't pre-fetch because most popup opens
@@ -728,12 +812,25 @@ const UserProfileCard = ({
     const thirdPartyBadges = Array.from(thirdPartyMap.values()).map((b: any) => ({
       id: b.id,
       src: b.image4x || b.imageUrl,
-      srcSet: b.image1x && b.image2x && b.image4x 
+      srcSet: b.image1x && b.image2x && b.image4x
         ? `${b.image1x} 1x, ${b.image2x} 2x, ${b.image4x} 4x`
         : undefined,
       title: b.title,
       provider: b.provider
     }));
+
+    // BTTV Pro loyalty badge (resolved over the BTTV socket, not the cached
+    // contributor feed). Tagged provider 'BTTV' so it lands in the BetterTTV
+    // group via THIRD_PARTY_PROVIDER_GROUPS, alongside any contributor badge.
+    if (bttvProBadge?.url) {
+      thirdPartyBadges.push({
+        id: 'bttv-pro',
+        src: bttvProBadge.url,
+        srcSet: undefined,
+        title: 'BTTV Pro',
+        provider: 'BTTV',
+      });
+    }
 
     return {
       twitchBadges,
@@ -741,7 +838,36 @@ const UserProfileCard = ({
       thirdPartyBadges,
       totalBadgeCount: twitchBadges.length + seventvBadges.length + thirdPartyBadges.length
     };
-  }, [cachedProfile, profileData]);
+  }, [cachedProfile, profileData, bttvProBadge]);
+
+  // StreamNook identity loadout for the viewed user. Drives which third-party
+  // badges other members see: once a member curates (customized), only the
+  // badges they opted in show; an un-curated member still shows everything (the
+  // default). Synchronous cache peek + version subscription so the card repaints
+  // when the loadout lands or the member edits it; the effect kicks the fetch.
+  useSyncExternalStore(subscribeIdentityVersion, getIdentityVersion, getIdentityVersion);
+  const identityLoadout = userId ? getIdentityFromMemoryCache(userId) : null;
+  useEffect(() => {
+    if (userId) void getIdentityWithCache(userId).catch(() => {});
+  }, [userId]);
+  const visibleThirdPartyBadges = useMemo(() => {
+    if (!identityLoadout?.customized) return thirdPartyBadges;
+    // Render in the member's CHOSEN order (their stored loadout key order) so the
+    // profile card matches chat exactly. Chat resolves these through the server's
+    // resolveLoadout, which preserves the saved `badges` array order; filtering
+    // the provider-ordered thirdPartyBadges list (the previous approach) kept the
+    // same set but a different order, which is the drift between chat and profile.
+    const byKey = new Map<string, (typeof thirdPartyBadges)[number]>(
+      thirdPartyBadges.map((b) => [`${b.provider}:${b.id}`, b]),
+    );
+    return identityLoadout.badges
+      .map((k) => byKey.get(k))
+      .filter((b): b is NonNullable<typeof b> => b != null);
+  }, [thirdPartyBadges, identityLoadout?.customized, identityLoadout?.badges]);
+  // Count what's actually shown (curation can hide some third-party badges) so
+  // the "Badges N" header doesn't overcount hidden ones.
+  const visibleTotalBadgeCount =
+    totalBadgeCount - thirdPartyBadges.length + visibleThirdPartyBadges.length;
 
   const twitchProfile = profileData?.twitch_profile;
   const ivrData = profileData?.ivr_data;
@@ -789,10 +915,11 @@ const UserProfileCard = ({
     label: string,
     badges: any[],
     renderItem: (badge: any, index: number) => React.ReactNode,
+    groupKey?: string,
   ) => {
     if (badges.length === 0) return null;
     return (
-      <div>
+      <div key={groupKey}>
         <p className="text-[10px] text-textSecondary uppercase tracking-wider font-medium mb-2">
           {label} <span className="text-textSecondary/50 tabular-nums">{badges.length}</span>
         </p>
@@ -802,6 +929,55 @@ const UserProfileCard = ({
       </div>
     );
   };
+
+  // Inline identity chips (Twitch ✓ → 7TV paint → StreamNook #N). Shared by the
+  // full identity block in the body and the compact single-line row that fades
+  // into the collapsed header, so the two never drift apart.
+  const identityChips = (
+    <>
+      {twitchProfile?.broadcaster_type === 'partner' && (
+        <Tooltip content="Verified Partner" side="top">
+          <span className="inline-flex flex-shrink-0">
+            <svg className="w-[18px] h-[18px]" viewBox="0 0 16 16" fill="#9146FF">
+              <path fillRule="evenodd" d="M12.5 3.5 8 2 3.5 3.5 2 8l1.5 4.5L8 14l4.5-1.5L14 8l-1.5-4.5ZM7 11l4.5-4.5L10 5 7 8 5.5 6.5 4 8l3 3Z" clipRule="evenodd" />
+            </svg>
+          </span>
+        </Tooltip>
+      )}
+      {selectedPaint && (
+        <Tooltip content={`Paint: ${selectedPaint.name}`} side="top">
+          <button
+            onClick={() => openBadgesWithPaintInMain(selectedPaint.id)}
+            className="px-2 py-0.5 rounded-md text-[11px] font-bold inline-block relative overflow-hidden cursor-pointer hover:ring-1 hover:ring-accent/50 transition-all border border-white/10"
+            style={{
+              ...computePaintStyle(selectedPaint as any, color),
+              WebkitBackgroundClip: 'padding-box',
+              backgroundClip: 'padding-box',
+            }}
+          >
+            <span
+              style={{
+                ...computePaintStyle(selectedPaint as any, color),
+                filter: 'invert(1) contrast(1.5)',
+                WebkitBackgroundClip: 'text',
+                backgroundClip: 'text',
+              }}
+            >
+              {selectedPaint.name}
+            </span>
+          </button>
+        </Tooltip>
+      )}
+      {streamNookUserNumber !== null && (
+        <Tooltip content="StreamNook user" side="top">
+          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/5 border border-white/10">
+            <img src={streamNookLogo} alt="StreamNook" className="w-3.5 h-3.5 object-contain" draggable={false} />
+            <span className="text-[11px] font-semibold text-textPrimary tabular-nums">#{streamNookUserNumber}</span>
+          </div>
+        </Tooltip>
+      )}
+    </>
+  );
 
   return (
     <>
@@ -817,22 +993,44 @@ const UserProfileCard = ({
         onMouseDown={isStandaloneWindow ? undefined : handleMouseDown}
       >
         {/* Sticky header: banner + floating avatar (absolute, so it can overflow the banner without getting clipped by the scroll body below). */}
-        <div className="relative profile-card-header cursor-grab active:cursor-grabbing flex-shrink-0">
-          <div className="h-24" style={bannerStyle} />
-          <div className="absolute -bottom-10 left-4">
-            <div className="w-20 h-20 rounded-full border-4 border-secondary bg-secondary overflow-hidden shadow-lg">
-              {twitchProfile?.profile_image_url ? (
-                <img src={twitchProfile.profile_image_url} alt={displayName} className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-accent/20">
-                  <span className="text-2xl font-bold text-textPrimary">{displayName[0].toUpperCase()}</span>
-                </div>
-              )}
-            </div>
-          </div>
+        <div className="relative z-10 profile-card-header cursor-grab active:cursor-grabbing flex-shrink-0">
+          <motion.div className="relative overflow-hidden" style={{ height: prefersReducedMotion ? 96 : bannerHeight }}>
+            <motion.div
+              className="absolute inset-0"
+              style={prefersReducedMotion ? bannerStyle : { ...bannerStyle, scale: bannerZoom, filter: bannerBlur }}
+            />
+            {!prefersReducedMotion && (
+              <motion.div className="absolute inset-0" style={{ backgroundColor: '#000', opacity: bannerScrim }} />
+            )}
+          </motion.div>
+          <motion.div
+            className="absolute -bottom-10 left-4 w-20 h-20 rounded-full border-4 border-secondary bg-secondary overflow-hidden shadow-lg"
+            style={prefersReducedMotion ? undefined : { scale: avatarScale, y: avatarLift, transformOrigin: 'left bottom' }}
+          >
+            {twitchProfile?.profile_image_url ? (
+              <img src={twitchProfile.profile_image_url} alt={displayName} className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center bg-accent/20">
+                <span className="text-2xl font-bold text-textPrimary">{displayName[0].toUpperCase()}</span>
+              </div>
+            )}
+          </motion.div>
+          {/* Compact name + chips, vertically centered next to the shrunken
+              avatar. Hidden in the expanded state, fades in as the header
+              collapses so the identity stays visible once the body's full name
+              has scrolled away. */}
+          {!prefersReducedMotion && (
+            <motion.div
+              className="absolute left-[72px] right-12 top-0 bottom-0 flex items-center gap-2 overflow-hidden"
+              style={{ opacity: collapsedNameOpacity, pointerEvents: collapsedNamePointer }}
+            >
+              <span className="text-sm font-bold leading-tight truncate min-w-0" style={usernameStyle}>{displayName}</span>
+              <div className="flex items-center gap-1.5 flex-shrink-0">{identityChips}</div>
+            </motion.div>
+          )}
           <button
             onClick={onClose}
-            className="absolute top-2.5 right-2.5 p-1.5 glass-button text-textSecondary hover:text-textPrimary rounded-full"
+            className="absolute top-2.5 right-2.5 z-10 p-1.5 glass-button text-textSecondary hover:text-textPrimary rounded-full"
             aria-label="Close profile"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -842,66 +1040,15 @@ const UserProfileCard = ({
         </div>
 
         {/* Single scroll body. One padded container, vertical rhythm via space-y, no section dividers. */}
-        <div className="flex-1 overflow-y-auto min-h-0 scrollbar-thin">
-          <div className="px-4 pt-12 pb-4 space-y-4">
-            {/* Identity: name + chips inline (Twitch ✓ → 7TV paint → StreamNook #N), handle, bio */}
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-xl font-bold leading-tight" style={usernameStyle}>{displayName}</h3>
-                {twitchProfile?.broadcaster_type === 'partner' && (
-                  <Tooltip content="Verified Partner" side="top">
-                    <span className="inline-flex flex-shrink-0">
-                      <svg className="w-[18px] h-[18px]" viewBox="0 0 16 16" fill="#9146FF">
-                        <path fillRule="evenodd" d="M12.5 3.5 8 2 3.5 3.5 2 8l1.5 4.5L8 14l4.5-1.5L14 8l-1.5-4.5ZM7 11l4.5-4.5L10 5 7 8 5.5 6.5 4 8l3 3Z" clipRule="evenodd" />
-                      </svg>
-                    </span>
-                  </Tooltip>
-                )}
-                {selectedPaint && (
-                  <Tooltip content={`Paint: ${selectedPaint.name}`} side="top">
-                    <button
-                      onClick={() => openBadgesWithPaintInMain(selectedPaint.id)}
-                      className="px-2 py-0.5 rounded-md text-[11px] font-bold inline-block relative overflow-hidden cursor-pointer hover:ring-1 hover:ring-accent/50 transition-all border border-white/10"
-                      style={{
-                        ...computePaintStyle(selectedPaint as any, color),
-                        WebkitBackgroundClip: 'padding-box',
-                        backgroundClip: 'padding-box',
-                      }}
-                    >
-                      <span
-                        style={{
-                          ...computePaintStyle(selectedPaint as any, color),
-                          filter: 'invert(1) contrast(1.5)',
-                          WebkitBackgroundClip: 'text',
-                          backgroundClip: 'text',
-                        }}
-                      >
-                        {selectedPaint.name}
-                      </span>
-                    </button>
-                  </Tooltip>
-                )}
-                {streamNookUserNumber !== null && (
-                  <Tooltip content="StreamNook user" side="top">
-                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/5 border border-white/10">
-                      <img src={streamNookLogo} alt="StreamNook" className="w-3.5 h-3.5 object-contain" draggable={false} />
-                      <span className="text-[11px] font-semibold text-textPrimary tabular-nums">#{streamNookUserNumber}</span>
-                    </div>
-                  </Tooltip>
-                )}
-              </div>
-              <p className="text-sm text-textSecondary mt-0.5">@{username}</p>
-              {!showMessages && twitchProfile?.description && (
-                <p className="text-sm text-textPrimary/85 mt-2.5 leading-relaxed">{twitchProfile.description}</p>
-              )}
-            </div>
-
-            {/* Takeover animation. When showMessages flips true, the messages
-                view slides DOWN from the top while the regular profile body
-                slides UP off the top — a "curtain reveal" feel. AnimatePresence
-                with `mode="wait"` ensures the exit animation completes before
-                the enter animation starts. The wrapper has `overflow-hidden`
-                so the slide-out doesn't leak above the identity section. */}
+        <div ref={scrollBodyRef} className="flex-1 overflow-y-auto min-h-0 scrollbar-thin">
+          <motion.div className="px-4 pb-4 space-y-4" style={{ paddingTop: prefersReducedMotion ? 48 : bodyPadTop }}>
+            {/* Takeover animation. When showMessages flips true, the profile
+                body (identity + stats + badges + actions) slides UP and out and
+                the messages view slides in — a "curtain reveal" feel.
+                AnimatePresence with `mode="wait"` ensures the exit completes
+                before the enter starts. The wrapper has `overflow-hidden` so the
+                slide stays clipped to the body instead of leaking under the
+                header, where the collapsed compact name carries the identity. */}
             <div className="relative overflow-hidden">
               <AnimatePresence mode="wait" initial={false}>
                 {showMessages ? (
@@ -1085,9 +1232,19 @@ const UserProfileCard = ({
                     transition={{ type: 'tween', duration: 0.22, ease: 'easeOut' }}
                     className="space-y-4"
                   >
-                    {/* Everything below the identity section gets hidden during
-                        the messages-takeover view so the message list can fill
-                        the modal body. */}
+                    {/* Identity leads the profile body so it animates in/out as
+                        one unit with the rest; in the messages view the collapsed
+                        header's compact name carries the identity instead. */}
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-xl font-bold leading-tight" style={usernameStyle}>{displayName}</h3>
+                {identityChips}
+              </div>
+              <p className="text-sm text-textSecondary mt-0.5">@{username}</p>
+              {twitchProfile?.description && (
+                <p className="text-sm text-textPrimary/85 mt-2.5 leading-relaxed">{twitchProfile.description}</p>
+              )}
+            </div>
 
             {/* Relationship: a single compact stats panel + the sub/mod/vip pills.
                 Each row only renders if we have the data, so the panel grows
@@ -1228,10 +1385,10 @@ const UserProfileCard = ({
                 Order: StreamNook → Twitch → 7TV → Third-party. StreamNook leads
                 because it's the strongest community signal in our app; Twitch
                 is the platform tier; 7TV/other are cosmetic providers. */}
-            {(totalBadgeCount > 0 || streamNookBadgeCount > 0) && (
+            {(visibleTotalBadgeCount > 0 || streamNookBadgeCount > 0) && (
               <div>
                 <p className="text-[11px] text-textSecondary uppercase tracking-wider font-semibold mb-2">
-                  Badges <span className="text-textSecondary/60 tabular-nums">{totalBadgeCount + streamNookBadgeCount}</span>
+                  Badges <span className="text-textSecondary/60 tabular-nums">{visibleTotalBadgeCount + streamNookBadgeCount}</span>
                 </p>
                 <div className="glass-panel rounded-md px-3 py-3 space-y-3">
                 {/* StreamNook badges. The active selection renders with the full
@@ -1270,6 +1427,7 @@ const UserProfileCard = ({
                       src={b.src}
                       alt={b.title}
                       className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
+                      onClick={() => openBadgesWithTargetInMain({ tab: 'twitch-badges', query: b.title })}
                       onError={e => { e.currentTarget.style.display = 'none'; }}
                     />
                   </Tooltip>
@@ -1281,27 +1439,45 @@ const UserProfileCard = ({
                       fallbackUrls={b.fallbackUrls}
                       alt={b.title}
                       className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
-                      onClick={async () => {
-                        try {
-                          const { open } = await import('@tauri-apps/plugin-shell');
-                          await open(`https://7tv.app/badges/${b.id}`);
-                        } catch (err) {
-                          Logger.error('Failed to open URL:', err);
-                        }
-                      }}
+                      onClick={() => openBadgesWithBadgeInMain(b.id)}
                     />
                   </Tooltip>
                 ))}
-                {renderBadgeGroup('Other', thirdPartyBadges, (b, i) => (
-                  <Tooltip key={`3p-${b.id}-${i}`} content={`${b.title} (${b.provider?.toUpperCase() || 'Other'})`} side="top">
-                    <img
-                      src={b.src}
-                      alt={b.title}
-                      className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
-                      onError={e => { e.currentTarget.style.display = 'none'; }}
-                    />
-                  </Tooltip>
-                ))}
+                {(() => {
+                  // Third-party chat-client badges, grouped per provider so each
+                  // badge shows its source (FrankerFaceZ / BetterTTV / Chatterino
+                  // / …) instead of a single undifferentiated "Other" row.
+                  const renderThirdPartyItem = (b: any, i: number) => (
+                    <Tooltip key={`3p-${b.id}-${i}`} content={b.title} side="top">
+                      <img
+                        src={b.src}
+                        alt={b.title}
+                        className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform"
+                        onClick={() => openBadgesWithTargetInMain(
+                          b.provider === 'BTTV'
+                            ? { tab: 'bttv', query: b.title }
+                            : { tab: 'chat-clients', query: b.title },
+                        )}
+                        onError={e => { e.currentTarget.style.display = 'none'; }}
+                      />
+                    </Tooltip>
+                  );
+                  const known = new Set(THIRD_PARTY_PROVIDER_GROUPS.map(g => g.key));
+                  const ungrouped = visibleThirdPartyBadges.filter(b => !known.has(b.provider));
+                  return (
+                    <>
+                      {THIRD_PARTY_PROVIDER_GROUPS.map(({ key, label }) =>
+                        renderBadgeGroup(
+                          label,
+                          visibleThirdPartyBadges.filter(b => b.provider === key),
+                          renderThirdPartyItem,
+                          `3p-${key}`,
+                        ),
+                      )}
+                      {renderBadgeGroup('Other', ungrouped, renderThirdPartyItem, '3p-other')}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -1494,7 +1670,7 @@ const UserProfileCard = ({
                 )}
               </AnimatePresence>
             </div>
-          </div>
+          </motion.div>
         </div>
       </div>
     </>

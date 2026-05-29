@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/AppStore';
+import { Tooltip } from '../ui/Tooltip';
 import ProxyHealthChecker from './ProxyHealthChecker';
 import { SettingsSection, SettingsRow, SegmentedSelect } from './_primitives';
 
@@ -274,12 +275,13 @@ const PlayerSettings = () => {
                   </span>
                 )}
               </div>
+              <Tooltip content={validation.resolved_path}>
               <p
                 className="text-xs text-textPrimary truncate font-mono mt-0.5"
-                title={validation.resolved_path}
               >
                 {validation.resolved_path}
               </p>
+              </Tooltip>
             </div>
             <button
               onClick={handleClearStreamlinkPath}
@@ -348,12 +350,13 @@ const PlayerSettings = () => {
                               </span>
                             )}
                           </div>
+                          <Tooltip content={install.path}>
                           <p
                             className="text-xs text-textSecondary truncate font-mono mt-0.5"
-                            title={install.path}
                           >
                             {install.path}
                           </p>
+                          </Tooltip>
                         </div>
                         <div
                           className={`mt-1 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors ${

@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore } from '../../stores/AppStore';
 import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain } from '../../utils/openBadgesInMain';
 import streamNookLogo from '../../assets/streamnook-logo.png';
-import { User, Link, Unlink, Image as ImageIcon, Film, Heart } from 'lucide-react';
+import { User, Link, Unlink, Image as ImageIcon, Film, Heart, Check } from 'lucide-react';
 import {
   computePaintStyle,
   getBadgeImageUrls,
@@ -34,6 +34,7 @@ import {
   setActiveCosmetic,
 } from '../../services/supabaseService';
 import type { CosmeticCatalogEntry } from '../../services/supabaseService';
+import { getIdentityWithCache, setIdentity } from '../../services/identityService';
 import { getTier, StreamNookBadge } from '../StreamNookBadge';
 import { COSMETIC_ASSET_BY_SLUG } from '../cosmeticAssets';
 import {
@@ -46,8 +47,10 @@ import {
   type CaptureMode,
 } from '../../utils/shareProfile';
 import { clearCosmeticsMemoryCache, invalidateUserCosmetics, getCosmeticsWithFallback } from '../../services/cosmeticsCache';
+import { buildBttvProBadge, resolveBttvProUrl } from '../../services/bttvProBadge';
 import { invoke } from '@tauri-apps/api/core';
 import { Logger } from '../../utils/logger';
+import LinkedAccountsSection from './LinkedAccountsSection';
 
 export interface ChatIdentityCache {
   badges: ChatIdentityBadge[];
@@ -71,8 +74,22 @@ interface ChatIdentityBadge {
   is_selected: boolean;
 }
 
+// Selection indicator for the loadout pickers — a flat checkmark chip in the
+// item's top-right corner (replaces the old status dot). `accent` for Twitch /
+// StreamNook selections, the 7TV blue for 7TV cosmetics. Intentionally flat:
+// border + solid fill, no glow or ring.
+const CheckChip = ({ tone = 'accent' }: { tone?: 'accent' | 'seventv' }) => (
+  <div
+    className={`absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full border border-background flex items-center justify-center ${
+      tone === 'seventv' ? 'bg-[#29b6f6]' : 'bg-accent'
+    }`}
+  >
+    <Check size={9} strokeWidth={3.5} className="text-white" />
+  </div>
+);
+
 const ProfileSettings = () => {
-  const { isAuthenticated, currentUser, loginToTwitch, logoutFromTwitch, currentStream, closeSettings, addToast } = useAppStore();
+  const { isAuthenticated, currentUser, loginToTwitch, currentStream, addToast } = useAppStore();
   const profileCardRef = useRef<HTMLDivElement>(null);
   const [isSharing, setIsSharing] = useState(false);
   // Capture-progress UI state. `captureStage` drives which sub-component
@@ -114,10 +131,13 @@ const ProfileSettings = () => {
     ? getActiveCosmeticSlug(currentUser.user_id)
     : null;
 
-  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [twitchBadges, setTwitchBadges] = useState<TwitchBadge[]>([]);
   void twitchBadges;
   const [thirdPartyBadges, setThirdPartyBadges] = useState<ThirdPartyBadge[]>([]);
+  // Your own BTTV Pro badge, resolved client-side (it's WebSocket-only, so it
+  // can't ride the server-resolved picker list). Null when you don't have Pro,
+  // so the toggle only appears for Pro members.
+  const [selfBttvProBadge, setSelfBttvProBadge] = useState<ReturnType<typeof buildBttvProBadge> | null>(null);
   const [seventvBadges, setSeventvBadges] = useState<SevenTVBadge[]>([]);
   const [seventvPaint, setSeventvPaint] = useState<SevenTVPaint | null>(null);
   const [allSeventvPaints, setAllSeventvPaints] = useState<SevenTVPaint[]>([]);
@@ -131,6 +151,12 @@ const ProfileSettings = () => {
   const [chatIdentityBadges, setChatIdentityBadges] = useState<ChatIdentityBadge[]>([]);
   const [isFetchingIdentity, setIsFetchingIdentity] = useState(false);
   const [updatingBadgeId, setUpdatingBadgeId] = useState<string | null>(null);
+  // Shared cross-client loadout: which third-party badges to promote into chat
+  // and the profile card. `customized:false` ⇒ show everything (the default).
+  const [loadout, setLoadout] = useState<{ customized: boolean; badges: string[] }>({
+    customized: false,
+    badges: [],
+  });
 
   // Mounted gate so async resolvers don't setState on a dead component when
   // the user navigates away from the Profile tab mid-fetch. Important: set
@@ -208,17 +234,32 @@ const ProfileSettings = () => {
     if (!isAuthenticated || !currentUser) return;
 
     const loadProfile = async () => {
-      setIsLoadingBadges(true);
+      // INSTANT FIRST PAINT: render the cached profile synchronously, before any
+      // network wait. The 7TV auth validate below is a round-trip to 7TV, and it
+      // used to run FIRST — so even a warm cache took a couple seconds to show an
+      // unthemed card before everything popped in. Now the cache paints
+      // immediately; we only show the loading state when nothing is cached yet.
+      const cachedProfile = getProfileFromMemoryCache(currentUser.user_id);
+      if (cachedProfile && mountedRef.current) {
+        applyProfileData(cachedProfile);
+      } else if (mountedRef.current) {
+        setIsLoadingBadges(true);
+      }
 
       try {
         const status = (await invoke('get_seventv_auth_status')) as { is_authenticated: boolean };
-        if (mountedRef.current) setSeventvAuthConnected(status.is_authenticated);
+        // The status is an instant local (JWT-exp) read; if it claims connected,
+        // confirm authoritatively with 7TV so a revoked token can't read as
+        // connected here while the per-account editor says otherwise. This runs in
+        // the background now — it no longer gates the first paint above.
+        let connected = status.is_authenticated;
+        if (connected) {
+          connected = (await invoke('validate_seventv_token')) as boolean;
+        }
+        if (mountedRef.current) setSeventvAuthConnected(connected);
       } catch {
         if (mountedRef.current) setSeventvAuthConnected(false);
       }
-
-      const cachedProfile = getProfileFromMemoryCache(currentUser.user_id);
-      if (cachedProfile && mountedRef.current) applyProfileData(cachedProfile);
 
       const channelId = currentStream?.user_id || currentUser.user_id;
       const channelName = currentStream?.user_login || currentUser.login || currentUser.username;
@@ -240,6 +281,30 @@ const ProfileSettings = () => {
 
     loadProfile();
   }, [isAuthenticated, currentUser]);
+
+  // Load this member's saved loadout (which third-party badges they've chosen
+  // to display). Drives the checkmarks in the "Other Badges" picker, the card
+  // preview, and what other StreamNook clients render in chat.
+  useEffect(() => {
+    if (!currentUser?.user_id) return;
+    getIdentityWithCache(currentUser.user_id)
+      .then((lo) => {
+        if (mountedRef.current) setLoadout({ customized: lo.customized, badges: lo.badges });
+      })
+      .catch(() => {});
+  }, [currentUser?.user_id]);
+
+  // Resolve YOUR BTTV Pro badge so it can be offered as a toggle in the picker
+  // below. Pro is WebSocket-only and not in the server-resolved third-party list,
+  // so we fetch it on its own; null means no Pro (toggle hidden).
+  useEffect(() => {
+    if (!currentUser?.user_id) return;
+    let cancelled = false;
+    void resolveBttvProUrl(currentUser.user_id).then((url) => {
+      if (!cancelled) setSelfBttvProBadge(url ? buildBttvProBadge(url) : null);
+    });
+    return () => { cancelled = true; };
+  }, [currentUser?.user_id]);
 
   const applyProfileData = (profile: CachedProfile) => {
     setTwitchBadges(profile.twitchBadges);
@@ -302,7 +367,27 @@ const ProfileSettings = () => {
     if (!currentUser?.login) return;
     if (showSpinner) setIsFetchingIdentity(true);
     try {
-      await invoke('fetch_chat_identity_badges', { channelName: currentUser.login });
+      const result = (await invoke('fetch_chat_identity_badges', {
+        channelName: currentUser.login,
+      })) as { success: boolean; message: string; badges: ChatIdentityBadge[] };
+      // The GQL fast path returns the badges inline AND emits
+      // 'chat-identity-badges-found'. Use the RETURN VALUE here so a freshly
+      // mounted panel never depends on racing the async listener registration —
+      // that race (event fires before `await listen(...)` finishes) is what left
+      // the spinner stuck on "Loading badges..." forever, intermittently. The
+      // browser-scrape fallback returns an empty list and delivers later via the
+      // event, by which point the listener has long been registered.
+      if (mountedRef.current && result?.success && result.badges?.length) {
+        const seen = new Set<string>();
+        const deduped = result.badges.filter((b) => {
+          const key = `${b.id}-${b.version}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        setChatIdentityBadges(deduped);
+        setIsFetchingIdentity(false);
+      }
     } catch {
       if (mountedRef.current) setIsFetchingIdentity(false);
     }
@@ -540,6 +625,42 @@ const ProfileSettings = () => {
 
   const selectedGlobalBadge = chatIdentityBadges.find((b) => b.is_selected);
   const selected7TVBadge = seventvBadges.find((b: any) => b.selected);
+
+  // ── Third-party loadout (the cross-client "what shows in chat" selection) ──
+  // Opt-in: a third-party badge appears in the card + chat ONLY when explicitly
+  // selected. This matches the baseline (third-party badges aren't shown in chat
+  // by default) and keeps partial editors — like the website, which only resolves
+  // some providers — safe: each editor adds/removes only its own keys and
+  // preserves every other key already in the loadout.
+  const tpKey = (b: { provider: string; id: string }) => `${b.provider}:${b.id}`;
+  const isThirdPartyShown = (b: { provider: string; id: string }) =>
+    loadout.badges.includes(tpKey(b));
+  // Render the shown badges in the member's CHOSEN order (their stored loadout
+  // key order) so this preview matches chat + the profile card, which both honor
+  // that order. Filtering thirdPartyBadges directly kept provider/fetch order and
+  // is what made the preview disagree with chat.
+  // The full toggleable set = the server-resolved third-party badges PLUS your
+  // own BTTV Pro (resolved client-side; absent for non-Pro users). Drives both
+  // the preview ordering here and the picker grid below.
+  const allThirdParty: any[] = selfBttvProBadge
+    ? [...thirdPartyBadges, selfBttvProBadge]
+    : thirdPartyBadges;
+  const shownThirdPartyByKey = new Map<string, any>(
+    allThirdParty.map((b) => [tpKey(b as any), b]),
+  );
+  const shownThirdParty = loadout.badges
+    .map((k) => shownThirdPartyByKey.get(k))
+    .filter((b): b is NonNullable<typeof b> => b != null);
+  const toggleThirdParty = (b: { provider: string; id: string }) => {
+    if (!currentUser?.user_id) return;
+    const key = tpKey(b);
+    const nextBadges = loadout.badges.includes(key)
+      ? loadout.badges.filter((k) => k !== key)
+      : [...loadout.badges, key];
+    const next = { customized: true, badges: nextBadges };
+    setLoadout(next);
+    void setIdentity(currentUser.user_id, next.badges, null, true);
+  };
   const tier = streamNookUserNumber !== null ? getTier(streamNookUserNumber) : null;
 
   if (!isAuthenticated || !currentUser) {
@@ -658,6 +779,13 @@ const ProfileSettings = () => {
             {streamNookUserNumber !== null && currentUser?.user_id && (
               <StreamNookBadge userId={currentUser.user_id} userNumber={streamNookUserNumber} side="bottom" />
             )}
+            {/* Selected third-party badges — the card is the screenshot preview,
+                so it shows exactly the loadout other StreamNook users will see. */}
+            {shownThirdParty.map((badge: any) => (
+              <Tooltip key={`card-tp-${badge.provider}-${badge.id}`} content={`${badge.title} (${badge.provider.toUpperCase()})`} side="top">
+                <img src={badge.image4x || badge.imageUrl} alt={badge.title} className="w-6 h-6" />
+              </Tooltip>
+            ))}
             <h3
               className="text-3xl font-bold"
               style={seventvPaint ? computePaintStyle(seventvPaint as any, '#9146FF') : { color: 'var(--text-primary)' }}
@@ -715,6 +843,14 @@ const ProfileSettings = () => {
           </div>
         )}
         </div>
+
+      {/* Universal intro for the whole identity editor. Every section below —
+          Twitch global badges, StreamNook cosmetics, 7TV paints/badges, and
+          other third-party badges — controls what renders next to your name in
+          chat, so the guidance lives here once instead of per-section. */}
+      <p className="text-xs text-textSecondary">
+        Customize your identity. Choose what shows next to your name in chat.
+      </p>
 
       {/* Capture-progress card. Renders BELOW the profile card so it
           stays outside DXGI's capture rect — anything painted over the
@@ -805,15 +941,19 @@ const ProfileSettings = () => {
               const asset = COSMETIC_ASSET_BY_SLUG[cosmetic.slug];
               if (!asset) return null;
               const isActive = activeCosmeticSlug === cosmetic.slug;
+              // Switch only — never unequip. A StreamNook member always wears a
+              // badge so their StreamNook identity stays visible to other members;
+              // clicking the already-active badge is a no-op rather than clearing
+              // the selection back to none.
               return (
                 <Tooltip key={cosmetic.slug} content={cosmetic.name} side="top">
                   <div
-                    onClick={() => setActiveCosmetic(currentUser.user_id, isActive ? null : cosmetic.slug)}
+                    onClick={() => { if (!isActive) void setActiveCosmetic(currentUser.user_id, cosmetic.slug); }}
                     className={`
-                      relative p-2 rounded-lg cursor-pointer transition-all
+                      relative p-2 rounded-lg transition-all
                       ${isActive
-                        ? 'glass-input border-accent/50 ring-1 ring-accent/30'
-                        : 'border border-transparent hover:bg-glass hover:border-borderLight'}
+                        ? 'glass-input border-accent/50 ring-1 ring-accent/30 cursor-default'
+                        : 'border border-transparent cursor-pointer hover:bg-glass hover:border-borderLight'}
                     `}
                   >
                     <img
@@ -822,9 +962,7 @@ const ProfileSettings = () => {
                       className="w-8 h-8 object-contain"
                       draggable={false}
                     />
-                    {isActive && (
-                      <div className="absolute -top-1 -right-1 w-3 h-3 bg-accent rounded-full border-2 border-background" />
-                    )}
+                    {isActive && <CheckChip tone="accent" />}
                   </div>
                 </Tooltip>
               );
@@ -897,9 +1035,7 @@ const ProfileSettings = () => {
                   onClick={() => !updatingBadgeId && updateChatIdentity(badge)}
                 >
                   <img src={badge.image_url} alt={badge.title} className="w-8 h-8" />
-                  {badge.is_selected && (
-                    <div className="absolute -top-1 -right-1 w-3 h-3 bg-accent rounded-full border-2 border-background" />
-                  )}
+                  {badge.is_selected && <CheckChip tone="accent" />}
                 </div>
               </Tooltip>
             ))}
@@ -987,9 +1123,7 @@ const ProfileSettings = () => {
                         onClick={() => seventvAuthConnected && !isUpdating && handleSelectSeventvPaint(isSelected ? null : paint)}
                       >
                         <span style={computePaintStyle(paint as any, '#29b6f6')}>{paint.name}</span>
-                        {isSelected && (
-                          <div className="absolute -top-1 -right-1 w-3 h-3 bg-[#29b6f6] rounded-full border-2 border-background" />
-                        )}
+                        {isSelected && <CheckChip tone="seventv" />}
                       </div>
                     </Tooltip>
                   );
@@ -1023,9 +1157,7 @@ const ProfileSettings = () => {
                           alt={badge.tooltip || badge.name}
                           className="w-8 h-8"
                         />
-                        {isSelected && (
-                          <div className="absolute -top-1 -right-1 w-3 h-3 bg-[#29b6f6] rounded-full border-2 border-background" />
-                        )}
+                        {isSelected && <CheckChip tone="seventv" />}
                       </div>
                     </Tooltip>
                   ) : null;
@@ -1036,64 +1168,36 @@ const ProfileSettings = () => {
         </div>
       )}
 
-      {thirdPartyBadges.length > 0 && (
+      {allThirdParty.length > 0 && (
         <div className="glass-panel rounded-xl p-5">
           <h4 className="text-sm font-semibold text-textPrimary uppercase tracking-wide mb-4">
             Other Badges
           </h4>
           <div className="flex flex-wrap gap-2">
-            {thirdPartyBadges.map((badge: any, idx) => (
-              <Tooltip key={`${badge.provider}-${badge.id}-${idx}`} content={`${badge.title} (${badge.provider.toUpperCase()})`} side="top">
-                <div
-                  className="p-2 rounded-lg hover:bg-glass transition-all cursor-pointer"
-                  onClick={async () => {
-                    if (badge.link) {
-                      const { open } = await import('@tauri-apps/plugin-shell');
-                      await open(badge.link);
-                    }
-                  }}
-                >
-                  <img src={badge.image4x || badge.imageUrl} alt={badge.title} className="w-8 h-8" />
-                </div>
-              </Tooltip>
-            ))}
+            {allThirdParty.map((badge: any, idx) => {
+              const shown = isThirdPartyShown(badge);
+              return (
+                <Tooltip key={`${badge.provider}-${badge.id}-${idx}`} content={`${badge.title} (${badge.provider.toUpperCase()})`} side="top">
+                  <div
+                    onClick={() => toggleThirdParty(badge)}
+                    className={`
+                      relative p-2 rounded-lg cursor-pointer transition-all
+                      ${shown
+                        ? 'glass-input border-accent/50 ring-1 ring-accent/30'
+                        : 'border border-transparent opacity-50 hover:opacity-80 hover:bg-glass hover:border-borderLight'}
+                    `}
+                  >
+                    <img src={badge.image4x || badge.imageUrl} alt={badge.title} className="w-8 h-8" />
+                    {shown && <CheckChip tone="accent" />}
+                  </div>
+                </Tooltip>
+              );
+            })}
           </div>
         </div>
       )}
 
-      <div className="glass-panel rounded-xl p-4 flex items-center justify-between">
-        <p className="text-xs text-textSecondary">
-          Signed in as <span className="text-textPrimary font-medium">@{currentUser.login}</span>
-        </p>
-        {!showLogoutConfirm ? (
-          <button
-            onClick={() => setShowLogoutConfirm(true)}
-            className="px-4 py-2 text-sm font-medium text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
-          >
-            Sign out
-          </button>
-        ) : (
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-textSecondary">Sign out?</span>
-            <button
-              onClick={() => setShowLogoutConfirm(false)}
-              className="px-3 py-1.5 text-sm font-medium glass-button"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => {
-                logoutFromTwitch();
-                setShowLogoutConfirm(false);
-                closeSettings();
-              }}
-              className="px-3 py-1.5 text-sm font-medium bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-all"
-            >
-              Confirm
-            </button>
-          </div>
-        )}
-      </div>
+      <LinkedAccountsSection />
     </div>
   );
 };

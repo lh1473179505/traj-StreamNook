@@ -1,0 +1,107 @@
+import { useEffect, useRef, useState } from 'react';
+import { Check, ChevronDown, User } from 'lucide-react';
+import { useSendAccountStore } from '../stores/sendAccountStore';
+import { Tooltip } from './ui/Tooltip';
+
+function Avatar({ url, size }: { url: string | null; size: number }) {
+  if (url) {
+    return (
+      <img
+        src={url}
+        alt=""
+        className="rounded-full object-cover flex-shrink-0"
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  return (
+    <div
+      className="rounded-full bg-white/10 flex items-center justify-center flex-shrink-0"
+      style={{ width: size, height: size }}
+    >
+      <User size={Math.round(size * 0.6)} className="text-textMuted" />
+    </div>
+  );
+}
+
+/**
+ * Picker for choosing which linked account a chat message is sent from. Renders
+ * nothing unless 2+ accounts are linked, so single-account users see no change.
+ * Lives just to the right of the emote button inside the chat input.
+ */
+export default function SendAsPicker() {
+  const accounts = useSendAccountStore((s) => s.accounts);
+  const sendAsId = useSendAccountStore((s) => s.sendAsId);
+  const setSendAsId = useSendAccountStore((s) => s.setSendAsId);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  if (accounts.length < 2) return null;
+
+  const primary = accounts.find((a) => a.is_primary) ?? accounts[0];
+  const selected = accounts.find((a) => a.user_id === sendAsId) ?? primary;
+  const isAlt = !selected.is_primary;
+
+  return (
+    <div ref={ref} className="relative">
+      <Tooltip content={`Sending as @${selected.login}`} side="top">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-label="Choose which account to send from"
+          className={`flex items-center gap-0.5 rounded-full p-0.5 transition-colors ${
+            isAlt ? 'ring-1 ring-accent' : 'hover:bg-white/10'
+          }`}
+        >
+          <Avatar url={selected.avatar_url} size={20} />
+          <ChevronDown size={11} className="text-textMuted" />
+        </button>
+      </Tooltip>
+
+      {open && (
+        <div className="absolute bottom-full left-0 mb-2 w-56 max-h-72 overflow-y-auto scrollbar-thin glass-panel rounded-xl p-1.5 z-50">
+          <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-textMuted">
+            Send messages as
+          </div>
+          {accounts.map((account) => {
+            const active = account.user_id === selected.user_id;
+            return (
+              <button
+                key={account.user_id}
+                type="button"
+                onClick={() => {
+                  setSendAsId(account.user_id);
+                  setOpen(false);
+                }}
+                className={`w-full flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                  active ? 'bg-white/[0.06]' : 'hover:bg-white/[0.04]'
+                }`}
+              >
+                <Avatar url={account.avatar_url} size={26} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-textPrimary truncate">
+                    {account.display_name || account.login}
+                  </div>
+                  <div className="text-[11px] text-textSecondary truncate">
+                    @{account.login}
+                    {account.is_primary ? ' · main' : ''}
+                  </div>
+                </div>
+                {active && <Check size={15} className="text-accent flex-shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

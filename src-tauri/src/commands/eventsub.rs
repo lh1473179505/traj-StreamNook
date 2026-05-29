@@ -57,3 +57,29 @@ pub async fn get_eventsub_session_id(
     let service = state.0.read().await;
     Ok(service.get_session_id().await)
 }
+
+/// Add a live channel.moderate subscription for a channel the user moderates
+/// (e.g. a MultiNook tile), so its mod view populates alongside the main stream.
+/// Safe to call for any channel: if you don't moderate it, the subscription is
+/// silently skipped (403). The channel is remembered and re-subscribed across
+/// EventSub reconnects until remove_eventsub_moderation is called.
+#[tauri::command]
+pub async fn add_eventsub_moderation(
+    broadcaster_id: String,
+    state: State<'_, EventSubServiceState>,
+) -> Result<(), String> {
+    let service = state.0.read().await;
+    service.add_mod_channel(broadcaster_id).await;
+    Ok(())
+}
+
+/// Stop tracking a moderated channel and tear down its live moderation subscription.
+#[tauri::command]
+pub async fn remove_eventsub_moderation(
+    broadcaster_id: String,
+    state: State<'_, EventSubServiceState>,
+) -> Result<(), String> {
+    let service = state.0.read().await;
+    service.remove_mod_channel(broadcaster_id).await;
+    Ok(())
+}

@@ -1,16 +1,19 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
-use log::{debug, error};
+use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+
+use crate::services::cache_service;
 
 const MAX_LOGS: usize = 500;
 const MAX_ACTIVITY_HISTORY: usize = 15;
-const WEBHOOK_COOLDOWN_MS: u64 = 30000; // 30 seconds
-const BATCH_DELAY_MS: u64 = 5000; // 5 seconds to batch errors
+// Rotate the local crash log once it grows past ~1 MB so it can't balloon unbounded.
+const MAX_CRASH_LOG_BYTES: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,18 +54,12 @@ pub struct ActivityEntry {
 struct LogState {
     logs: VecDeque<LogEntry>,
     activity_history: VecDeque<ActivityEntry>,
-    error_buffer: Vec<LogEntry>,
-    last_webhook_send: u64,
-    webhook_scheduled: bool,
 }
 
 lazy_static! {
     static ref LOG_STATE: Arc<Mutex<LogState>> = Arc::new(Mutex::new(LogState {
         logs: VecDeque::with_capacity(MAX_LOGS),
         activity_history: VecDeque::with_capacity(MAX_ACTIVITY_HISTORY),
-        error_buffer: Vec::new(),
-        last_webhook_send: 0,
-        webhook_scheduled: false,
     }));
 }
 
@@ -92,16 +89,33 @@ impl LogService {
         }
         state.logs.push_back(entry.clone());
 
-        // Queue errors for Discord webhook
+        // Persist genuine errors to the local crash log, skipping benign noise
+        // (HLS buffer hiccups, handled React boundary errors, CDN blips, etc.).
+        // This file stays on the user's machine and is never sent anywhere.
         if matches!(level, LogLevel::Error) && !Self::should_ignore_error(&entry) {
-            state.error_buffer.push(entry);
+            // Pull recent warn/error breadcrumbs (excluding this entry) and the
+            // local activity history so the crash log carries some context.
+            let breadcrumbs: Vec<LogEntry> = state
+                .logs
+                .iter()
+                .rev()
+                .skip(1)
+                .filter(|l| matches!(l.level, LogLevel::Warn | LogLevel::Error))
+                .take(15)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let activity: Vec<ActivityEntry> = state.activity_history.iter().cloned().collect();
+            drop(state); // Release lock before file I/O
 
-            // Schedule webhook send if not already scheduled
-            if !state.webhook_scheduled {
-                state.webhook_scheduled = true;
-                drop(state); // Release lock before spawning task
-                Self::schedule_webhook_send();
-            }
+            tokio::spawn(async move {
+                if let Err(e) = LogService::append_to_crash_log(entry, breadcrumbs, activity).await
+                {
+                    error!("[LogService] Failed to write crash log: {}", e);
+                }
+            });
         }
 
         Ok(())
@@ -225,205 +239,84 @@ impl LogService {
             .any(|pattern| full_message.contains(pattern))
     }
 
-    /// Schedule sending buffered errors to Discord
-    fn schedule_webhook_send() {
-        tokio::spawn(async {
-            // Wait for batch delay
-            tokio::time::sleep(tokio::time::Duration::from_millis(BATCH_DELAY_MS)).await;
-
-            loop {
-                let mut state = LOG_STATE.lock().await;
-                state.webhook_scheduled = false;
-
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-
-                // Check cooldown
-                if now - state.last_webhook_send < WEBHOOK_COOLDOWN_MS {
-                    // Wait for cooldown to expire
-                    let remaining = WEBHOOK_COOLDOWN_MS - (now - state.last_webhook_send);
-                    drop(state); // Release lock
-                    tokio::time::sleep(tokio::time::Duration::from_millis(remaining)).await;
-                    continue; // Check again
-                }
-
-                if !state.error_buffer.is_empty() {
-                    let errors_to_send = state.error_buffer.clone();
-                    state.error_buffer.clear();
-                    state.last_webhook_send = now;
-
-                    // Get recent logs and activity for context
-                    // Fetch more logs since we filter to WARN/ERROR only for breadcrumbs
-                    let recent_logs: Vec<LogEntry> = state
-                        .logs
-                        .iter()
-                        .rev()
-                        .take(50)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-
-                    let recent_activity: Vec<ActivityEntry> =
-                        state.activity_history.iter().cloned().collect();
-
-                    drop(state); // Release lock before network call
-
-                    // Send to Discord in background task
-                    tokio::spawn(async move {
-                        if let Err(e) = LogService::send_to_discord_webhook(
-                            errors_to_send,
-                            recent_logs,
-                            recent_activity,
-                        )
-                        .await
-                        {
-                            error!("[LogService] Failed to send to Discord webhook: {}", e);
-                        }
-                    });
-                }
-
-                break; // Exit loop after processing
-            }
-        });
+    /// Resolve the path to the local crash log (`<app_data>/logs/errors.log`).
+    fn crash_log_path() -> Result<std::path::PathBuf> {
+        let logs_dir = cache_service::get_app_data_dir()?.join("logs");
+        std::fs::create_dir_all(&logs_dir)?;
+        Ok(logs_dir.join("errors.log"))
     }
 
-    /// Send errors to Discord webhook via background task
-    async fn send_to_discord_webhook(
-        errors: Vec<LogEntry>,
-        recent_logs: Vec<LogEntry>,
-        recent_activity: Vec<ActivityEntry>,
+    /// Append a formatted error report (with recent breadcrumbs and local
+    /// activity) to the crash log. Nothing here leaves the user's machine.
+    async fn append_to_crash_log(
+        error_entry: LogEntry,
+        breadcrumbs: Vec<LogEntry>,
+        activity: Vec<ActivityEntry>,
     ) -> Result<()> {
-        // Get webhook URL from environment variable or settings
-        // For now, using the hardcoded URL from the original TS version
-        let webhook_url = env!("DISCORD_WEBHOOK_URL");
+        let path = Self::crash_log_path()?;
 
-        // Build error details
-        let error_details = errors
-            .iter()
-            .map(|e| {
-                format!(
-                    "[{}] {}{}",
-                    e.category,
-                    e.message,
-                    e.data
-                        .as_ref()
-                        .map_or(String::new(), |d| format!(" | {}", d))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Rotate to errors.log.old once the active log gets too large.
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if meta.len() > MAX_CRASH_LOG_BYTES {
+                let _ = tokio::fs::rename(&path, path.with_file_name("errors.log.old")).await;
+            }
+        }
 
-        let code_block_errors = format!(
-            "```\n{}\n```",
-            &error_details[..error_details.len().min(1500)]
-        );
-
-        // Build breadcrumbs - only include WARN and ERROR level logs for signal clarity
-        let breadcrumbs = recent_logs
-            .iter()
-            .filter(|l| matches!(l.level, LogLevel::Warn | LogLevel::Error))
-            .map(|l| {
-                let time = l.timestamp.split('T').nth(1).unwrap_or("");
-                let time_short = time.split('.').next().unwrap_or("");
-                format!(
-                    "[{}] [{}] {}",
-                    time_short,
-                    l.level.to_string().to_uppercase(),
-                    &l.message[..l.message.len().min(80)]
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Build activity log
-        let activity_log = recent_activity
-            .iter()
-            .map(|a| {
-                let dt = DateTime::parse_from_rfc3339(&a.timestamp).ok();
-                let time = dt
-                    .map(|d| d.format("%H:%M:%S").to_string())
-                    .unwrap_or_else(|| "??:??:??".to_string());
-                format!("{} → {}", time, a.action)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Build embed fields
-        let mut fields = vec![
-            serde_json::json!({
-                "name": "App Version",
-                "value": format!("`{}`", env!("CARGO_PKG_VERSION")),
-                "inline": true
-            }),
-            serde_json::json!({
-                "name": "Platform",
-                "value": format!("`{}`", std::env::consts::OS),
-                "inline": true
-            }),
-            serde_json::json!({
-                "name": "Error Count",
-                "value": format!("`{}`", errors.len()),
-                "inline": true
-            }),
-        ];
+        let mut block = String::new();
+        block.push_str(&format!(
+            "\n========== {} ==========\n",
+            error_entry.timestamp
+        ));
+        block.push_str(&format!(
+            "App {} on {}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS
+        ));
+        block.push_str(&format!(
+            "ERROR [{}] {}{}\n",
+            error_entry.category,
+            error_entry.message,
+            error_entry
+                .data
+                .as_ref()
+                .map_or(String::new(), |d| format!(" | {}", d))
+        ));
 
         if !breadcrumbs.is_empty() {
-            fields.push(serde_json::json!({
-                "name": "🍞 Breadcrumbs (Last 15 Logs)",
-                "value": format!("```\n{}\n```", breadcrumbs),
-                "inline": false
-            }));
-        }
-
-        if !activity_log.is_empty() {
-            fields.push(serde_json::json!({
-                "name": "👥 User Actions",
-                "value": format!("```\n{}\n```", activity_log),
-                "inline": false
-            }));
-        }
-
-        fields.push(serde_json::json!({
-            "name": "Errors",
-            "value": code_block_errors,
-            "inline": false
-        }));
-
-        let embed = serde_json::json!({
-            "title": "🚨 StreamNook Error Report",
-            "color": 0xFF0000, // Red
-            "fields": fields,
-            "timestamp": Utc::now().to_rfc3339(),
-            "footer": {
-                "text": "StreamNook • Auto Error Report"
+            block.push_str("\n-- Recent warnings/errors --\n");
+            for l in &breadcrumbs {
+                let time = l
+                    .timestamp
+                    .split('T')
+                    .nth(1)
+                    .and_then(|t| t.split('.').next())
+                    .unwrap_or("");
+                block.push_str(&format!(
+                    "[{}] [{}] [{}] {}\n",
+                    time,
+                    l.level.to_string().to_uppercase(),
+                    l.category,
+                    l.message
+                ));
             }
-        });
-
-        let payload = serde_json::json!({
-            "embeds": [embed]
-        });
-
-        // Send webhook request
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-
-        let response = client
-            .post(webhook_url)
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("Discord webhook returned status: {}", response.status());
         }
 
-        debug!("[LogService] Error report sent to Discord");
+        if !activity.is_empty() {
+            block.push_str("\n-- Recent activity --\n");
+            for a in &activity {
+                let time = DateTime::parse_from_rfc3339(&a.timestamp)
+                    .map(|d| d.format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|_| "??:??:??".to_string());
+                block.push_str(&format!("{} -> {}\n", time, a.action));
+            }
+        }
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        file.write_all(block.as_bytes()).await?;
         Ok(())
     }
 }

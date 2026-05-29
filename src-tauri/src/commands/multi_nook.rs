@@ -1,4 +1,5 @@
 use crate::models::settings::AppState;
+use crate::services::auth_proxy;
 use crate::services::multi_nook_server::MultiNookServer;
 use crate::services::streamlink_manager::StreamlinkManager;
 use log::debug;
@@ -71,6 +72,30 @@ pub async fn start_multi_nook(
         };
 
         (args, settings.streamlink.clone(), custom)
+    };
+
+    // Splice mode: when the ad-block proxy is enabled, route Streamlink through
+    // our local splice server (auth_proxy) instead of handing it the raw TTVLOL
+    // proxy. The splice server fetches the ad-free TTVLOL master plus the authed
+    // direct master and merges them — that splicing is what actually strips ads.
+    // The single-stream view already does this; MultiNook didn't, which is why
+    // its tiles showed ads the solo player doesn't. The server keys cached
+    // masters per channel, so every tile safely shares one instance.
+    let splice_active = streamlink_settings.use_proxy;
+    let streamlink_args = if splice_active && !streamlink_args.is_empty() {
+        let twitch_auth = state.twitch_auth.clone();
+        match auth_proxy::ensure_running(&streamlink_args, twitch_auth).await {
+            Ok(port) => auth_proxy::streamlink_proxy_arg(port),
+            Err(e) => {
+                log::warn!(
+                    "[MultiNook] splice server failed to start ({}); falling back to raw proxy",
+                    e
+                );
+                streamlink_args
+            }
+        }
+    } else {
+        streamlink_args
     };
 
     // Get the effective Streamlink path

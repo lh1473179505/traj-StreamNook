@@ -1,6 +1,7 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
 import { SettingsSection } from './_primitives';
+import { Tooltip } from '../ui/Tooltip';
 import type { HighlightBadge } from '../../types';
 
 function newRuleId(): string {
@@ -62,16 +63,16 @@ const BadgeHighlightsSettings = () => {
           {BADGE_PRESETS.map((p) => {
             const already = badges.some((b) => b.badge_key.toLowerCase() === p.key.toLowerCase());
             return (
+              <Tooltip key={p.key} content={p.key}>
               <button
-                key={p.key}
                 onClick={() => addBadge(p)}
                 disabled={already}
                 className="text-[11px] px-2 py-1 rounded-md bg-glass/40 border border-borderSubtle text-textSecondary hover:text-textPrimary hover:bg-glass/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                title={p.key}
               >
                 <Plus size={10} className="inline mr-1 -mt-0.5" />
                 {p.label}
               </button>
+              </Tooltip>
             );
           })}
         </div>

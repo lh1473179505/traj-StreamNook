@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod announcements;
 pub mod app;
 pub mod automation;
@@ -18,9 +19,11 @@ pub mod emoji;
 pub mod emotes;
 pub mod eventsub;
 pub mod hype_train;
+pub mod identity;
 pub mod justlog;
 pub mod layout;
 pub mod logs;
+pub mod mod_log_storage;
 pub mod multi_nook;
 pub mod profile_cache;
 pub mod proxy_health;

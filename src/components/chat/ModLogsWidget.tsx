@@ -1,97 +1,537 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
 import { useAppStore } from '../../stores/AppStore';
+import { useChatConnectionStore } from '../../stores/chatConnectionStore';
+import { usemultiNookStore } from '../../stores/multiNookStore';
 import { motion, AnimatePresence } from 'framer-motion';
+import type { ModLogEvent } from '../../types';
+import { openProfilePopup } from '../../utils/openProfilePopup';
+import { colorForAction, highlightContainerStyle, type HighlightStyleKey } from '../../utils/modLogCategories';
+import { useAvatar } from '../../utils/avatarCache';
+import { Tooltip } from '../ui/Tooltip';
 
-export const ModLogsWidget: React.FC = () => {
-  const { modLogs, clearModLogs, settings } = useAppStore();
-  const logsContainerRef = useRef<HTMLDivElement>(null);
+// Newest entries are prepended at the top. Keep the view pinned to the top (so
+// the newest is always visible and older entries slide down beneath it) while
+// the user is within this many pixels of the top; if they've scrolled further
+// down to read history, leave their position alone.
+const TOP_STICK_PX = 60;
 
-  // Auto-scroll to bottom on new logs
+function humanDuration(secs?: number): string | undefined {
+  if (secs === undefined || secs === null || Number.isNaN(secs)) return undefined;
+  if (secs >= 86400) return `${Math.round(secs / 86400)}d`;
+  if (secs >= 3600) return `${Math.round(secs / 3600)}h`;
+  if (secs >= 60) return `${Math.round(secs / 60)}m`;
+  return `${secs}s`;
+}
+
+// A small round avatar resolved by login, with an initial fallback while it loads
+// (or if the user has none).
+const Avatar: React.FC<{ login?: string; name?: string; size?: number }> = ({ login, name, size = 18 }) => {
+  const url = useAvatar(login);
+  const initial = (name || login || '?').charAt(0).toUpperCase();
+  return (
+    <span
+      className="inline-flex items-center justify-center rounded-full overflow-hidden bg-background text-textSecondary font-medium flex-shrink-0 select-none"
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.5) }}
+    >
+      {url ? (
+        <img src={url} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+      ) : (
+        initial
+      )}
+    </span>
+  );
+};
+
+// Short, scannable label for the header (the colored severity word). The
+// participants line carries who/whom; this is just the action.
+function labelForAction(log: ModLogEvent): { label: string; detail?: string } {
+  const a = (log.action || '').toLowerCase();
+  switch (a) {
+    case 'ban': return { label: 'Banned' };
+    case 'timeout': return { label: 'Timed out', detail: humanDuration(log.duration) };
+    case 'delete': return { label: 'Message deleted' };
+    case 'clear':
+    case 'clear_chat': return { label: 'Chat cleared' };
+    case 'unban': return { label: 'Unbanned' };
+    case 'untimeout': return { label: 'Timeout lifted' };
+    case 'warn': return { label: 'Warned' };
+    case 'vip': return { label: 'VIP granted' };
+    case 'unvip': return { label: 'VIP removed' };
+    case 'mod': return { label: 'Modded' };
+    case 'unmod': return { label: 'Unmodded' };
+    case 'raid': return { label: 'Raid started' };
+    case 'unraid': return { label: 'Raid cancelled' };
+    case 'emoteonly':
+    case 'emote_only_on': return { label: 'Emote-only on' };
+    case 'emoteonlyoff':
+    case 'emote_only_off': return { label: 'Emote-only off' };
+    case 'followers':
+    case 'follower_only_on': return { label: 'Followers-only on' };
+    case 'followersoff':
+    case 'follower_only_off': return { label: 'Followers-only off' };
+    case 'subscribers':
+    case 'subscriber_only_on': return { label: 'Subs-only on' };
+    case 'subscribersoff':
+    case 'subscriber_only_off': return { label: 'Subs-only off' };
+    case 'slow':
+    case 'slow_mode_on': return { label: 'Slow mode on' };
+    case 'slowoff':
+    case 'slow_mode_off': return { label: 'Slow mode off' };
+    case 'uniquechat': return { label: 'Unique-chat on' };
+    case 'uniquechatoff': return { label: 'Unique-chat off' };
+    case 'add_blocked_term': return { label: 'Blocked term added' };
+    case 'remove_blocked_term': return { label: 'Blocked term removed' };
+    case 'add_permitted_term': return { label: 'Permitted term added' };
+    case 'remove_permitted_term': return { label: 'Permitted term removed' };
+    case 'approve_unban_request': return { label: 'Unban approved' };
+    case 'deny_unban_request': return { label: 'Unban denied' };
+    default:
+      return { label: (a.replace(/_/g, ' ') || 'action').replace(/^\w/, (c) => c.toUpperCase()) };
+  }
+}
+
+const ModLogRow: React.FC<{
+  log: ModLogEvent;
+  colors?: Record<string, string>;
+  highlightStyle: HighlightStyleKey;
+  showChannel: boolean;
+}> = ({ log, colors, highlightStyle, showChannel }) => {
+  const color = colorForAction(log.action, colors);
+  const { label, detail } = labelForAction(log);
+
+  const open = (e: React.MouseEvent, id?: string, login?: string, name?: string) => {
+    if (!login) return; // id is optional — openProfilePopup resolves it from the login
+    void openProfilePopup({
+      userId: id || '',
+      username: login.toLowerCase(),
+      displayName: name || login,
+      // The login (not the display name): badge + IVR lookups and the
+      // channel-id resolution in openProfilePopup all key off the channel
+      // login. Without the right channel, badges resolve in the viewed user's
+      // own channel and everyone shows a broadcaster badge.
+      channelName: log.channel || log.channel_display || '',
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
+  };
+
+  const modName =
+    log.moderator_name &&
+    log.moderator_name !== 'Unknown' &&
+    log.moderator_name !== 'A moderator' &&
+    log.moderator_name !== 'Twitch System'
+      ? log.moderator_name
+      : undefined;
+  const targetName =
+    log.target_user_name && log.target_user_name !== 'Stream/Settings'
+      ? log.target_user_name
+      : undefined;
+  const isSelf = !!(modName && targetName && modName.toLowerCase() === targetName.toLowerCase());
+  const showArrow = !!modName && !!targetName && !isSelf;
+  const modClickable = !!log.moderator_login;
+  const targetClickable = !!log.target_user_login;
+
+  const time = new Date(log.timestamp).toLocaleTimeString([], {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const channelLabel = log.channel_display || log.channel;
+  const hasParticipants = !!modName || (!!targetName && !isSelf) || isSelf;
+  const showChannelChip = showChannel && !!channelLabel;
+  const nameClass = 'hover:underline cursor-pointer';
+  const labelStyle: React.CSSProperties = highlightStyle === 'box' ? {} : { color };
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ layout: { type: 'spring', stiffness: 500, damping: 40 }, opacity: { duration: 0.2 } }}
+      style={highlightContainerStyle(highlightStyle, color)}
+      className="rounded-md px-2.5 py-2 bg-secondary/60 border border-borderSubtle"
+    >
+      {/* Header: severity dot + action label, time on the right */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="h-2 w-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+          <span
+            className={`text-[13px] font-semibold truncate ${highlightStyle === 'box' ? 'text-text' : ''}`}
+            style={labelStyle}
+          >
+            {label}
+            {detail && <span className="font-normal opacity-80"> · {detail}</span>}
+          </span>
+        </div>
+        <time className="text-[11px] text-textSecondary tabular-nums flex-shrink-0">{time}</time>
+      </div>
+
+      {/* Who did it / to whom — moderator pfp + name, then target */}
+      {hasParticipants && (
+        <div className="mt-1.5 ml-4 flex flex-wrap items-center gap-1.5 text-[12px] text-textSecondary min-w-0">
+          {modName && (
+            <span className="flex items-center gap-1.5 min-w-0">
+              {log.moderator_login && <Avatar login={log.moderator_login} name={modName} size={16} />}
+              {modClickable ? (
+                <Tooltip content={`View ${modName}'s profile`}>
+                  <span
+                    className={`text-text ${nameClass}`}
+                    onClick={(e) => open(e, log.moderator_id, log.moderator_login, modName)}
+                  >
+                    {modName}
+                  </span>
+                </Tooltip>
+              ) : (
+                <span className="text-text">{modName}</span>
+              )}
+            </span>
+          )}
+          {showArrow && <span className="text-textSecondary/60">&rarr;</span>}
+          {targetName &&
+            !isSelf &&
+            (targetClickable ? (
+              <Tooltip content={`View ${targetName}'s profile`}>
+                <span
+                  className={`text-text ${nameClass}`}
+                  onClick={(e) => open(e, log.target_user_id, log.target_user_login, targetName)}
+                >
+                  {targetName}
+                </span>
+              </Tooltip>
+            ) : (
+              <span className="text-text">{targetName}</span>
+            ))}
+        </div>
+      )}
+
+      {/* The message involved in the action (e.g. the deleted message text) */}
+      {log.message && (
+        <div className="mt-1.5 ml-4 text-[12px] text-text break-words rounded bg-background/60 border-l-2 border-borderSubtle px-2 py-1">
+          {log.message}
+        </div>
+      )}
+
+      {/* Channel (only when combining multiple channels) + reason */}
+      {(showChannelChip || log.reason) && (
+        <div className="mt-1.5 ml-4 flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+          {showChannelChip && (
+            <span className="flex items-center gap-1.5 min-w-0">
+              <Avatar login={log.channel} name={channelLabel} size={14} />
+              <span className="text-[11px] text-textSecondary truncate max-w-[140px]">{channelLabel}</span>
+            </span>
+          )}
+          {log.reason && (
+            <span className="text-[11px] italic text-textSecondary truncate">"{log.reason}"</span>
+          )}
+        </div>
+      )}
+    </motion.div>
+  );
+};
+
+// One channel's column in the split view. Owns its own scroll so each channel's
+// log scrolls independently, and auto-sticks to the newest entry.
+const ModLogColumn: React.FC<{
+  channel: { login: string; name: string };
+  logs: ModLogEvent[];
+  colors?: Record<string, string>;
+  highlightStyle: HighlightStyleKey;
+  isFirst: boolean;
+}> = ({ channel, logs, colors, highlightStyle, isFirst }) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (logsContainerRef.current) {
-      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
-    }
-  }, [modLogs]);
+    const el = scrollRef.current;
+    if (el && el.scrollTop <= TOP_STICK_PX) el.scrollTop = 0;
+  }, [logs.length]);
 
-  if (!settings.show_mod_logs) return null;
+  return (
+    <div
+      className={`flex min-w-0 flex-1 flex-col overflow-hidden ${
+        isFirst ? '' : 'border-l border-borderSubtle'
+      }`}
+    >
+      <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-borderSubtle bg-secondary/30 px-2 py-1">
+        <Avatar login={channel.login} name={channel.name} size={14} />
+        <span className="truncate text-[12px] font-medium text-textSecondary">{channel.name}</span>
+        {logs.length > 0 && (
+          <span className="ml-auto flex-shrink-0 rounded-full bg-background px-1.5 text-[10px] text-textMuted">
+            {logs.length}
+          </span>
+        )}
+      </div>
+      <div
+        ref={scrollRef}
+        style={{ overflowAnchor: 'none' }}
+        className="flex-1 space-y-1.5 overflow-y-auto scrollbar-thin scrollbar-thumb-accent scrollbar-track-transparent p-1.5"
+      >
+        {logs.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-xs text-textMuted">No events</div>
+        ) : (
+          <AnimatePresence initial={false}>
+            {logs.map((log) => (
+              <ModLogRow
+                key={log.id}
+                log={log}
+                colors={colors}
+                highlightStyle={highlightStyle}
+                showChannel={false}
+              />
+            ))}
+          </AnimatePresence>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Persisted preference for splitting the logs into one column per channel.
+// Default on, so a multi-channel session auto-splits (and collapses to a single
+// combined list when only one channel is open). It's a viewing preference, not
+// per-window, so we keep it in localStorage shared across windows.
+const SPLIT_PREF_KEY = 'streamnook.modlogs.split';
+function loadSplitPref(): boolean {
+  try {
+    return localStorage.getItem(SPLIT_PREF_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+// `forceShow` lets a host render the pane regardless of the global
+// `settings.show_mod_logs` preference. The main app leaves it unset (the pane
+// follows the global setting); the MultiChat popout passes `forceShow` because
+// it owns its own per-window mod-logs toggle and shouldn't be coupled to the
+// main window's setting.
+export const ModLogsWidget: React.FC<{
+  forceShow?: boolean;
+  /** login -> display name, supplied by hosts that know proper capitalization
+   *  (e.g. the MultiChat popout's tab list). Falls back to MultiNook slots /
+   *  the watched stream / the bare login when absent. */
+  channelLabels?: Record<string, string>;
+  /** When provided, renders a gear in the header that jumps straight to the
+   *  moderation settings. Only the main window passes this — the MultiChat
+   *  popout doesn't host the full settings overlay, so it leaves it off rather
+   *  than show a button that goes nowhere. */
+  onOpenSettings?: () => void;
+}> = ({ forceShow, channelLabels, onOpenSettings }) => {
+  const {
+    modLogs,
+    clearModLogs,
+    settings,
+    loadModLogsForChannel,
+    pruneModLogsToChannels,
+    currentStream,
+    channelsInPopouts,
+  } = useAppStore();
+  const slots = usemultiNookStore((s) => s.slots);
+  const channelKeys = useChatConnectionStore((s) => Array.from(s.channels.keys()).sort().join(','));
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const modColors = settings.moderation?.mod_log_colors;
+  const highlightStyle: HighlightStyleKey = settings.moderation?.mod_log_highlight_style ?? 'box';
+
+  // Channels with a chat open *somewhere* — main-window chats (single stream +
+  // MultiNook tiles) plus MultiChat popout chats. Only these contribute to the
+  // pane; once you leave a channel (exit the stream, remove a tile, close a
+  // popout chat) its entries drop out of the live view. They stay on disk for
+  // when you reopen the channel.
+  const popoutKeys = useMemo(
+    () => Array.from(channelsInPopouts).map((c) => c.toLowerCase()).sort().join(','),
+    [channelsInPopouts],
+  );
+  const activeSet = useMemo(
+    () => new Set([...channelKeys.split(','), ...popoutKeys.split(',')].filter(Boolean)),
+    [channelKeys, popoutKeys],
+  );
+  const visibleLogs = useMemo(
+    () => modLogs.filter((l) => l.channel && activeSet.has(l.channel.toLowerCase())),
+    [modLogs, activeSet],
+  );
+
+  // With more than one channel visible (combined modding), each entry shows its
+  // own channel; with one, the header carries it so entries stay clean.
+  const distinctChannels = useMemo(
+    () => Array.from(new Set(visibleLogs.map((l) => (l.channel || '').toLowerCase()).filter(Boolean))),
+    [visibleLogs],
+  );
+  const showChannelPerEntry = distinctChannels.length > 1;
+
+  // Every channel with an open chat in this window — the accounts you're
+  // actively watching. Drives the header chips so your whole lineup shows at a
+  // glance, even channels that haven't produced a mod event yet. (Previously the
+  // header derived a single channel from the entries that existed, so a quiet
+  // second chat never appeared in it.)
+  const activeChannels = useMemo(() => {
+    const labelFor = (login: string): string => {
+      if (channelLabels && channelLabels[login]) return channelLabels[login];
+      const slot = slots.find((s) => s.channelLogin.toLowerCase() === login);
+      if (slot?.channelName) return slot.channelName;
+      if (currentStream?.user_login?.toLowerCase() === login) {
+        return currentStream.user_name || login;
+      }
+      return login;
+    };
+    return Array.from(activeSet)
+      .sort()
+      .map((login) => ({ login, name: labelFor(login) }));
+  }, [activeSet, channelLabels, slots, currentStream]);
+
+  // Split the logs into a column per channel. Auto-engages with >1 channel;
+  // the toggle (header) lets you force the combined list back. With one channel
+  // there's nothing to split, so it always shows combined.
+  const [splitEnabled, setSplitEnabled] = useState<boolean>(loadSplitPref);
+  const canSplit = activeChannels.length > 1;
+  const isSplit = splitEnabled && canSplit;
+  const toggleSplit = useCallback(() => {
+    setSplitEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SPLIT_PREF_KEY, next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  // Load each active channel's persisted history (so reopening restores it), and
+  // prune entries + load-guards for channels no longer open anywhere.
+  useEffect(() => {
+    const active = Array.from(activeSet);
+    for (const key of active) void loadModLogsForChannel(key);
+    pruneModLogsToChannels(active);
+  }, [activeSet, loadModLogsForChannel, pruneModLogsToChannels]);
+
+  // Keep pinned to the top (newest) when the user is at/near the top, so new
+  // entries appear at the top and push older ones down. If they've scrolled into
+  // history, don't yank them back.
+  useEffect(() => {
+    const el = logsContainerRef.current;
+    if (el && el.scrollTop <= TOP_STICK_PX) el.scrollTop = 0;
+  }, [visibleLogs]);
+
+  if (!forceShow && !settings.show_mod_logs) return null;
 
   return (
     <div className="flex flex-col h-full bg-background border-borderSubtle overflow-hidden">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 bg-secondary border-b border-borderSubtle">
-        <div className="flex items-center gap-2">
-          <svg className="w-4 h-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="flex-shrink-0 flex items-center justify-between gap-2 px-4 py-2 bg-secondary border-b border-borderSubtle">
+        <div className="flex items-center gap-2 min-w-0">
+          <svg className="w-4 h-4 text-accent flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
           </svg>
-          <span className="text-sm font-medium text-text">Moderator Logs</span>
-          <span className="text-xs text-textSecondary ml-2 bg-background px-2 overflow-hidden rounded-full">
-            {modLogs.length} events
-          </span>
-        </div>
-        <button
-          onClick={clearModLogs}
-          className="text-xs text-textSecondary hover:text-text transition-colors p-1 rounded hover:bg-background"
-          title="Clear Logs"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Logs Container */}
-      <div 
-        ref={logsContainerRef}
-        className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-accent scrollbar-track-transparent p-2 space-y-2"
-      >
-        <AnimatePresence initial={false}>
-          {modLogs.length === 0 ? (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex items-center justify-center h-full text-textSecondary text-sm"
-            >
-              No moderation events yet
-            </motion.div>
-          ) : (
-            modLogs.map((log) => (
-              <motion.div
-                key={log.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-secondary rounded p-2 text-sm border border-borderSubtle space-y-1"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-textSecondary text-xs">
-                    {new Date(log.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+          <span className="text-sm font-medium text-text flex-shrink-0">Moderator Logs</span>
+          {activeChannels.length > 0 && (
+            <span className="flex items-center gap-2 min-w-0 overflow-hidden pl-2 border-l border-borderSubtle">
+              {activeChannels.slice(0, 4).map((ch) => (
+                <Tooltip key={ch.login} content={ch.name}>
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <Avatar login={ch.login} name={ch.name} size={16} />
+                    <span className="text-[13px] text-textSecondary truncate max-w-[110px]">{ch.name}</span>
                   </span>
-                  <span className="uppercase text-xs font-bold text-accent">
-                    {log.action}
-                  </span>
-                </div>
-                
-                <div className="flex flex-wrap items-baseline gap-1">
-                  <span className="font-semibold text-[color:var(--tw-prose-links)]">{log.moderator_name}</span>
-                  <span className="text-textSecondary">acted on</span>
-                  <span className="font-semibold text-text">{log.target_user_name || 'Stream/Settings'}</span>
-                </div>
-
-                {log.duration !== undefined && log.duration !== null && (
-                  <div className="text-xs text-textSecondary">
-                    Duration: <span className="text-text font-medium">{log.duration}s</span>
-                  </div>
-                )}
-                
-                {log.reason && (
-                  <div className="text-xs italic text-textSecondary bg-background p-1.5 rounded mt-1 border border-borderSubtle/50">
-                    "{log.reason}"
-                  </div>
-                )}
-              </motion.div>
-            ))
+                </Tooltip>
+              ))}
+              {activeChannels.length > 4 && (
+                <span className="flex-shrink-0 text-[12px] text-textMuted">
+                  +{activeChannels.length - 4}
+                </span>
+              )}
+            </span>
           )}
-        </AnimatePresence>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {canSplit && (
+            <Tooltip content={isSplit ? 'Combine into one list' : 'Split into a column per channel'}>
+              <button
+                onClick={toggleSplit}
+                aria-pressed={isSplit}
+                className={`p-1 rounded transition-colors ${
+                  isSplit ? 'text-accent' : 'text-textSecondary hover:text-text hover:bg-background'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <rect x="3" y="4" width="18" height="16" rx="1.5" />
+                  <line x1="9" y1="4" x2="9" y2="20" />
+                  <line x1="15" y1="4" x2="15" y2="20" />
+                </svg>
+              </button>
+            </Tooltip>
+          )}
+          {visibleLogs.length > 0 && (
+            <span className="text-xs text-textSecondary bg-background px-2 py-0.5 rounded-full">
+              {visibleLogs.length}
+            </span>
+          )}
+          {onOpenSettings && (
+            <Tooltip content="Moderation settings">
+              <button
+                onClick={onOpenSettings}
+                className="text-textSecondary hover:text-text transition-colors p-1 rounded hover:bg-background"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip content="Clear logs (also clears saved history for these channels)">
+            <button
+              onClick={clearModLogs}
+              className="text-textSecondary hover:text-text transition-colors p-1 rounded hover:bg-background"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </Tooltip>
+        </div>
       </div>
+
+      {/* Logs Container — combined single list, or a column per channel when split */}
+      {isSplit ? (
+        <div className="flex min-h-0 flex-1 flex-row overflow-hidden">
+          {activeChannels.map((ch, i) => (
+            <ModLogColumn
+              key={ch.login}
+              channel={ch}
+              logs={visibleLogs.filter((l) => (l.channel || '').toLowerCase() === ch.login)}
+              colors={modColors}
+              highlightStyle={highlightStyle}
+              isFirst={i === 0}
+            />
+          ))}
+        </div>
+      ) : (
+        <div
+          ref={logsContainerRef}
+          style={{ overflowAnchor: 'none' }}
+          className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-accent scrollbar-track-transparent p-2 space-y-1.5"
+        >
+          <AnimatePresence initial={false}>
+            {visibleLogs.length === 0 ? (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-center justify-center h-full text-textSecondary text-sm"
+              >
+                No moderation events yet
+              </motion.div>
+            ) : (
+              visibleLogs.map((log) => (
+                <ModLogRow
+                  key={log.id}
+                  log={log}
+                  colors={modColors}
+                  highlightStyle={highlightStyle}
+                  showChannel={showChannelPerEntry}
+                />
+              ))
+            )}
+          </AnimatePresence>
+        </div>
+      )}
     </div>
   );
 };

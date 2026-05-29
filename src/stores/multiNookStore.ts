@@ -4,6 +4,24 @@ import { useAppStore } from './AppStore';
 import { MultiNookSlot } from '../types';
 import { Logger } from '../utils/logger';
 
+/** True if `activeId` still matches one of the current slots (by channel id or
+ *  login — the chat switcher stores either form). */
+function isActiveChatValid(slots: MultiNookSlot[], activeId: string | null): boolean {
+  if (!activeId) return false;
+  return slots.some((s) => s.channelId === activeId || s.channelLogin === activeId);
+}
+
+/** Pick which chat to select: the focused (non-minimized) slot, else the first
+ *  visible slot, else the first slot. Returns its channel id, or login when the
+ *  id hasn't resolved yet (ChatWidget matches either). null only when empty. */
+function pickActiveChatChannel(slots: MultiNookSlot[]): string | null {
+  if (slots.length === 0) return null;
+  const visible = slots.filter((s) => !s.isMinimized);
+  const pool = visible.length > 0 ? visible : slots;
+  const choice = pool.find((s) => s.isFocused) ?? pool[0];
+  return choice?.channelId ?? choice?.channelLogin ?? null;
+}
+
 export const broadcastMultiNookPresence = (slots: MultiNookSlot[]) => {
   const allSlots = slots;
   
@@ -90,6 +108,7 @@ interface MultiNookState {
   removeSlot: (id: string) => Promise<void>;
   removeSlotByLogin: (channelLogin: string) => Promise<void>;
   updateSlot: (id: string, updates: Partial<MultiNookSlot>) => void;
+  changeSlotQuality: (id: string, quality: string) => Promise<void>;
   reorderSlots: (newSlots: MultiNookSlot[]) => void;
   toggleFocusSlot: (id: string) => void;
   dockSlot: (id: string) => void;
@@ -128,7 +147,7 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
         const url = await invoke<string>('start_multi_nook', {
           streamId: slot.id,
           url: `https://twitch.tv/${slot.channelLogin}`,
-          quality: 'best', // Could be dynamic from settings later
+          quality: slot.quality || 'best', // Per-tile quality (set via the focused tile's gear menu)
         });
         return { id: slot.id, url };
       } catch (err) {
@@ -236,7 +255,14 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
       if (get().slots.length === 0) {
         get().loadStoredSlots();
       }
-      
+
+      // Always have a chat selected on entry so messages start loading right
+      // away (loadStoredSlots seeds it; this covers slots already in memory).
+      const slotsNow = get().slots;
+      if (!isActiveChatValid(slotsNow, get().activeChatChannelId)) {
+        set({ activeChatChannelId: pickActiveChatChannel(slotsNow) });
+      }
+
       // Ensure Home view is hidden
       if (useAppStore.getState().isHomeActive) {
         useAppStore.getState().toggleHome();
@@ -361,16 +387,20 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
 
     const newSlots = [...slots, newSlot];
     set({ slots: newSlots });
-    
-    // Auto focus chat on the first slot added
-    if (newSlots.length === 1 && newSlot.channelId) {
-       set({ activeChatChannelId: newSlot.channelId });
+
+    // Keep a chat selected: if nothing valid is selected yet (first slot, or the
+    // previous selection is gone), focus the slot we just added.
+    if (!isActiveChatValid(newSlots, get().activeChatChannelId)) {
+       set({ activeChatChannelId: newSlot.channelId ?? newSlot.channelLogin });
     }
     
     if (newSlot.channelId) {
        invoke('register_active_channel', { channelId: newSlot.channelId }).catch(() => {});
     }
-    
+    // The mod view (EventSub channel.moderate) follows the chat connection now,
+    // wired in the Rust IRC service, so opening a tile's chat subscribes it
+    // automatically. No per-slot call needed here.
+
     broadcastMultiNookPresence(newSlots);
     await saveSlots();
   },
@@ -390,7 +420,7 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     if (slotToRemove?.channelId) {
        invoke('unregister_active_channel', { channelId: slotToRemove.channelId }).catch(() => {});
     }
-    
+
     const newSlots = slots.filter(s => s.id !== id);
     
     // If we removed the focused slot, all visible slots should unmute since there's no longer a focused slot
@@ -404,10 +434,11 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     
     set({ slots: newSlots });
     
-    // If the active chat channel was removed, fallback to the first focused one or the first visible one
-    if (slotToRemove?.channelId === get().activeChatChannelId) {
-      const activeSlot = newSlots.find(s => s.isFocused) || newSlots.find(s => !s.isMinimized);
-      set({ activeChatChannelId: activeSlot?.channelId || null });
+    // Always keep a valid selection: if the active chat is now gone (or was
+    // never set), fall back to the focused/first remaining slot so chat keeps
+    // loading. Resolves to null only when no slots remain.
+    if (!isActiveChatValid(newSlots, get().activeChatChannelId)) {
+      set({ activeChatChannelId: pickActiveChatChannel(newSlots) });
     }
     
     if (newSlots.length > 0) {
@@ -432,6 +463,29 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     if ('volume' in updates || 'muted' in updates || 'isFocused' in updates || 'channelLogin' in updates || 'isMinimized' in updates || 'profileImageUrl' in updates) {
       saveSlots();
     }
+  },
+
+  changeSlotQuality: async (id: string, quality: string) => {
+    const slot = get().slots.find(s => s.id === id);
+    if (!slot || slot.quality === quality) return;
+
+    // Stop the current proxy first so the restart picks up the new quality
+    // cleanly (the proxy is keyed by streamId, so a fresh start replaces it).
+    if (slot.streamUrl) {
+      try {
+        await invoke('stop_multi_nook', { streamId: id });
+      } catch (e) {
+        Logger.warn(`[MultiNook] Failed to stop proxy before quality change for ${id}`, e);
+      }
+    }
+
+    // Persist the new quality and clear the URL. MultiNookView's missing-stream
+    // loader re-invokes start_multi_nook at slot.quality and the cell remounts
+    // on the new URL — same path resyncAllSlots uses.
+    set(state => ({
+      slots: state.slots.map(s => (s.id === id ? { ...s, quality, streamUrl: undefined } : s)),
+    }));
+    await get().saveSlots();
   },
 
   reorderSlots: (newSlots: MultiNookSlot[]) => {
@@ -589,7 +643,9 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
           delete cleaned.streamUrl;
           return cleaned as MultiNookSlot;
         });
-        set({ slots: cleanedSlots });
+        // Seed the chat selection so a restored grid opens with chat loading,
+        // not blank.
+        set({ slots: cleanedSlots, activeChatChannelId: pickActiveChatChannel(cleanedSlots) });
       }
       if (appSettings.multi_nook_chat_hidden !== undefined) {
         set({ isChatHidden: appSettings.multi_nook_chat_hidden });

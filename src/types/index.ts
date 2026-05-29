@@ -430,6 +430,7 @@ export interface MultiNookSlot {
   isMinimized?: boolean;  // Whether the stream is tucked into the tray to save grid space
   profileImageUrl?: string; // Cache of the channel's profile avatar
   gameName?: string;         // Current stream category (for rich presence majority game)
+  quality?: string;          // Preferred Streamlink quality for this tile (defaults to 'best')
 }
 
 export interface Settings {
@@ -458,7 +459,7 @@ export interface Settings {
   last_seen_version?: string;
   auto_switch?: AutoSwitchSettings;
   theme?: string; // Theme ID (e.g., 'winters-glass', 'dracula', 'nord')
-  error_reporting_enabled?: boolean; // Opt-in error reporting (default: true)
+  error_reporting_enabled?: boolean; // Local diagnostic log verbosity; nothing is sent off-device (default: true)
   setup_complete?: boolean; // Whether the first-time setup wizard has been completed
   compact_view?: CompactViewSettings; // Compact view preset settings
   custom_themes?: CustomTheme[]; // User-created custom themes
@@ -475,6 +476,12 @@ export interface ModerationSettings {
   // When a mod runs /clear, suppress the local visual wipe so the user's
   // backlog stays readable. Inverse of the /clearmessages user command.
   ignore_clear_chat?: boolean;
+  // Per-category highlight colors for the mod log, keyed by category
+  // (see utils/modLogCategories). Unset keys fall back to the category default.
+  mod_log_colors?: Record<string, string>;
+  // How mod-log severity is shown: a filled card with a matching same-color
+  // border (default), a colored left bar, or just a colored dot.
+  mod_log_highlight_style?: 'box' | 'bar' | 'dot';
 }
 
 export interface ModLogEvent {
@@ -482,10 +489,24 @@ export interface ModLogEvent {
   action: string;
   timestamp: string;
   moderator_name: string;
+  /** Acting moderator's id + login, when known (EventSub feed). Enables opening their profile. */
+  moderator_id?: string;
+  moderator_login?: string;
   target_user_name?: string;
+  /** Target user's id + login, when known. Enables opening their profile. */
+  target_user_id?: string;
+  target_user_login?: string;
+  /** The message content involved in the action (e.g. the deleted message text). */
+  message?: string;
   reason?: string;
   duration?: number;
   details?: Record<string, unknown>;
+  /** Lowercase channel login this action happened in (multi-stream routing + labeling). */
+  channel?: string;
+  /** Channel display name, when available. */
+  channel_display?: string;
+  /** Which feed produced this entry. EventSub carries the moderator's identity; IRC is anonymized but universal. */
+  source?: 'eventsub' | 'irc';
 }
 
 export interface ReleaseNotes {

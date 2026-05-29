@@ -2,12 +2,12 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import Hls from 'hls.js';
 import Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Loader2, RefreshCcw, Home } from 'lucide-react';
+import { Loader2, RefreshCcw, Home, LayoutGrid } from 'lucide-react';
 import { Heart, HeartBreak, ArrowLeft, X as XIcon } from 'phosphor-react';
 import { useAppStore } from '../stores/AppStore';
+import { usemultiNookStore } from '../stores/multiNookStore';
+import { useChannelSocial } from '../hooks/useChannelSocial';
 import StreamTitleWithEmojis from './StreamTitleWithEmojis';
 import { Tooltip } from './ui/Tooltip';
 
@@ -52,7 +52,7 @@ const VideoPlayer = () => {
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const progressUpdateIntervalRef = useRef<number | null>(null);
-  const { streamUrl, settings, activeQuality, getAvailableQualities, changeStreamQuality, handleStreamOffline, isAutoSwitching, currentStream, currentUser, restartStream, exitStream, toggleHome, isHomeActive, streamOriginCategory, setHomeActiveTab, setHomeSelectedCategory, triggerChatRefresh, isAuthenticated, currentMediaType } = useAppStore();
+  const { streamUrl, settings, activeQuality, getAvailableQualities, changeStreamQuality, handleStreamOffline, isAutoSwitching, currentStream, restartStream, exitStream, toggleHome, isHomeActive, streamOriginCategory, setHomeActiveTab, setHomeSelectedCategory, triggerChatRefresh, isAuthenticated, currentMediaType } = useAppStore();
   // Stabilize handleStreamOffline in a ref so createPlayer's identity stays stable.
   // Without this, every Zustand set() call recreates handleStreamOffline, which changes
   // createPlayer's reference, which re-fires the player creation effect — causing double
@@ -82,17 +82,25 @@ const VideoPlayer = () => {
   const onPlayingRef = useRef<(() => void) | null>(null);
   const onLoadedMetadataRef = useRef<(() => void) | null>(null);
 
-  // Follow state
-  const [isFollowing, setIsFollowing] = useState<boolean | null>(null);
-  const [followLoading, setFollowLoading] = useState(false);
-  const [checkingFollowStatus, setCheckingFollowStatus] = useState(true);
-  const [heartDropAnimation, setHeartDropAnimation] = useState(false);
-
-  // Subscription state
-  const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
-  const [hasSubHistory, setHasSubHistory] = useState<boolean>(false);
-  const [cumulativeMonths, setCumulativeMonths] = useState<number>(0);
-  const [subscriberBadgeUrl, setSubscriberBadgeUrl] = useState<string | null>(null);
+  // Follow + subscribe state and actions for the current channel. Shared with
+  // the focused MultiNook tile via useChannelSocial so both overlays behave
+  // identically (follow/unfollow, subscribe window, resub/gift detection).
+  const {
+    isFollowing,
+    followLoading,
+    checkingFollowStatus,
+    heartDropAnimation,
+    handleFollowClick,
+    isSubscribed,
+    hasSubHistory,
+    cumulativeMonths,
+    subscriberBadgeUrl,
+    handleSubscribeClick,
+  } = useChannelSocial({
+    userId: currentStream?.user_id,
+    userLogin: currentStream?.user_login,
+    userName: currentStream?.user_name,
+  });
 
   // Restart stream state
   const [isRestarting, setIsRestarting] = useState(false);
@@ -1103,228 +1111,54 @@ const VideoPlayer = () => {
     };
   }, [startOverlayHideTimer]);
 
-  // Check follow status when stream changes
-  useEffect(() => {
-    if (!currentStream?.user_id) {
-      setIsFollowing(null);
-      setCheckingFollowStatus(false);
-      return;
-    }
-
-    const checkFollowStatus = async () => {
-      try {
-        setCheckingFollowStatus(true);
-        const result = await invoke<boolean>('check_following_status', { targetUserId: currentStream.user_id });
-        setIsFollowing(result);
-      } catch (err) {
-        Logger.error('[VideoPlayer] Failed to check follow status:', err);
-        setIsFollowing(false);
-      } finally {
-        setCheckingFollowStatus(false);
-      }
-    };
-
-    checkFollowStatus();
-  }, [currentStream?.user_id]);
-
-  // Check subscription status when stream changes
-  useEffect(() => {
-    if (!currentStream?.user_id || !currentStream?.user_login || !currentUser?.login) {
-      setIsSubscribed(false);
-      setHasSubHistory(false);
-      setCumulativeMonths(0);
-      setSubscriberBadgeUrl(null);
-      return;
-    }
-
-    const channelId = currentStream.user_id;
-    const channelLogin = currentStream.user_login;
-    const userLogin = currentUser.login;
-
-    const checkSubscriptionStatus = async () => {
-      try {
-        const { fetchIVRSubage } = await import('../services/ivrService');
-        const subageData = await fetchIVRSubage(userLogin, channelLogin);
-        
-        Logger.debug('[VideoPlayer] IVR subage response:', JSON.stringify(subageData, null, 2));
-        
-        // Check if currently subscribed - IVR API uses meta.type to indicate active sub
-        // meta.type can be "paid", "gift", "prime", etc. when actively subscribed
-        const metaData = (subageData as unknown as Record<string, unknown>)?.meta as Record<string, unknown> | undefined;
-        const isSub = metaData?.type != null;
-        const cumMonths = subageData?.cumulative?.months ?? 0;
-        const tier = metaData?.tier ?? null;
-        
-        Logger.debug('[VideoPlayer] Subscription check:', { isSub, cumMonths, tier, metaType: metaData?.type, hasSubHistory: cumMonths > 0 && !isSub });
-        
-        setIsSubscribed(isSub);
-        setHasSubHistory(cumMonths > 0 && !isSub);
-        setCumulativeMonths(cumMonths);
-        
-        // Determine which badge version to show
-        let badgeMonths = cumMonths;
-        if (!isSub && cumMonths > 0) {
-          // Lapsed subscriber: show badge for NEXT month they'd reach
-          badgeMonths = cumMonths + 1;
-        }
-        
-        // Map months to badge version string
-        const getBadgeVersion = (months: number): string => {
-          if (months >= 72) return '72';
-          if (months >= 60) return '60';
-          if (months >= 48) return '48';
-          if (months >= 36) return '36';
-          if (months >= 24) return '24';
-          if (months >= 18) return '18';
-          if (months >= 12) return '12';
-          if (months >= 9) return '9';
-          if (months >= 6) return '6';
-          if (months >= 3) return '3';
-          if (months >= 2) return '2';
-          return '0';
-        };
-        
-        const badgeVersion = getBadgeVersion(badgeMonths);
-        
-        // Fetch badge from cache
-        const { initializeBadgeCache, parseBadges } = await import('../services/twitchBadges');
-        await initializeBadgeCache(channelId);
-        const badges = parseBadges(`subscriber/${badgeVersion}`, channelId);
-        
-        if (badges.length > 0 && badges[0].info?.image_url_2x) {
-          setSubscriberBadgeUrl(badges[0].info.image_url_2x);
-        } else {
-          setSubscriberBadgeUrl(null);
-        }
-      } catch (err) {
-        Logger.error('[VideoPlayer] Failed to check subscription status:', err);
-        setIsSubscribed(false);
-        setHasSubHistory(false);
-        setSubscriberBadgeUrl(null);
-      }
-    };
-
-    checkSubscriptionStatus();
-  }, [currentStream?.user_id, currentStream?.user_login, currentUser?.login]);
-
-  // Handle follow/unfollow action via GQL mutations
-  const handleFollowClick = useCallback(async () => {
-    if (followLoading || !currentStream?.user_id) return;
-
-    const action = isFollowing ? 'unfollow' : 'follow';
-
-    // If unfollowing, trigger the drop animation first
-    if (isFollowing) {
-      setHeartDropAnimation(true);
-      // Wait for animation to complete before showing loading
-      await new Promise(resolve => setTimeout(resolve, 600));
-      setHeartDropAnimation(false);
-    }
-
-    setFollowLoading(true);
-    Logger.debug(`[VideoPlayer] Initiating ${action} for ${currentStream.user_login} (ID: ${currentStream.user_id})`);
-
-    try {
-      const command = isFollowing ? 'unfollow_channel' : 'follow_channel';
-      await invoke(command, { targetUserId: currentStream.user_id });
-
-      setIsFollowing(prev => !prev);
-      Logger.debug(`[VideoPlayer] Successfully ${action}ed ${currentStream.user_login}`);
-    } catch (err) {
-      Logger.error(`[VideoPlayer] ${action} error:`, err);
-      useAppStore.getState().addToast(
-        `Follow/Unfollow failed. Try logging out and back in via Settings to re-authenticate.`,
-        'error'
-      );
-    } finally {
-      setFollowLoading(false);
-    }
-  }, [currentStream?.user_login, currentStream?.user_id, isFollowing, followLoading]);
-
-  // Track the subscribe window reference for auto-close on successful subscription
-  const subscribeWindowRef = useRef<WebviewWindow | null>(null);
-  const subscribeWindowLabelRef = useRef<string | null>(null);
-
-  // Listen for subscription events to auto-close the subscribe window
-  useEffect(() => {
-    const handleSubscriptionDetected = async (event: Event) => {
-      const customEvent = event as CustomEvent<{ login: string; msgId: string; displayName: string }>;
-      const { login, msgId, displayName } = customEvent.detail;
-      const currentUserLogin = currentUser?.login?.toLowerCase();
-      
-      Logger.debug('[VideoPlayer] Subscription event detected:', { login, msgId, displayName, currentUserLogin });
-      
-      // Check if this subscription is from the current user
-      if (currentUserLogin && login === currentUserLogin && subscribeWindowLabelRef.current) {
-        Logger.debug('[VideoPlayer] Detected own subscription! Auto-closing subscribe window...');
-        
-        // Show success toast
-        useAppStore.getState().addToast(
-          `🎉 Subscription successful! ${msgId === 'subgift' ? 'Gift sent!' : 'Thank you for subscribing!'}`,
-          'success'
-        );
-        
-        // Close the subscribe window
-        try {
-          const subscribeWindow = await WebviewWindow.getByLabel(subscribeWindowLabelRef.current);
-          if (subscribeWindow) {
-            await subscribeWindow.close();
-            Logger.debug('[VideoPlayer] Subscribe window closed successfully');
-          }
-        } catch (e) {
-          Logger.warn('[VideoPlayer] Failed to close subscribe window:', e);
-        }
-        
-        // Clear the reference
-        subscribeWindowRef.current = null;
-        subscribeWindowLabelRef.current = null;
-      }
-    };
-
-    // Add the event listener
-    window.addEventListener('twitch-subscription-detected', handleSubscriptionDetected);
-    
-    return () => {
-      window.removeEventListener('twitch-subscription-detected', handleSubscriptionDetected);
-    };
-  }, [currentUser?.login]);
-
   // NOTE: PIP exit handling is done in App.tsx, not here
   // App.tsx correctly differentiates between "Back to tab" (returns to stream view)
   // and "X" button (stops stream) by checking if video is paused
-  // Handle subscribe button click
-  const handleSubscribeClick = useCallback(() => {
-    if (currentStream?.user_login) {
-      const windowLabel = `subscribe-${currentStream.user_login}-${Date.now()}`;
-      subscribeWindowLabelRef.current = windowLabel;
-      
-      const webview = new WebviewWindow(windowLabel, {
-        url: `https://www.twitch.tv/subs/${currentStream.user_login}`,
-        title: `Subscribe to ${currentStream.user_name}`,
-        width: 800,
-        height: 900,
-        center: true,
-        resizable: true,
-        minimizable: true,
-        maximizable: true,
-      });
 
-      subscribeWindowRef.current = webview;
+  // Move the current single stream into MultiNook: add it as a tile, switch into
+  // the grid, then close the solo player. Lets the viewer pivot from watching one
+  // stream to watching several side-by-side without routing back through Home.
+  const handleAddToMultiNook = useCallback(async () => {
+    const stream = currentStream;
+    if (!stream?.user_login) return;
 
-      webview.once('tauri://error', (e) => {
-        Logger.error('Error opening subscribe window:', e);
-        subscribeWindowRef.current = null;
-        subscribeWindowLabelRef.current = null;
-      });
-      
-      // Clear reference when window is closed manually
-      webview.once('tauri://destroyed', () => {
-        Logger.debug('[VideoPlayer] Subscribe window closed by user');
-        subscribeWindowRef.current = null;
-        subscribeWindowLabelRef.current = null;
-      });
+    const login = stream.user_login;
+    const mn = usemultiNookStore.getState();
+    const alreadyPresent = mn.slots.some(
+      (s) => s.channelLogin.toLowerCase() === login.toLowerCase()
+    );
+
+    // MultiNook holds at most 25 tiles. addSlot enforces this too (with its own
+    // toast), but checking first avoids closing the current stream when there's
+    // no room left to add it.
+    if (!alreadyPresent && mn.slots.length >= 25) {
+      useAppStore.getState().addToast('Maximum of 25 streams reached', 'warning');
+      return;
     }
-  }, [currentStream]);
+
+    // Await the add so slots is non-empty before we toggle. Otherwise
+    // toggleMultiNook treats this as an empty entry and reloads the stored
+    // lineup, dropping the channel we just added.
+    await mn.addSlot(login);
+
+    // Focus MultiNook chat on the channel we came from. The chat hook keys on
+    // the active channel's login, so keeping it on this same channel means the
+    // chat connection carries straight over instead of churning to another tile.
+    if (stream.user_id) {
+      usemultiNookStore.getState().setActiveChatChannelId(stream.user_id);
+    }
+
+    // Enter the grid BEFORE tearing down the solo stream so the chat hook never
+    // sees the channel disappear (MultiNook's active slot is this same channel).
+    if (!usemultiNookStore.getState().isMultiNookActive) {
+      usemultiNookStore.getState().toggleMultiNook();
+    }
+
+    // Stop only the solo video proxy and clear its state. preserveBackend keeps
+    // the chat bridge, EventSub and drops alive for MultiNook to inherit, and
+    // leaves the grid on screen instead of raising Home.
+    await exitStream({ preserveBackend: true });
+  }, [currentStream, exitStream]);
 
   return (
     <div
@@ -1584,6 +1418,19 @@ const VideoPlayer = () => {
           </button>
           </Tooltip>
 
+          {/* Add to MultiNook Button — pulls this stream into the multi-view grid */}
+          {currentMediaType === 'live' && (
+            <Tooltip content="Add to MultiNook" side="bottom">
+            <button
+              onClick={handleAddToMultiNook}
+              className="flex items-center justify-center p-2 glass-button rounded-lg"
+              style={{ backdropFilter: 'blur(16px)' }}
+            >
+              <LayoutGrid className="w-4 h-4 text-white hover:text-accent transition-colors duration-200" />
+            </button>
+            </Tooltip>
+          )}
+
           {/* Restart Stream Button */}
           {currentMediaType === 'live' && (
             <Tooltip content="Refresh" side="bottom">
@@ -1615,7 +1462,7 @@ const VideoPlayer = () => {
           {/* Close Stream Button */}
           <Tooltip content="Close Stream" side="bottom">
           <button
-            onClick={exitStream}
+            onClick={() => exitStream()}
             className="flex items-center justify-center p-2 glass-button rounded-lg"
             style={{ backgroundColor: 'rgba(239, 68, 68, 0.25)', backdropFilter: 'blur(16px)' }}
           >

@@ -620,30 +620,6 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   // === Support ===
   {
     tab: 'Support',
-    section: 'Anonymous Error Reporting',
-    title: 'Anonymous Error Reporting',
-    description: 'Automatically send anonymous error reports when something goes wrong. No personal data is collected.'
-  },
-  {
-    tab: 'Support',
-    section: 'Anonymous Error Reporting',
-    title: 'Help improve StreamNook',
-    description: 'Enable or disable error reporting'
-  },
-  {
-    tab: 'Support',
-    section: 'Session Statistics',
-    title: 'Session Statistics',
-    description: 'View current error and warning counts'
-  },
-  {
-    tab: 'Support',
-    section: 'Recent Errors and Warnings',
-    title: 'Recent Errors and Warnings',
-    description: 'Browse and manage recent logs'
-  },
-  {
-    tab: 'Support',
     section: 'Community Discord',
     title: 'Community Discord',
     description: 'Join the StreamNook community for help, feature requests, updates, and chat with other users.'

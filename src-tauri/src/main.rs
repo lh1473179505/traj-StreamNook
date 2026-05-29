@@ -27,13 +27,13 @@
 #![allow(clippy::collapsible_match)]
 
 use commands::{
-    announcements::*, app::*, automation::*, badge_metadata::*, badge_service::*, badges::*,
-    cache::*, channel_panels::*, chat::*, chat_identity::*, components::*, cosmetics_cache::*,
-    diagnostic_logging::*, discord::*, drops::*, emoji::*, emotes::*, eventsub::*, hype_train::*,
-    justlog::*, layout::*, logs::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
-    screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
-    streaming::*, twitch::*, universal_cache::*, user_profile::*, watch_streak::*,
-    whisper_storage::*,
+    accounts::*, announcements::*, app::*, automation::*, badge_metadata::*, badge_service::*,
+    badges::*, cache::*, channel_panels::*, chat::*, chat_identity::*, components::*,
+    cosmetics_cache::*, diagnostic_logging::*, discord::*, drops::*, emoji::*, emotes::*,
+    eventsub::*, hype_train::*, identity::*, justlog::*, layout::*, logs::*, mod_log_storage::*,
+    multi_nook::*, profile_cache::*, proxy_health::*, resub::*, screen_capture::*, settings::*,
+    seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*, streaming::*, twitch::*,
+    universal_cache::*, user_profile::*, watch_streak::*, whisper_storage::*,
 };
 use log::{debug, error};
 use models::settings::{AppState, Settings};
@@ -329,6 +329,12 @@ fn main() {
             // per channel as the IRC service JOINs/PARTs them.
             services::seventv_eventapi::init(app_handle.clone(), emote_service.clone());
 
+            // Dedicated EventSub socket for the moderator view (channel.moderate).
+            // Tied to chat, not the watched stream: it subscribes per channel the
+            // IRC service JOINs and the user moderates, so the mod log enriches
+            // with the acting moderator in single / offline / MultiNook / popout.
+            services::eventsub_moderation::init(app_handle.clone());
+
             // Register deep link scheme on Windows
             #[cfg(windows)]
             {
@@ -402,6 +408,13 @@ fn main() {
                             );
                             if status.needs_refresh {
                                 debug!("[Main] ⚠️ Token expires soon, but will auto-refresh on next API call");
+                            }
+
+                            // Record the current login as the primary account in the
+                            // multi-account registry. Cheap once recorded; self-heals if
+                            // the user later signs in as a different account. Best-effort.
+                            if let Some(uid) = status.user_id.as_deref() {
+                                services::account_store::AccountStore::reconcile_primary(uid).await;
                             }
 
                             // Auto-start analytics dashboard for admin users
@@ -553,6 +566,10 @@ fn main() {
             twitch_logout,
             clear_webview_data,
             has_stored_credentials,
+            list_twitch_accounts,
+            get_twitch_account_count,
+            add_twitch_account,
+            remove_twitch_account,
             get_followed_streams,
             get_channel_info,
             get_user_info,
@@ -611,6 +628,9 @@ fn main() {
             join_chat_channel,
             leave_chat_channel,
             start_multi_chat,
+            load_mod_logs,
+            append_mod_log,
+            clear_mod_logs,
             parse_historical_messages,
             update_chat_settings,
             clear_chat,
@@ -680,6 +700,8 @@ fn main() {
             clear_channel_badge_cache_unified,
             get_global_badge_collection,
             get_all_third_party_badges,
+            get_bttv_pro_badge,
+            get_discovered_bttv_pro_badges,
             // Badge Metadata commands
             fetch_badge_metadata,
             // Cache commands
@@ -810,6 +832,14 @@ fn main() {
             set_seventv_badge,
             open_seventv_login_window,
             receive_seventv_token,
+            // 7TV per-account (linked secondaries)
+            get_seventv_auth_status_for,
+            validate_seventv_token_for,
+            logout_seventv_for,
+            set_seventv_paint_for,
+            set_seventv_badge_for,
+            open_seventv_login_window_for_account,
+            refresh_seventv_token_for_account,
             // 7TV Global Cosmetics commands
             get_all_seventv_badges,
             get_all_seventv_paints,
@@ -837,11 +867,18 @@ fn main() {
             disconnect_eventsub,
             is_eventsub_connected,
             get_eventsub_session_id,
+            add_eventsub_moderation,
+            remove_eventsub_moderation,
             // Chat Identity commands
             fetch_chat_identity_badges,
             update_chat_identity,
             receive_badge_data,
             receive_update_result,
+            // StreamNook Identity (badge loadout) commands
+            get_streamnook_identity,
+            get_streamnook_identities,
+            get_streamnook_identity_resolved,
+            set_streamnook_identity,
             // Hype Train commands
             get_hype_train_status,
             get_bulk_hype_train_status,

@@ -475,6 +475,29 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Push installer to Cloudflare R2
+        # Mirrors StreamNook.7z to the R2 bucket that streamnook.app serves at
+        # /download, so the website's download button always hands out this
+        # build with no GitHub redirect. Requires two repo secrets:
+        #   CLOUDFLARE_API_TOKEN  - token with "Workers R2 Storage: Edit"
+        #   CLOUDFLARE_ACCOUNT_ID - the Cloudflare account id
+        # If those secrets are absent the step is skipped (release still succeeds).
+        if: steps.check_release.outputs.RELEASE_EXISTS == 'false' && env.CLOUDFLARE_API_TOKEN != ''
+        shell: pwsh
+        run: |
+          $bundleName = "${{ steps.bundle.outputs.BUNDLE_NAME }}"
+          $version = "${{ steps.version.outputs.VERSION }}"
+          Write-Host "Uploading $bundleName (v$version) to R2 bucket streamnook-downloads..."
+          npx --yes wrangler@4 r2 object put "streamnook-downloads/StreamNook.7z" `
+            --file="$bundleName" `
+            --content-type="application/x-7z-compressed" `
+            --remote
+          if ($LASTEXITCODE -ne 0) { throw "wrangler r2 upload failed (exit $LASTEXITCODE)" }
+          Write-Host "Uploaded StreamNook.7z (v$version) to R2 - live at https://streamnook.app/download"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Notify Discord
         if: steps.check_release.outputs.RELEASE_EXISTS == 'false' && env.DISCORD_RELEASE_WEBHOOK_URL != ''
         shell: pwsh

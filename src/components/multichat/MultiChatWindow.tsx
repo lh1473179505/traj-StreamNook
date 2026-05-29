@@ -18,8 +18,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { Minus, X, CornersOut, CornersIn, ArrowLineLeft } from 'phosphor-react';
-import { Settings } from 'lucide-react';
+import { Settings, ShieldCheck } from 'lucide-react';
 import MultiChatPane from './MultiChatPane';
+import { ModLogsWidget } from '../chat/ModLogsWidget';
 import ChatOnlySettingsModal from './ChatOnlySettingsModal';
 import CommandPalette from '../CommandPalette';
 import { useCommandPaletteHotkey } from '../../hooks/useCommandPaletteHotkey';
@@ -32,6 +33,7 @@ import {
 } from '../../stores/chatConnectionStore';
 import { useAppStore } from '../../stores/AppStore';
 import { listenForSettingsUpdates } from '../../utils/settingsBroadcast';
+import { MULTICHAT_BASE_WIDTH } from '../../utils/multichatWindow';
 import { Tooltip } from '../ui/Tooltip';
 import { Logger } from '../../utils/logger';
 import type { TwitchStream } from '../../types';
@@ -54,6 +56,22 @@ type LayoutMode = 1 | 2 | 3 | 4;
 interface PersistedWindowState {
   channels: ChannelEntry[];
   layoutMode: LayoutMode;
+  /** Whether this popout's mod-logs pane is shown. Window-local (not the global
+   *  `settings.show_mod_logs`) so toggling it here never touches the main app. */
+  showModLogs?: boolean;
+  /** Height in px of the mod-logs pane stacked below the chat. */
+  modLogsHeight?: number;
+}
+
+const DEFAULT_MOD_LOGS_HEIGHT = 240;
+const MIN_MOD_LOGS_HEIGHT = 140;
+
+/** Keep the mod-logs pane tall enough to read but always leave room for the
+ *  title bar, tab strip, and a usable slice of chat above it. */
+function clampModLogsHeight(height: number): number {
+  const viewportCap =
+    typeof window !== 'undefined' ? Math.max(MIN_MOD_LOGS_HEIGHT, window.innerHeight - 200) : 600;
+  return Math.min(Math.max(MIN_MOD_LOGS_HEIGHT, height), viewportCap);
 }
 
 interface ParsedMultiChatParams {
@@ -61,18 +79,48 @@ interface ParsedMultiChatParams {
   channel: string | null;
   channelId: string | null;
   channelName: string | null;
+  /** Multi-channel seed (e.g. popping out all MultiNook tiles at once). */
+  channels: ChannelEntry[] | null;
+  /** Start fresh with only the seeded channels, dropping any persisted tabs. */
+  replace: boolean;
 }
 
 function parseMultiChatParams(): ParsedMultiChatParams {
   const hash = window.location.hash;
   const queryIdx = hash.indexOf('?');
-  if (queryIdx === -1) return { id: null, channel: null, channelId: null, channelName: null };
+  if (queryIdx === -1)
+    return { id: null, channel: null, channelId: null, channelName: null, channels: null, replace: false };
   const params = new URLSearchParams(hash.slice(queryIdx + 1));
+
+  let channels: ChannelEntry[] | null = null;
+  const channelsRaw = params.get('channels');
+  if (channelsRaw) {
+    try {
+      const arr = JSON.parse(channelsRaw) as unknown;
+      if (Array.isArray(arr)) {
+        channels = arr
+          .filter(
+            (c): c is { channel: string; channelId?: string | null; channelName?: string | null } =>
+              !!c && typeof c === 'object' && typeof (c as { channel?: unknown }).channel === 'string',
+          )
+          .map((c) => ({
+            channel: c.channel.toLowerCase(),
+            channelId: c.channelId ?? null,
+            channelName: c.channelName || c.channel,
+          }));
+      }
+    } catch {
+      // ignore malformed channels param
+    }
+  }
+
   return {
     id: params.get('id'),
     channel: params.get('channel'),
     channelId: params.get('channelId'),
     channelName: params.get('channelName'),
+    channels,
+    replace: params.get('replace') === '1',
   };
 }
 
@@ -106,6 +154,8 @@ function loadPersistedState(windowId: string | null): PersistedWindowState | nul
       const mode = (parsed as any).layoutMode;
       const layoutMode: LayoutMode =
         mode === 2 || mode === 3 || mode === 4 ? mode : 1;
+      const rawShow = (parsed as any).showModLogs;
+      const rawHeight = (parsed as any).modLogsHeight;
       return {
         channels: (parsed as any).channels.filter(
           (entry: unknown): entry is ChannelEntry =>
@@ -114,6 +164,9 @@ function loadPersistedState(windowId: string | null): PersistedWindowState | nul
             typeof (entry as ChannelEntry).channel === 'string',
         ),
         layoutMode,
+        showModLogs: typeof rawShow === 'boolean' ? rawShow : undefined,
+        modLogsHeight:
+          typeof rawHeight === 'number' && Number.isFinite(rawHeight) ? rawHeight : undefined,
       };
     }
     return null;
@@ -127,11 +180,13 @@ function persistState(
   windowId: string | null,
   channels: ChannelEntry[],
   layoutMode: LayoutMode,
+  showModLogs: boolean,
+  modLogsHeight: number,
 ) {
   const key = storageKey(windowId);
   if (!key) return;
   try {
-    const payload: PersistedWindowState = { channels, layoutMode };
+    const payload: PersistedWindowState = { channels, layoutMode, showModLogs, modLogsHeight };
     localStorage.setItem(key, JSON.stringify(payload));
   } catch (err) {
     Logger.warn('[MultiChatWindow] localStorage write failed:', err);
@@ -193,32 +248,70 @@ export default function MultiChatWindow() {
   // tray-hidden, focuses, and opens the overlay there. Keeps the popout slim
   // (chat-only surface) and avoids duplicating a heavy picker UI per window.
 
-  // Initial channel list + layout: persisted state if any, else seeded from URL.
+  // Initial channel list + layout. Persisted tabs from the last session are
+  // restored first; if this window was cold-opened via a "Pop out chat" action
+  // (channel carried in the URL), that channel is merged in (deduped) and made
+  // the active tab. Two things this guards against:
+  //   - Without the merge, restored tabs shadow the channel the user just
+  //     clicked and it never opens at all (the original bug).
+  //   - Without forcing it active, the clicked channel opens behind whichever
+  //     restored tab happened to sort first.
+  // This mirrors the warm-window path (`multichat-add-channel` handler below),
+  // which already appends + activates — so cold-open and add-to-open behave the
+  // same: existing tabs stay, the clicked channel opens focused.
   const initial = useMemo(() => {
     const persisted = loadPersistedState(params.id);
-    if (persisted && persisted.channels.length > 0) {
-      return {
-        channels: persisted.channels.map((c) => ({
-          ...c,
-          channelName: c.channelName || c.channel,
-        })),
-        layoutMode: persisted.layoutMode,
-      };
+    const restored: ChannelEntry[] = (persisted?.channels ?? []).map((c) => ({
+      ...c,
+      channelName: c.channelName || c.channel,
+    }));
+    const layoutMode: LayoutMode = persisted?.layoutMode ?? 1;
+    const showModLogs = persisted?.showModLogs ?? false;
+    const modLogsHeight = clampModLogsHeight(persisted?.modLogsHeight ?? DEFAULT_MOD_LOGS_HEIGHT);
+
+    // Seed channels from the URL. A multi-channel list (popping out all MultiNook
+    // tiles) takes precedence over the single-channel params. Restored tabs stay;
+    // seeds merge in (deduped) and the first seed opens focused.
+    const seed: ChannelEntry[] =
+      params.channels && params.channels.length > 0
+        ? params.channels
+        : params.channel
+          ? [
+              {
+                channel: params.channel.toLowerCase(),
+                channelId: params.channelId,
+                channelName: params.channelName || params.channel.toLowerCase(),
+              },
+            ]
+          : [];
+
+    if (seed.length > 0) {
+      // `replace` (popping out all MultiNook tiles) opens a fresh view: only the
+      // seeded channels, dropping any previously-persisted tabs. Otherwise merge
+      // the seed into the restored set (deduped).
+      let channels: ChannelEntry[];
+      let seededLayout = layoutMode;
+      if (params.replace) {
+        channels = [...seed];
+        // Auto-split into a column per popped-out channel (capped at 4 columns)
+        // so the MultiNook streams open side by side, not stacked as tabs.
+        seededLayout = Math.min(Math.max(seed.length, 1), 4) as LayoutMode;
+      } else {
+        channels = [...restored];
+        for (const entry of seed) {
+          if (!channels.some((c) => c.channel === entry.channel)) channels.push(entry);
+        }
+      }
+      return { channels, layoutMode: seededLayout, activeChannel: seed[0].channel, showModLogs, modLogsHeight };
     }
-    if (params.channel) {
-      const login = params.channel.toLowerCase();
-      return {
-        channels: [
-          {
-            channel: login,
-            channelId: params.channelId,
-            channelName: params.channelName || login,
-          },
-        ],
-        layoutMode: 1 as LayoutMode,
-      };
-    }
-    return { channels: [] as ChannelEntry[], layoutMode: 1 as LayoutMode };
+
+    return {
+      channels: restored,
+      layoutMode,
+      activeChannel: restored[0]?.channel ?? null,
+      showModLogs,
+      modLogsHeight,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -226,7 +319,32 @@ export default function MultiChatWindow() {
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(initial.layoutMode);
 
   const [activeChannel, setActiveChannel] = useState<string | null>(
-    () => initial.channels[0]?.channel ?? null,
+    () => initial.activeChannel,
+  );
+
+  // Mod-logs pane: window-local toggle + draggable height, both persisted in
+  // this popout's window state so they survive close/reopen. Independent of the
+  // main app's global `settings.show_mod_logs`.
+  const [showModLogs, setShowModLogs] = useState<boolean>(initial.showModLogs);
+  const [modLogsHeight, setModLogsHeight] = useState<number>(initial.modLogsHeight);
+
+  const startModLogsResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = modLogsHeight;
+      const onMove = (ev: MouseEvent) => {
+        // Drag up = taller pane (panel sits below the chat).
+        setModLogsHeight(clampModLogsHeight(startHeight + (startY - ev.clientY)));
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [modLogsHeight],
   );
 
   const [addInput, setAddInput] = useState('');
@@ -278,10 +396,67 @@ export default function MultiChatWindow() {
     };
   }, []);
 
-  // Persist whenever the channel list or layout changes.
+  // Persist whenever the channel list, layout, or mod-logs prefs change.
   useEffect(() => {
-    persistState(params.id, channels, layoutMode);
-  }, [params.id, channels, layoutMode]);
+    persistState(params.id, channels, layoutMode, showModLogs, modLogsHeight);
+  }, [params.id, channels, layoutMode, showModLogs, modLogsHeight]);
+
+  // Size the window to the number of side-by-side chat columns so a split
+  // layout doesn't squeeze N chats into one chat's width. Tabs mode = 1 column;
+  // split modes render min(channels, layoutMode) columns. We only ever GROW the
+  // window (and clamp to the monitor) — never shrink it out from under a user
+  // who manually narrowed it, and never fight a maximized window.
+  const visibleColumns = Math.min(channels.length, layoutMode);
+  useEffect(() => {
+    if (visibleColumns < 1) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getCurrentWindow, LogicalSize, LogicalPosition, currentMonitor } = await import(
+          '@tauri-apps/api/window'
+        );
+        const win = getCurrentWindow();
+        if (cancelled || (await win.isMaximized())) return;
+
+        const scale = await win.scaleFactor();
+        const monitor = await currentMonitor();
+
+        let targetWidth = MULTICHAT_BASE_WIDTH * visibleColumns;
+        if (monitor) {
+          const monitorWidth = monitor.size.width / monitor.scaleFactor;
+          // Leave a margin so the window never butts flush against the screen edge
+          targetWidth = Math.min(targetWidth, Math.max(MULTICHAT_BASE_WIDTH, monitorWidth - 40));
+        }
+
+        const inner = await win.innerSize();
+        const currentWidth = inner.width / scale;
+        const currentHeight = inner.height / scale;
+
+        // Grow only — leave manually-narrowed windows and already-wide windows alone.
+        if (currentWidth >= targetWidth - 2) return;
+
+        await win.setSize(new LogicalSize(Math.round(targetWidth), Math.round(currentHeight)));
+
+        // The popout spawns at the main window's right edge, so a wider window can
+        // spill off-screen. Nudge it left if its right edge passes the monitor.
+        if (monitor) {
+          const pos = await win.outerPosition();
+          const monitorLeft = monitor.position.x / monitor.scaleFactor;
+          const monitorWidth = monitor.size.width / monitor.scaleFactor;
+          const winLeft = pos.x / scale;
+          if (winLeft + targetWidth > monitorLeft + monitorWidth) {
+            const newLeft = Math.max(monitorLeft, monitorLeft + monitorWidth - targetWidth - 10);
+            await win.setPosition(new LogicalPosition(Math.round(newLeft), Math.round(pos.y / scale)));
+          }
+        }
+      } catch (err) {
+        Logger.warn('[MultiChatWindow] column-aware resize failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleColumns]);
 
   // Broadcast this popout's current channel set to the main window so it can
   // hide its own ChatWidget for channels we own — avoids duplicate chat
@@ -495,6 +670,76 @@ export default function MultiChatWindow() {
     };
   }, []);
 
+  // Listen for `multichat-set-channels` — fired when an already-open popout is
+  // asked to REPLACE its whole tab set (e.g. popping out all MultiNook tiles for
+  // a fresh view). Swaps the channel list wholesale; the acquire/release diffing
+  // effect handles dropping the old channels and acquiring the new ones.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const u = await listen<{
+          channels: Array<{ channel: string; channelId?: string | null; channelName?: string | null }>;
+        }>('multichat-set-channels', (event) => {
+          const list = (event.payload.channels || [])
+            .filter((c) => c && typeof c.channel === 'string')
+            .map((c) => ({
+              channel: c.channel.toLowerCase(),
+              channelId: c.channelId ?? null,
+              channelName: c.channelName || c.channel,
+            }));
+          if (list.length === 0) return;
+          setChannels(list);
+          setActiveChannel(list[0].channel);
+          // Auto-split into a column per channel (capped at 4) — popping out all
+          // MultiNook tiles should show them side by side, not stacked as tabs.
+          setLayoutMode(Math.min(Math.max(list.length, 1), 4) as LayoutMode);
+        });
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      } catch (err) {
+        Logger.warn('[MultiChatWindow] listen multichat-set-channels failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Moderator view: channel.moderate events from the dedicated moderation socket
+  // (Rust) are emitted to every window. This popout enriches its own mod-log
+  // store with the acting moderator's identity, same as the main window.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const { applyModerateEvent } = await import('../../utils/applyModerateEvent');
+        const u = await listen<Record<string, unknown>>('eventsub://channel-moderate', (event) => {
+          applyModerateEvent(event.payload);
+        });
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      } catch (err) {
+        Logger.warn('[MultiChatWindow] listen channel-moderate failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // Live 7TV emote-set updates pushed from the shared EventAPI socket in Rust.
   // This popout has its own per-window emote cache + chat store, so it applies
   // the change independently of the main window.
@@ -653,6 +898,13 @@ export default function MultiChatWindow() {
     return 'MultiChat';
   }, [channels, activeChannel, layoutMode]);
 
+  // login -> proper display name, so the mod-logs header chips show real
+  // capitalization for every open channel rather than the bare login.
+  const modLogChannelLabels = useMemo(
+    () => Object.fromEntries(channels.map((c) => [c.channel, c.channelName])),
+    [channels],
+  );
+
   return (
     <div className="flex h-screen flex-col bg-background text-textPrimary">
       <TitleBar
@@ -674,6 +926,8 @@ export default function MultiChatWindow() {
         onMinimize={minimizeWindow}
         onMaximize={toggleMaximize}
         onOpenSettings={() => setSettingsOpen(true)}
+        showModLogs={showModLogs}
+        onToggleModLogs={() => setShowModLogs((v) => !v)}
       />
       <ChatOnlySettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <TabStrip
@@ -730,28 +984,55 @@ export default function MultiChatWindow() {
           busy={addBusy}
         />
       )}
-      <div className="relative flex min-h-0 flex-1">
-        {channels.length === 0 ? (
-          <EmptyState onAddClick={() => setShowAdd(true)} />
-        ) : visibleChannels.length === 0 ? null : (
-          // Render the visible channels side-by-side. Tabs mode renders one;
-          // split modes render 2–4 columns. Inactive/hidden channels stay
-          // reference-counted-acquired on the chatConnectionStore (via the
-          // window-level effect above) so their messages keep flowing in the
-          // background; switching tabs swaps which channel renders without
-          // re-JOINing IRC.
-          visibleChannels.map((entry, idx) => (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 flex-1">
+          {channels.length === 0 ? (
+            <EmptyState onAddClick={() => setShowAdd(true)} />
+          ) : visibleChannels.length === 0 ? null : (
+            // Render the visible channels side-by-side. Tabs mode renders one;
+            // split modes render 2–4 columns. Inactive/hidden channels stay
+            // reference-counted-acquired on the chatConnectionStore (via the
+            // window-level effect above) so their messages keep flowing in the
+            // background; switching tabs swaps which channel renders without
+            // re-JOINing IRC.
+            visibleChannels.map((entry, idx) => (
+              <div
+                key={entry.channel}
+                className={`min-w-0 flex-1 ${idx > 0 ? 'border-l border-borderSubtle' : ''}`}
+              >
+                <MultiChatPane
+                  channel={entry.channel}
+                  channelId={entry.channelId}
+                  channelName={entry.channelName}
+                />
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Mod-logs pane stacked below the chat. Its top edge is a 1px hairline
+            that doubles as a drag handle for resizing. The pane already filters
+            its entries to channels with an open chat, so it shows this popout's
+            channels; the moderation socket + IRC CLEARCHAT/CLEARMSG feed it in
+            every window. Gated on the window-local toggle and on having at least
+            one channel open. */}
+        {showModLogs && channels.length > 0 && (
+          <div
+            className="flex flex-shrink-0 flex-col overflow-hidden"
+            style={{ height: modLogsHeight }}
+          >
+            <Tooltip content="Drag to resize mod logs">
             <div
-              key={entry.channel}
-              className={`min-w-0 flex-1 ${idx > 0 ? 'border-l border-borderSubtle' : ''}`}
+              onMouseDown={startModLogsResize}
+              className="group flex h-1 w-full flex-shrink-0 cursor-ns-resize items-center justify-center"
             >
-              <MultiChatPane
-                channel={entry.channel}
-                channelId={entry.channelId}
-                channelName={entry.channelName}
-              />
+              <div className="h-px w-full bg-borderLight transition-colors group-hover:bg-accent" />
             </div>
-          ))
+            </Tooltip>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <ModLogsWidget forceShow channelLabels={modLogChannelLabels} />
+            </div>
+          </div>
         )}
       </div>
 
@@ -773,12 +1054,14 @@ interface TitleBarProps {
   layoutMode: LayoutMode;
   canSplit: boolean;
   canRestore: boolean;
+  showModLogs: boolean;
   onLayoutModeChange: (mode: LayoutMode) => void;
   onRestore: () => void;
   onClose: () => void;
   onMinimize: () => void;
   onMaximize: () => void;
   onOpenSettings: () => void;
+  onToggleModLogs: () => void;
 }
 
 function TitleBar({
@@ -786,12 +1069,14 @@ function TitleBar({
   layoutMode,
   canSplit,
   canRestore,
+  showModLogs,
   onLayoutModeChange,
   onRestore,
   onClose,
   onMinimize,
   onMaximize,
   onOpenSettings,
+  onToggleModLogs,
 }: TitleBarProps) {
   // Track maximized state so the corner-control icon swaps between
   // CornersOut (maximize) and CornersIn (restore) — same behavior as
@@ -892,6 +1177,19 @@ function TitleBar({
             </button>
           </Tooltip>
         )}
+        <Tooltip content={showModLogs ? 'Hide mod logs' : 'Show mod logs'} delay={200}>
+          <button
+            type="button"
+            onClick={onToggleModLogs}
+            data-tauri-drag-region="false"
+            aria-pressed={showModLogs}
+            className={`p-1.5 rounded transition-all duration-200 ${
+              showModLogs ? 'text-accent' : 'text-textSecondary hover:text-textPrimary'
+            }`}
+          >
+            <ShieldCheck size={16} />
+          </button>
+        </Tooltip>
         <Tooltip content="Chat settings" delay={200}>
           <button
             type="button"
@@ -948,10 +1246,10 @@ interface LayoutToggleButtonProps {
 
 function LayoutToggleButton({ label, active, onClick, children }: LayoutToggleButtonProps) {
   return (
+    <Tooltip content={label}>
     <button
       type="button"
       onClick={onClick}
-      title={label}
       aria-label={label}
       aria-pressed={active}
       data-tauri-drag-region="false"
@@ -963,6 +1261,7 @@ function LayoutToggleButton({ label, active, onClick, children }: LayoutToggleBu
     >
       {children}
     </button>
+    </Tooltip>
   );
 }
 
@@ -1186,6 +1485,7 @@ function TabButton({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
+      <Tooltip content={entry.channelName || entry.channel}>
       <button
         type="button"
         draggable
@@ -1198,7 +1498,6 @@ function TabButton({
             : 'glass-button text-textSecondary hover:text-textPrimary'
         }`}
         style={{ borderRadius: '8px', userSelect: 'none' }}
-        title={entry.channelName || entry.channel}
       >
         <span className="truncate">{entry.channelName || entry.channel}</span>
         {unread > 0 && !isVisible && (
@@ -1224,6 +1523,7 @@ function TabButton({
           </svg>
         </span>
       </button>
+      </Tooltip>
       {isDragOver && (
         <span
           className="pointer-events-none absolute inset-y-0 -left-1 w-0.5 rounded-full bg-accent"

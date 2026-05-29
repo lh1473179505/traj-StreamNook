@@ -70,6 +70,16 @@ struct RunningServer {
     config: std::sync::Arc<std::sync::RwLock<ServerConfig>>,
 }
 
+/// Serializes the splice server's first-time startup. MultiNook starts every
+/// tile concurrently, so without this each `ensure_running` call would bind its
+/// own server and race `SERVER.set` — the losers would error out and the caller
+/// would fall back to the raw, ad-leaking proxy. The fast "already running" path
+/// never touches this lock.
+fn server_init_lock() -> &'static tokio::sync::Mutex<()> {
+    static INIT: OnceCell<tokio::sync::Mutex<()>> = OnceCell::new();
+    INIT.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Spin up (or reconfigure) the splice server, return its localhost port.
 /// The `twitch_auth` service is the only path through which the playlist
 /// handler obtains Twitch web cookies — no direct SQLite/cookie access here.
@@ -79,6 +89,21 @@ pub async fn ensure_running(ttvlol_proxy_arg: &str, twitch_auth: TwitchAuthServi
     // Already running: hot-swap config (proxy list and auth service ref) and
     // reuse the port. The shared `Arc<RwLock>` is what warp's route closure
     // reads on each request, so writes here are visible immediately.
+    if let Some(lock) = SERVER.get() {
+        let s = lock.lock().unwrap();
+        {
+            let mut cfg = s.config.write().unwrap();
+            cfg.ttvlol_proxy_bases = bases;
+            cfg.twitch_auth = twitch_auth;
+        }
+        return Ok(s.port);
+    }
+
+    // Not running yet — serialize startup so a burst of concurrent callers (every
+    // MultiNook tile at once) elects a single server instead of racing.
+    let _init = server_init_lock().lock().await;
+
+    // Re-check under the lock: another caller may have started it while we waited.
     if let Some(lock) = SERVER.get() {
         let s = lock.lock().unwrap();
         {

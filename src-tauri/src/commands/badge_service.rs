@@ -283,7 +283,7 @@ pub async fn get_global_badge_collection(username: String) -> Result<Vec<String>
 }
 
 /// Get the full distinct badge set for every third-party chat client (FFZ,
-/// Chatterino, Homies, Chatsen, Chatty, DankChat) for the browse gallery.
+/// BetterTTV, Chatterino, Homies, Chatsen, Chatty, DankChat) for the browse gallery.
 /// Pass the current user's Twitch ID to flag which badges they own.
 #[tauri::command]
 pub async fn get_all_third_party_badges(
@@ -311,4 +311,27 @@ pub async fn get_all_third_party_badges(
     Ok(service
         .get_all_third_party_badges(viewer_user_id.as_deref())
         .await)
+}
+
+/// Resolve a single user's BetterTTV Pro loyalty badge (the per-user badge a Pro
+/// subscriber enables). This is separate from the contributor badge feed above:
+/// BTTV only exposes Pro badges over its live-update WebSocket, so this does an
+/// on-demand `broadcast_me` lookup (cached, negative answers included). Returns
+/// `None` when the user has no Pro badge or the socket didn't answer in time.
+/// Called by the profile card in parallel with the main profile fetch so it
+/// never blocks the card from rendering.
+#[tauri::command]
+pub async fn get_bttv_pro_badge(
+    user_id: String,
+) -> Result<Option<crate::services::bttv_pro_service::BttvProBadge>, String> {
+    Ok(crate::services::bttv_pro_service::resolve_bttv_pro_badge(&user_id).await)
+}
+
+/// Every distinct BetterTTV Pro loyalty badge image URL StreamNook has resolved
+/// so far, across all users (persisted). The BetterTTV gallery tab renders one
+/// tile per URL so discovered loyalty tiers are visible to everyone, not just
+/// the account that owns them.
+#[tauri::command]
+pub async fn get_discovered_bttv_pro_badges() -> Result<Vec<String>, String> {
+    Ok(crate::services::bttv_pro_service::get_discovered_bttv_pro_badges())
 }

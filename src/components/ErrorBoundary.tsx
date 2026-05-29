@@ -27,11 +27,11 @@ class ErrorBoundary extends Component<Props, State> {
         const componentName = this.props.componentName || 'Component';
 
         if (this.props.reportToLogService) {
-            // Log as error so it gets picked up by logService and sent to Discord
+            // Log as error so it gets captured by logService and written to the local crash log
             Logger.error(`[${componentName}] Critical error caught by boundary:`, error);
             Logger.error(`[${componentName}] Component stack:`, errorInfo.componentStack);
         } else {
-            // Use console.warn instead of console.error to avoid Discord webhook spam for handled errors
+            // Log as warn (not error) so handled boundary errors don't fill the local crash log
             Logger.warn(`[${componentName}] Error caught and handled by boundary:`, error.message || error.toString());
             Logger.warn(`[${componentName}] Component stack:`, errorInfo.componentStack);
         }

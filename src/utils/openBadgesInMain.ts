@@ -65,3 +65,16 @@ export function openBadgesOnStreamNookInMain(): void {
   }
   useAppStore.getState().openBadgesOnStreamNook();
 }
+
+// Generic deep-link: open the overlay on a given tab and (optionally) filter to
+// a badge title. Used for badge types without a dedicated detail modal (Twitch,
+// BetterTTV, Chat Clients) clicked from the profile card.
+export function openBadgesWithTargetInMain(target: { tab: string; query?: string }): void {
+  const popout = isPopoutWindow();
+  Logger.debug(`[openBadgesInMain] openBadgesWithTarget popout=${popout}`, target);
+  if (popout) {
+    void emitToMain('open-badges-with-target', target);
+    return;
+  }
+  useAppStore.getState().openBadgesWithTarget(target);
+}

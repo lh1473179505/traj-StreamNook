@@ -23,6 +23,7 @@ import ChatMessage from './ChatMessage';
 import UserProfileCard from './UserProfileCard';
 import ErrorBoundary from './ErrorBoundary';
 import PredictionOverlay from './PredictionOverlay';
+import ConfettiBurst from './ConfettiBurst';
 import StreamerAboutPanel from './StreamerAboutPanel';
 import ChannelPointsMenu from './ChannelPointsMenu';
 import ModeratorMenu from './chat/ModeratorMenu';
@@ -46,9 +47,12 @@ import {
 import { getAppleEmojiUrl } from '../services/emojiService';
 import { fetchRecentMessagesAsIRC } from '../services/ivrService';
 import { useChatUserStore } from '../stores/chatUserStore';
+import { forceRefreshCosmetics } from '../services/cosmeticsCache';
 import MentionAutocomplete from './MentionAutocomplete';
 import CommandAutocomplete from './chat/CommandAutocomplete';
 import EmoteAutocomplete from './chat/EmoteAutocomplete';
+import SendAsPicker from './SendAsPicker';
+import { useSendAccountStore } from '../stores/sendAccountStore';
 import { getWordRange, EmoteTabCandidate } from '../utils/chatInputWord';
 import {
   COMMAND_DEFINITIONS,
@@ -272,15 +276,16 @@ const EmoteGridItem = memo(({ emote, isFavorited, onInsert, onToggleFavorite }: 
             <div className="h-8 w-8 max-w-full bg-glass/30 rounded animate-pulse opacity-50" />
           )}
         </button>
-        <button 
-          onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }} 
-          className={`absolute top-0 right-0 p-1 rounded-bl transition-all ${isFavorited ? 'text-yellow-400 opacity-100' : 'text-textSecondary opacity-0 group-hover:opacity-100'} hover:text-yellow-400 hover:bg-glass`} 
-          title={isFavorited ? 'Remove from favorites' : 'Add to favorites'}
+        <Tooltip content={isFavorited ? 'Remove from favorites' : 'Add to favorites'}>
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+          className={`absolute top-0 right-0 p-1 rounded-bl transition-all ${isFavorited ? 'text-yellow-400 opacity-100' : 'text-textSecondary opacity-0 group-hover:opacity-100'} hover:text-yellow-400 hover:bg-glass`}
         >
           <svg className="w-3 h-3" fill={isFavorited ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2} viewBox="0 0 20 20">
             <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
           </svg>
         </button>
+        </Tooltip>
       </div>
     </Tooltip>
   );
@@ -439,6 +444,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   const [messageInput, setMessageInput] = useState('');
   const [activeView, setActiveView] = useState<'chat' | 'about'>('chat');
   const [showEmotePicker, setShowEmotePicker] = useState(false);
+  // Multi-account "send as" picker. Only shown when 2+ accounts are linked, so a
+  // single-account user sees no change. Load the registry once on mount.
+  const linkedAccountCount = useSendAccountStore((s) => s.accounts.length);
+  const showSendAsPicker = linkedAccountCount >= 2;
+  useEffect(() => {
+    useSendAccountStore.getState().loadAccounts();
+  }, []);
   // Shared per-channel EmoteSet from chatConnectionStore. Multiple ChatWidget
   // instances rendering the same channel (e.g. split-mode columns or the
   // popout opened alongside the main app) hold a single reference instead
@@ -488,7 +500,9 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   const previousHypeTrainLevelRef = useRef<number>(0);
   const [displayedLevel, setDisplayedLevel] = useState<number>(0);
   const [celebrationMessage, setCelebrationMessage] = useState<string>('');
-  
+  // Bumped on each level-up so the confetti burst remounts and replays.
+  const [celebrationId, setCelebrationId] = useState(0);
+
 
   const { settings } = useAppStore();
   const [selectedUser, setSelectedUser] = useState<{
@@ -734,6 +748,58 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     }
   }, [messages, addUser]);
 
+  // Reliably resolve the CURRENT USER's own 7TV cosmetics when chat connects.
+  //
+  // Twitch never echoes your own PRIVMSG back over IRC, so your own messages
+  // exist only as the local optimistic copy — you are the one chatter who never
+  // receives a fresh incoming message to re-trigger cosmetics resolution. If your
+  // first resolution ever comes back empty (e.g. the App-mount prefetch racing
+  // 7TV's warmup, which then caches a stable empty), `chatUserStore` pins your
+  // row without a paint for the whole session while everyone else resolves
+  // normally during chat. Force a fresh resolution on connect: invalidate any
+  // poisoned entry, then re-fetch. The result publishes through cosmeticsCache,
+  // so addUser's cache read (on your next send) gets the real paint, and the
+  // subscribeToCosmetics bridge repaints an already-rendered own message.
+  useEffect(() => {
+    if (!isConnected) return;
+    const selfId = currentUser?.user_id;
+    if (!selfId) return;
+
+    // Seed YOUR OWN user into the per-user chat store on connect. Twitch never
+    // echoes your own PRIVMSG back over IRC, so the message-processing effect
+    // that adds every OTHER chatter to the store never adds YOU. On your first
+    // send your row therefore has no store record at all (`hasStoreEntry:false`),
+    // so there is nothing to hang your 7TV paint/badge on, AND the
+    // cosmetics-repaint bridge bails because it only updates users already in
+    // the store. Seeding here guarantees the record exists before your first
+    // message renders; forceRefreshCosmetics below then publishes your real
+    // cosmetics onto it via the bridge.
+    addUser({
+      userId: selfId,
+      username: currentUser!.login || currentUser!.username || '',
+      displayName: currentUser!.display_name || currentUser!.username || selfId,
+      color: '#9147FF',
+    });
+
+    // Deep refresh: clears BOTH the cosmeticsCache LRU AND the lower-level 7TV
+    // userCache before re-fetching. A plain invalidate left a poisoned
+    // success-empty (early prefetch racing 7TV warmup) cached in the 7TV layer
+    // for 5 minutes, so the "force fresh on connect" still served the empty and
+    // your own paint/7TV badge never resolved until something else re-hit 7TV.
+    void forceRefreshCosmetics(selfId)
+      .then((c) => {
+        const sel = (c?.paints || []).find((p: any) => p?.selected);
+        // TEMP DIAGNOSTIC [selfpaint]
+        Logger.info('[selfpaint] connect-resolve', {
+          selfId,
+          paintCount: c?.paints?.length ?? 0,
+          selectedPaintId: sel?.id ?? null,
+          badgeCount: c?.badges?.length ?? 0,
+        });
+      })
+      .catch((e) => Logger.warn('[selfpaint] connect-resolve failed', e));
+  }, [isConnected, currentUser?.user_id]);
+
   const getViewerCount = useCallback(async () => {
     if (currentStream?.user_login) {
       try {
@@ -852,6 +918,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       const randomMessage = HYPE_MESSAGES[Math.floor(Math.random() * HYPE_MESSAGES.length)];
       setCelebrationMessage(randomMessage);
       setIsLevelUpCelebration(true);
+      setCelebrationId((id) => id + 1);
       pendingLevelUpRef.current = null;
       
       // Clear celebration after 8s (matches slower 7s scroll + buffer)
@@ -871,16 +938,6 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     }
   }, [currentHypeTrain?.level]); // Removed isLevelUpCelebration from deps to avoid re-trigger
 
-  // Memoized confetti configuration to avoid regenerating random positions on re-render
-  const confettiParticles = useMemo(() => {
-    return [...Array(20)].map((_, i) => ({
-      id: i,
-      left: `${Math.random() * 100}%`,
-      color: ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#9b59b6', '#e74c3c'][i % 6],
-      delay: `${Math.random() * 0.5}s`,
-      duration: `${1 + Math.random() * 0.5}s`
-    }));
-  }, [isLevelUpCelebration]); // Regenerate only when celebration starts
 
 
   useEffect(() => {
@@ -1810,13 +1867,23 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
         // (populated on channel JOIN). The previous per-send Helix round-trip
         // returned a strictly inferior subset (no tenure, no mod/VIP/etc), so
         // it's intentionally gone.
+        // If a linked secondary account is selected in the picker, send as it.
+        const sendState = useSendAccountStore.getState();
+        const chosen = sendState.sendAsId
+          ? sendState.accounts.find((a) => a.user_id === sendState.sendAsId)
+          : undefined;
+        const senderAccount =
+          chosen && !chosen.is_primary
+            ? { userId: chosen.user_id, login: chosen.login, displayName: chosen.display_name }
+            : undefined;
+
         await sendMessage(messageToSend, {
           username: currentUser.login || currentUser.username,
           displayName: currentUser.display_name || currentUser.username,
           userId: currentUser.user_id,
           color: undefined,
           badges: ''
-        }, replyParentMsgId);
+        }, replyParentMsgId, senderAccount);
 
         // Track message sent stat for analytics
         incrementStat(currentUser.user_id, 'messages_sent', 1).catch(err => {
@@ -2568,6 +2635,10 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   return (
     <>
       <div className="h-full bg-secondary overflow-hidden flex flex-col relative">
+        {/* Hype Train level-up confetti. Bursts up from the bar, falls the full height. */}
+        {isLevelUpCelebration && (
+          <ConfettiBurst key={celebrationId} golden={!!currentHypeTrain?.is_golden_kappa} />
+        )}
         {/* Prediction Overlay - floating at top of chat */}
         <PredictionOverlay
           channelId={currentStream?.user_id}
@@ -2576,14 +2647,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
         />
 
         {/* Chat header - transforms when Hype Train active */}
-        <div className={`absolute top-0 left-0 right-0 px-3 ${currentHypeTrain ? 'py-4' : 'py-2'} ${currentHypeTrain ? '' : 'border-b'} backdrop-blur-ultra z-10 pointer-events-none shadow-lg overflow-hidden ${
-          currentHypeTrain ? '' : (isSharedChat ? 'iridescent-border' : 'border-borderSubtle')
-        }`} style={{ 
-          backgroundColor: currentHypeTrain ? 'var(--color-background)' : 'rgba(12, 12, 13, 0.9)',
-          boxShadow: currentHypeTrain ? '0 4px 20px color-mix(in srgb, var(--color-highlight-purple) 30%, transparent), 0 2px 8px color-mix(in srgb, var(--color-highlight-purple) 20%, transparent)' : undefined
-        }}>
+        {/* flex-col-reverse keeps the stream-info row on top while the hype bar
+            (declared first below) renders underneath it */}
+        <div className={`absolute top-0 left-0 right-0 px-3 py-2 border-b backdrop-blur-ultra z-10 pointer-events-none shadow-lg overflow-hidden flex flex-col-reverse ${
+          isSharedChat && !currentHypeTrain ? 'iridescent-border' : 'border-borderSubtle'
+        }`} style={{ backgroundColor: 'rgba(12, 12, 13, 0.9)' }}>
           {currentHypeTrain && (
-            // Hype Train Mode - entire header is the progress bar
+            // Hype Train Mode - dedicated progress bar, rendered below the stream-info row
             (() => {
               // Guard against NaN when goal is 0 or undefined
               const percentage = currentHypeTrain.goal > 0
@@ -2597,50 +2667,34 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
               const isGolden = currentHypeTrain.is_golden_kappa;
               
               return (
-                <>
+                <div className="relative h-9 overflow-hidden rounded-md mt-2 pointer-events-none">
                   {/* Progress fill background */}
-                  <div 
+                  <div
                     className={`absolute inset-0 ${
                       isGolden ? 'hype-train-progress-golden' : 'hype-train-progress-rainbow'
                     }`}
-                    style={{ 
+                    style={{
                       width: `${percentage}%`,
                       transition: 'width 0.5s ease-out'
                     }}
                   />
                   {/* Unfilled portion with animated wavy left edge */}
-                  <div 
+                  <div
                     className="absolute inset-0 hype-train-wave-edge"
-                    style={{ 
+                    style={{
                       backgroundColor: 'var(--color-background)',
                       left: `calc(${percentage}% - 19px)`,
                       width: `calc(${100 - percentage}% + 19px)`,
                       transition: 'left 0.5s ease-out, width 0.5s ease-out'
                     }}
                   />
-                  {/* Percentage/celebration content - pinned to top so it doesn't clip behind pinned message */}
-                  <div className="absolute inset-x-0 top-0 h-10 flex items-center justify-center z-20 pointer-events-none">
+                  {/* Percentage / celebration content, centered within the strip */}
+                  <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                     {isLevelUpCelebration ? (
                       <>
-                        {/* White flash effect */}
+                        {/* White flash effect (confetti rains over the whole widget, see ConfettiBurst) */}
                         <div className="absolute inset-0 bg-white/40 animate-hype-flash" />
-                        
-                        {/* Confetti particles - uses memoized config */}
-                        <div className="absolute inset-0 overflow-hidden">
-                          {confettiParticles.map((particle) => (
-                            <div
-                              key={particle.id}
-                              className="absolute w-2 h-2 rounded-full animate-confetti"
-                              style={{
-                                left: particle.left,
-                                backgroundColor: particle.color,
-                                animationDelay: particle.delay,
-                                animationDuration: particle.duration
-                              }}
-                            />
-                          ))}
-                        </div>
-                        
+
                         {/* Scrolling HYPE text */}
                         <div className="animate-hype-marquee whitespace-nowrap">
                           <span className="text-xl font-black text-white drop-shadow-glow mx-4">
@@ -2655,8 +2709,8 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                     )}
                   </div>
                   
-                  {/* Content overlay - left and right aligned */}
-                  <div className="relative flex items-center justify-between z-10">
+                  {/* Level (left) and remaining/time (right), centered within the strip */}
+                  <div className="absolute inset-0 flex items-center justify-between px-2.5 z-10">
                     {/* Left side - train icon and level */}
                     <div className="flex items-center gap-1.5">
                       {isGolden ? (
@@ -2688,18 +2742,12 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                       </span>
                     </div>
                   </div>
-                </>
+                </div>
               );
             })()
           )}
-          {/* Normal header — always visible */}
-          <div
-            className={`relative z-10 ${currentHypeTrain ? 'mt-2 rounded-lg px-2.5 py-1.5' : ''}`}
-            style={currentHypeTrain ? {
-              background: 'rgba(12, 12, 13, 0.75)',
-              backdropFilter: 'blur(24px)',
-            } : undefined}
-          >
+          {/* Stream-info header, always visible; sits as the top row, above the hype bar */}
+          <div className="relative z-10">
               <div
                 className={`flex items-center gap-2 ${pinnedMessages.length > 0 ? 'pointer-events-auto cursor-pointer' : ''}`}
                 onClick={pinnedMessages.length > 0 ? () => {
@@ -2757,18 +2805,39 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                       Hidden when ChatWidget is already inside a popout (channelOverride
                       set) — popping out of a popout would be confusing. */}
                   {currentStream && !channelOverride && (
-                    <Tooltip content="Pop out chat" side="top">
+                    <Tooltip content={isMultiNookActive && slots.length > 1 ? 'Pop out all chats' : 'Pop out chat'} side="top">
                       <button
                         type="button"
                         onClick={async (e) => {
                           e.stopPropagation();
                           try {
                             const { openMultiChatWindow } = await import('../utils/multichatWindow');
-                            await openMultiChatWindow({
-                              channel: currentStream.user_login,
-                              channelId: currentStream.user_id || undefined,
-                              channelName: currentStream.user_name || undefined,
-                            });
+                            const mn = usemultiNookStore.getState();
+                            if (mn.isMultiNookActive && mn.slots.length > 1) {
+                              // In MultiNook with multiple streams: pop out ALL of them into
+                              // a FRESH MultiChat window (replace any tabs that were open).
+                              // The IRC bridge is shared and these channels are already
+                              // joined (MultiNook keeps every tile connected), so the popout
+                              // attaches to the live session instead of reloading it.
+                              await openMultiChatWindow({
+                                replace: true,
+                                channels: mn.slots.map((s) => ({
+                                  channel: s.channelLogin,
+                                  channelId: s.channelId ?? null,
+                                  channelName: s.channelName ?? s.channelLogin,
+                                })),
+                              });
+                              // Chat now lives in the popout — hide the in-grid chat panel to
+                              // reclaim space. (Re-show any time via the toolbar chat toggle.)
+                              const after = usemultiNookStore.getState();
+                              if (!after.isChatHidden) after.toggleChatHidden();
+                            } else {
+                              await openMultiChatWindow({
+                                channel: currentStream.user_login,
+                                channelId: currentStream.user_id || undefined,
+                                channelName: currentStream.user_name || undefined,
+                              });
+                            }
                           } catch (err) {
                             Logger.error('[ChatWidget] Pop out chat failed:', err);
                           }
@@ -2875,13 +2944,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                             const resolved = parseBadges(badgeStr, currentStream?.user_id);
                             return resolved.map((badge: { key: string; info: { image_url_1x?: string; image_url_2x?: string; title?: string } | null }, bi: number) => (
                               badge.info?.image_url_1x ? (
+                                <Tooltip key={`${badge.key}-${bi}`} content={badge.info.title || badge.key}>
                                 <img
-                                  key={`${badge.key}-${bi}`}
                                   src={badge.info.image_url_2x || badge.info.image_url_1x}
                                   alt={badge.info.title || badge.key}
-                                  title={badge.info.title || badge.key}
                                   className="w-4 h-4 flex-shrink-0 drop-shadow-sm"
                                 />
+                                </Tooltip>
                               ) : null
                             ));
                           })()}
@@ -3035,9 +3104,11 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                     <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search emotes..."
                       className="w-full glass-input text-xs px-3 py-1.5 placeholder-textSecondary" />
                     <div className="flex gap-1 mt-2">
-                      <button onClick={() => setSelectedProvider('favorites')} className={`flex-1 py-1.5 text-xs transition-all flex items-center justify-center gap-1 ${selectedProvider === 'favorites' ? 'glass-input text-emerald-400 font-extrabold' : 'glass-button text-textSecondary hover:text-white'}`} style={{ borderRadius: '8px' }} title={`Favorites (${favoriteEmotes.length})`}>
+                      <Tooltip content={`Favorites (${favoriteEmotes.length})`} side="top">
+                      <button onClick={() => setSelectedProvider('favorites')} className={`flex-1 py-1.5 text-xs transition-all flex items-center justify-center gap-1 ${selectedProvider === 'favorites' ? 'glass-input text-emerald-400 font-extrabold' : 'glass-button text-textSecondary hover:text-white'}`} style={{ borderRadius: '8px' }}>
                         <span className="text-yellow-400">★</span><span className="text-[10px] opacity-70">{favoriteEmotes.length}</span>
                       </button>
+                      </Tooltip>
                       <Tooltip content="Emoji" side="top">
                       <button onClick={() => setSelectedProvider('emoji')} className={`flex-1 py-1.5 text-xs transition-all flex items-center justify-center ${selectedProvider === 'emoji' ? 'glass-input text-emerald-400 font-extrabold' : 'glass-button text-textSecondary hover:text-white'}`} style={{ borderRadius: '8px' }}><img src={getAppleEmojiUrl('😀')} alt="😀" className="w-4 h-4" /></button>
                       </Tooltip>
@@ -3081,9 +3152,11 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                                 <h3 className="text-[10px] text-textSecondary uppercase tracking-wider font-bold mb-2 -mx-2 px-4 sticky top-0 py-1.5 border-b border-white/[0.03] z-10 backdrop-blur-ultra" style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)' }}>{category}</h3>
                                 <div className="grid grid-cols-8 gap-1 px-1">
                                   {filteredCategoryEmojis.map((emoji, idx) => (
-                                    <button key={`${category}-${idx}`} onClick={() => insertEmote(emoji)} className="flex items-center justify-center p-1.5 hover:bg-glass rounded transition-colors" title={emoji}>
+                                    <Tooltip key={`${category}-${idx}`} content={emoji}>
+                                    <button onClick={() => insertEmote(emoji)} className="flex items-center justify-center p-1.5 hover:bg-glass rounded transition-colors">
                                       <img src={getAppleEmojiUrl(emoji)} alt={emoji} className="w-6 h-6 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.insertAdjacentText('afterend', emoji); }} />
                                     </button>
+                                    </Tooltip>
                                   ))}
                                 </div>
                               </div>
@@ -3108,7 +3181,8 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                                 const isFavorited = isFavoriteEmote(emote.id);
                                 return (
                                   <div key={`${groupKey}-${emote.provider}-${emote.id}-${idx}`} className="relative group">
-                                    <button onClick={() => insertEmote(emote.name)} className="flex flex-col items-center gap-1 p-1.5 hover:bg-glass rounded transition-colors w-full" title={emote.name}>
+                                    <Tooltip content={emote.name}>
+                                    <button onClick={() => insertEmote(emote.name)} className="flex flex-col items-center gap-1 p-1.5 hover:bg-glass rounded transition-colors w-full">
                                       <img
                                         src={emote.localUrl || emote.url}
                                         alt={emote.name}
@@ -3129,6 +3203,8 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                                       />
                                       <span className="text-xs text-textSecondary truncate w-full text-center">{emote.name}</span>
                                     </button>
+                                    </Tooltip>
+                                    <Tooltip content={isFavorited ? 'Remove from favorites' : 'Add to favorites'}>
                                     <button onClick={async (e) => {
                                       e.stopPropagation();
                                       try {
@@ -3148,9 +3224,10 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                                         Logger.error('Failed to toggle favorite:', err);
                                         useAppStore.getState().addToast('Failed to update favorites', 'error');
                                       }
-                                    }} className={`absolute top-0 right-0 p-1 rounded-bl transition-all ${isFavorited ? 'text-yellow-400 opacity-100' : 'text-textSecondary opacity-0 group-hover:opacity-100'} hover:text-yellow-400 hover:bg-glass`} title={isFavorited ? 'Remove from favorites' : 'Add to favorites'}>
+                                    }} className={`absolute top-0 right-0 p-1 rounded-bl transition-all ${isFavorited ? 'text-yellow-400 opacity-100' : 'text-textSecondary opacity-0 group-hover:opacity-100'} hover:text-yellow-400 hover:bg-glass`}>
                                       <svg className="w-3 h-3" fill={isFavorited ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2} viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
                                     </button>
+                                    </Tooltip>
                                   </div>
                                 );
                               })}
@@ -3372,6 +3449,12 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                     )}
                   </button>
                   </Tooltip>
+                  {/* Send-as account picker, just right of the emote button */}
+                  {showSendAsPicker && (
+                    <div className="absolute left-8 top-1/2 -translate-y-1/2 z-10">
+                      <SendAsPicker />
+                    </div>
+                  )}
                   {/* @ Mention Autocomplete */}
                   {showMentionAutocomplete && (
                     <MentionAutocomplete
@@ -3407,7 +3490,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                       maxHeight: '120px',
                       paddingTop: '8px',
                       paddingBottom: '8px',
-                      paddingLeft: '36px',
+                      paddingLeft: showSendAsPicker ? '74px' : '36px',
                       paddingRight: '12px',
                       ...(commandState.isValid && !isWatchStreakMode ? {
                         backgroundColor: 'rgba(200, 224, 232, 0.1)',

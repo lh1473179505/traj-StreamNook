@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { usemultiNookStore } from '../../stores/multiNookStore';
 import { useTutorialStore } from '../../stores/tutorialStore';
 import { MultiNookSlot } from '../../types';
-import { Plus, Maximize2, Minimize2, MessageSquare, MessageSquareOff, Loader2, Users, X, ArrowLeft, RefreshCcw } from 'lucide-react';
+import { Plus, Maximize2, Minimize2, MessageSquare, MessageSquareOff, Loader2, Users, X, ArrowLeft, RefreshCcw, ShieldCheck } from 'lucide-react';
 import { Logger } from '../../utils/logger';
 import { Tooltip } from '../ui/Tooltip';
 import { useAppStore } from '../../stores/AppStore';
@@ -37,6 +37,13 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
   const { slots, addSlot, undockSlot, swapDockedSlot, isChatHidden, toggleChatHidden, toggleMultiNook, resyncAllSlots } = usemultiNookStore();
   const minimizedSlots = slots.filter(s => s.isMinimized);
   const { isDocked: isTutorialDocked, setIsDocked: setTutorialDocked } = useTutorialStore();
+
+  // Mod-view (Moderator Logs pane) visibility — the global, now-persisted setting.
+  const showModLogs = useAppStore((s) => s.settings.show_mod_logs ?? false);
+  const toggleModLogs = useCallback(() => {
+    const st = useAppStore.getState();
+    st.updateSettings({ ...st.settings, show_mod_logs: !(st.settings.show_mod_logs ?? false) });
+  }, []);
 
   const { setNodeRef: setDockRef, isOver } = useDroppable({ id: dockDropId });
 
@@ -404,6 +411,22 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
                 className={`w-8 h-8 flex items-center justify-center transition-all duration-200 glass-button text-textSecondary hover:text-accent active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 <RefreshCcw size={15} />
+              </button>
+            </Tooltip>
+
+            {/* Mod View Toggle — shows/hides the Moderator Logs pane (persisted) */}
+            <Tooltip content={showModLogs ? 'Hide Mod View' : 'Show Mod View'} delay={200} side="bottom">
+              <button
+                onClick={toggleModLogs}
+                aria-pressed={showModLogs}
+                className={`w-8 h-8 flex items-center justify-center transition-all duration-200 ${
+                  showModLogs
+                    ? 'glass-input text-emerald-400 drop-shadow-md'
+                    : 'glass-button text-rose-400/80 hover:text-emerald-400'
+                }`}
+                style={{ borderRadius: '8px' }}
+              >
+                <ShieldCheck size={15} />
               </button>
             </Tooltip>
 

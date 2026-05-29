@@ -24,6 +24,7 @@ import MultiNookToolbar from './MultiNookToolbar';
 import { MultiNookTutorial } from './MultiNookTutorial';
 import { usemultiNookStore } from '../../stores/multiNookStore';
 import { useTutorialStore } from '../../stores/tutorialStore';
+import { acquireChannel, releaseChannel } from '../../stores/chatConnectionStore';
 import { Logger } from '../../utils/logger';
 import { useMultiNookSync } from './useMultiNookSync';
 
@@ -40,6 +41,48 @@ export const MultiNookView: React.FC = () => {
 
   // Mount the global Co-Stream Sync Controller
   useMultiNookSync();
+
+  // Keep every visible tile's chat connected in the background — not just the
+  // focused one. This is what lets the moderator-log pane (and badge metadata)
+  // cover all streams on screen and makes switching the focused chat instant.
+  // The focused tile's chat is also held by the main ChatWidget; the store
+  // ref-counts subscribers, so the overlap is harmless and changing focus never
+  // drops a connection. Diff against a ref (rather than release-all/acquire-all)
+  // so unchanged channels keep a steady ref count across renders.
+  const connectedChatKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const desired = new Map<string, string | null>();
+    for (const s of visibleSlots) {
+      desired.set(s.channelLogin.toLowerCase(), s.channelId ?? null);
+    }
+    for (const [login, channelId] of desired) {
+      if (!connectedChatKeysRef.current.has(login)) {
+        connectedChatKeysRef.current.add(login);
+        void acquireChannel(login, channelId).catch((err) =>
+          Logger.error('[MultiNook] background chat acquire failed:', err),
+        );
+      }
+    }
+    for (const login of Array.from(connectedChatKeysRef.current)) {
+      if (!desired.has(login)) {
+        connectedChatKeysRef.current.delete(login);
+        void releaseChannel(login).catch((err) =>
+          Logger.warn('[MultiNook] background chat release failed:', err),
+        );
+      }
+    }
+  }, [visibleSlots]);
+
+  // Release every background connection when leaving MultiNook.
+  useEffect(() => {
+    const keys = connectedChatKeysRef.current;
+    return () => {
+      for (const login of Array.from(keys)) {
+        void releaseChannel(login).catch(() => {});
+      }
+      keys.clear();
+    };
+  }, []);
 
   // Track drag state: which type of item is being dragged
   const [dragSource, setDragSource] = useState<'visible' | 'docked' | 'tutorial' | null>(null);

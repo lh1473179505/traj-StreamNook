@@ -293,44 +293,163 @@ impl SevenTVAuthService {
         // After login, they can get their token from the browser's localStorage or cookies
         "https://7tv.app/?login=true".to_string()
     }
+
+    // ── Per-account 7TV tokens (for linked secondary accounts) ───────────────
+    // Each linked account's 7TV token lives in its own obfuscated file keyed by
+    // Twitch user id, separate from the primary's single `.seventv_token`.
+    // Connected through an incognito login window so the alt's Twitch session
+    // never touches the main's. The primary continues to use the methods above.
+
+    fn xor_obfuscate(data: &[u8]) -> Vec<u8> {
+        let key = b"StreamNook7TVKey2024";
+        data.iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % key.len()])
+            .collect()
+    }
+
+    fn account_token_file_path(twitch_id: &str) -> Result<PathBuf> {
+        let mut path =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+        path.push("StreamNook");
+        if !path.exists() {
+            fs::create_dir_all(&path)?;
+        }
+        path.push(format!(".seventv_token_{}", twitch_id));
+        Ok(path)
+    }
+
+    fn load_token_for(twitch_id: &str) -> Result<StorableSevenTVToken> {
+        let path = Self::account_token_file_path(twitch_id)?;
+        if !path.exists() {
+            return Err(anyhow::anyhow!("No 7TV token for account {}", twitch_id));
+        }
+        let bytes = fs::read(&path)?;
+        let decoded = Self::xor_obfuscate(&bytes);
+        let s = String::from_utf8(decoded)
+            .map_err(|_| anyhow::anyhow!("Corrupt 7TV token for account {}", twitch_id))?;
+        let token: StorableSevenTVToken = serde_json::from_str(&s)?;
+        Ok(token)
+    }
+
+    /// Store a linked account's 7TV token (after the incognito login captures it).
+    pub async fn store_token_for(
+        twitch_id: &str,
+        access_token: String,
+        seventv_user_id: String,
+    ) -> Result<()> {
+        let token = StorableSevenTVToken {
+            access_token,
+            user_id: seventv_user_id,
+            twitch_id: twitch_id.to_string(),
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let json = serde_json::to_string(&token)?;
+        let path = Self::account_token_file_path(twitch_id)?;
+        fs::write(&path, Self::xor_obfuscate(json.as_bytes()))?;
+        debug!("[7TV_AUTH] ✅ stored 7TV token for account {}", twitch_id);
+        Ok(())
+    }
+
+    /// A linked account's 7TV access token, if connected.
+    pub async fn get_token_for(twitch_id: &str) -> Result<String> {
+        Self::load_token_for(twitch_id).map(|t| t.access_token)
+    }
+
+    /// Auth status for a linked account (instant JWT-exp check, no network).
+    pub async fn get_auth_status_for(twitch_id: &str) -> SevenTVAuthStatus {
+        match Self::load_token_for(twitch_id) {
+            Ok(token) => {
+                if Self::is_token_expired(&token.access_token) {
+                    let _ = Self::logout_for(twitch_id).await;
+                    SevenTVAuthStatus {
+                        is_authenticated: false,
+                        user_id: None,
+                        twitch_id: None,
+                    }
+                } else {
+                    SevenTVAuthStatus {
+                        is_authenticated: true,
+                        user_id: Some(token.user_id),
+                        twitch_id: Some(token.twitch_id),
+                    }
+                }
+            }
+            Err(_) => SevenTVAuthStatus {
+                is_authenticated: false,
+                user_id: None,
+                twitch_id: None,
+            },
+        }
+    }
+
+    /// Disconnect a linked account's 7TV (delete its stored token).
+    pub async fn logout_for(twitch_id: &str) -> Result<()> {
+        let path = Self::account_token_file_path(twitch_id)?;
+        if path.exists() {
+            fs::remove_file(&path)?;
+            debug!("[7TV_AUTH] 7TV token deleted for account {}", twitch_id);
+        }
+        Ok(())
+    }
+
+    /// Authoritatively check a linked account's 7TV token against 7TV (not just
+    /// the local JWT-exp heuristic). Clears the stored token and returns false if
+    /// 7TV rejects it, so a revoked/dead token can't keep reading as "connected".
+    pub async fn validate_token_for(twitch_id: &str) -> Result<bool> {
+        let token = match Self::get_token_for(twitch_id).await {
+            Ok(t) => t,
+            Err(_) => return Ok(false),
+        };
+
+        let client = crate::services::http::client().clone();
+        let response = client
+            .post(SEVENTV_GQL_URL)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&serde_json::json!({ "query": "{ users { me { id } } }" }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let _ = Self::logout_for(twitch_id).await;
+            return Ok(false);
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        if json["data"]["users"]["me"]["id"].is_string() {
+            Ok(true)
+        } else {
+            let _ = Self::logout_for(twitch_id).await;
+            Ok(false)
+        }
+    }
 }
 
 /// 7TV Cosmetics Service - uses the auth token to change paints/badges
 pub struct SevenTVCosmeticsService;
 
 impl SevenTVCosmeticsService {
-    /// Set active paint
-    pub async fn set_active_paint(user_id: &str, paint_id: Option<&str>) -> Result<bool> {
-        let token = SevenTVAuthService::get_token().await?;
+    /// Run a cosmetics mutation with an explicit token. On an auth failure it
+    /// clears the relevant stored token — `cleanup = Some(twitch_id)` for a
+    /// linked account, `None` for the primary — and returns SESSION_EXPIRED.
+    async fn run_mutation(
+        token: &str,
+        cleanup: Option<&str>,
+        query: &str,
+        variables: serde_json::Value,
+        op_name: &str,
+    ) -> Result<bool> {
         let client = crate::services::http::client().clone();
-
-        // Use the simplified mutation (we only need the response status)
-        let mutation = r#"
-        mutation SetActivePaint($id: Id!, $paintId: Id) {
-            users {
-                user(id: $id) {
-                    activePaint(paintId: $paintId) {
-                        id
-                        style {
-                            activePaintId
-                        }
-                    }
-                }
-            }
-        }
-        "#;
 
         let response = client
             .post(SEVENTV_GQL_URL)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", token))
             .json(&serde_json::json!({
-                "query": mutation,
-                "variables": {
-                    "id": user_id,
-                    "paintId": paint_id
-                },
-                "operationName": "SetActivePaint"
+                "query": query,
+                "variables": variables,
+                "operationName": op_name,
             }))
             .send()
             .await?;
@@ -339,13 +458,13 @@ impl SevenTVCosmeticsService {
             let status = response.status();
             let error_text = response.text().await?;
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                debug!("[7TV] Paint mutation returned 401 - session expired, clearing token");
-                let _ = SevenTVAuthService::logout().await;
+                debug!("[7TV] mutation returned 401 - clearing token");
+                Self::clear_token(cleanup).await;
                 return Err(anyhow::anyhow!(
                     "SESSION_EXPIRED: 7TV session has expired. Please reconnect your 7TV account."
                 ));
             }
-            return Err(anyhow::anyhow!("Failed to set paint: {}", error_text));
+            return Err(anyhow::anyhow!("Failed 7TV mutation: {}", error_text));
         }
 
         let result: serde_json::Value = response.json().await?;
@@ -360,8 +479,8 @@ impl SevenTVCosmeticsService {
                         .map(|c| c == "LOGIN_REQUIRED")
                         .unwrap_or(false);
                     if is_auth_err {
-                        debug!("[7TV] Paint GQL returned LOGIN_REQUIRED - clearing token");
-                        let _ = SevenTVAuthService::logout().await;
+                        debug!("[7TV] GQL returned LOGIN_REQUIRED - clearing token");
+                        Self::clear_token(cleanup).await;
                         return Err(anyhow::anyhow!("SESSION_EXPIRED: 7TV session has expired. Please reconnect your 7TV account."));
                     }
                 }
@@ -369,81 +488,89 @@ impl SevenTVCosmeticsService {
             return Err(anyhow::anyhow!("GraphQL errors: {:?}", errors));
         }
 
-        debug!("[7TV] ✅ Paint changed successfully to: {:?}", paint_id);
         Ok(true)
     }
 
-    /// Set active badge
+    async fn clear_token(cleanup: Option<&str>) {
+        match cleanup {
+            Some(twitch_id) => {
+                let _ = SevenTVAuthService::logout_for(twitch_id).await;
+            }
+            None => {
+                let _ = SevenTVAuthService::logout().await;
+            }
+        }
+    }
+
+    const PAINT_MUTATION: &'static str = r#"
+        mutation SetActivePaint($id: Id!, $paintId: Id) {
+            users { user(id: $id) { activePaint(paintId: $paintId) { id style { activePaintId } } } }
+        }
+    "#;
+
+    const BADGE_MUTATION: &'static str = r#"
+        mutation SetActiveBadge($id: Id!, $badgeId: Id) {
+            users { user(id: $id) { activeBadge(badgeId: $badgeId) { id style { activeBadgeId } } } }
+        }
+    "#;
+
+    /// Set the primary's active paint.
+    pub async fn set_active_paint(user_id: &str, paint_id: Option<&str>) -> Result<bool> {
+        let token = SevenTVAuthService::get_token().await?;
+        Self::run_mutation(
+            &token,
+            None,
+            Self::PAINT_MUTATION,
+            serde_json::json!({ "id": user_id, "paintId": paint_id }),
+            "SetActivePaint",
+        )
+        .await
+    }
+
+    /// Set a linked account's active paint, using that account's 7TV token.
+    pub async fn set_active_paint_for(
+        twitch_id: &str,
+        user_id: &str,
+        paint_id: Option<&str>,
+    ) -> Result<bool> {
+        let token = SevenTVAuthService::get_token_for(twitch_id).await?;
+        Self::run_mutation(
+            &token,
+            Some(twitch_id),
+            Self::PAINT_MUTATION,
+            serde_json::json!({ "id": user_id, "paintId": paint_id }),
+            "SetActivePaint",
+        )
+        .await
+    }
+
+    /// Set the primary's active badge.
     pub async fn set_active_badge(user_id: &str, badge_id: Option<&str>) -> Result<bool> {
         let token = SevenTVAuthService::get_token().await?;
-        let client = crate::services::http::client().clone();
+        Self::run_mutation(
+            &token,
+            None,
+            Self::BADGE_MUTATION,
+            serde_json::json!({ "id": user_id, "badgeId": badge_id }),
+            "SetActiveBadge",
+        )
+        .await
+    }
 
-        // Use the simplified mutation
-        let mutation = r#"
-        mutation SetActiveBadge($id: Id!, $badgeId: Id) {
-            users {
-                user(id: $id) {
-                    activeBadge(badgeId: $badgeId) {
-                        id
-                        style {
-                            activeBadgeId
-                        }
-                    }
-                }
-            }
-        }
-        "#;
-
-        let response = client
-            .post(SEVENTV_GQL_URL)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&serde_json::json!({
-                "query": mutation,
-                "variables": {
-                    "id": user_id,
-                    "badgeId": badge_id
-                },
-                "operationName": "SetActiveBadge"
-            }))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await?;
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                debug!("[7TV] Badge mutation returned 401 - session expired, clearing token");
-                let _ = SevenTVAuthService::logout().await;
-                return Err(anyhow::anyhow!(
-                    "SESSION_EXPIRED: 7TV session has expired. Please reconnect your 7TV account."
-                ));
-            }
-            return Err(anyhow::anyhow!("Failed to set badge: {}", error_text));
-        }
-
-        let result: serde_json::Value = response.json().await?;
-
-        if let Some(errors) = result.get("errors") {
-            if let Some(arr) = errors.as_array() {
-                for err in arr {
-                    let is_auth_err = err
-                        .get("extensions")
-                        .and_then(|e| e.get("code"))
-                        .and_then(|c| c.as_str())
-                        .map(|c| c == "LOGIN_REQUIRED")
-                        .unwrap_or(false);
-                    if is_auth_err {
-                        debug!("[7TV] Badge GQL returned LOGIN_REQUIRED - clearing token");
-                        let _ = SevenTVAuthService::logout().await;
-                        return Err(anyhow::anyhow!("SESSION_EXPIRED: 7TV session has expired. Please reconnect your 7TV account."));
-                    }
-                }
-            }
-            return Err(anyhow::anyhow!("GraphQL errors: {:?}", errors));
-        }
-
-        debug!("[7TV] ✅ Badge changed successfully to: {:?}", badge_id);
-        Ok(true)
+    /// Set a linked account's active badge, using that account's 7TV token.
+    pub async fn set_active_badge_for(
+        twitch_id: &str,
+        user_id: &str,
+        badge_id: Option<&str>,
+    ) -> Result<bool> {
+        let token = SevenTVAuthService::get_token_for(twitch_id).await?;
+        Self::run_mutation(
+            &token,
+            Some(twitch_id),
+            Self::BADGE_MUTATION,
+            serde_json::json!({ "id": user_id, "badgeId": badge_id }),
+            "SetActiveBadge",
+        )
+        .await
     }
 }

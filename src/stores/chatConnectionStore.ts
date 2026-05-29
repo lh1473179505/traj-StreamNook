@@ -76,6 +76,14 @@ export interface SendUserInfo {
   badges?: string;
 }
 
+/** Identity of a chosen secondary account to send a message AS. */
+export interface SendAsAccount {
+  userId: string;
+  login: string;
+  displayName: string;
+  color?: string;
+}
+
 interface ChannelSlice {
   channel: string;
   channelId: string | null;
@@ -125,6 +133,21 @@ let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
 let lastMessageTime = Date.now();
 let intentionalDisconnect = false;
 let currentUserId: string | null = null;
+
+// Every Twitch user id that belongs to the local user (primary + any linked
+// secondary accounts). Used so a message we sent from a secondary account is
+// recognized as "own" during optimistic reconciliation, even though the IRC
+// reader's identity is always the primary. Populated by the send-account store.
+let ownAccountIds = new Set<string>();
+
+export function setOwnAccountIds(ids: string[]): void {
+  ownAccountIds = new Set(ids);
+}
+
+function isOwnUserId(userId: string | null | undefined): boolean {
+  if (!userId) return false;
+  return userId === currentUserId || ownAccountIds.has(userId);
+}
 
 // Shared per-channel emote cache. Replaces the prior `const [emotes] = useState`
 // inside every ChatWidget instance — three split panes for the same channel
@@ -291,6 +314,37 @@ function pushMessage(slice: ChannelSlice, msg: any) {
   if (slice.messages.length > limit) {
     slice.messages = slice.messages.slice(slice.messages.length - limit);
   }
+}
+
+/**
+ * Retroactively repaint the PRIMARY account's own optimistic messages with the
+ * latest USERSTATE badge set, and report whether anything changed.
+ *
+ * Why this is necessary: Twitch never echoes your own PRIVMSG back over your own
+ * IRC read connection, so an own message exists only as the local optimistic
+ * copy — the id-match echo upgrade in handleRawIrcString / appendStructuredMessage
+ * can't fire for it. Its `badges=` tag is frozen at build time to
+ * `slice.userBadgesFromIrc` (USERSTATE). If you send before USERSTATE has landed,
+ * that tag is empty and there is otherwise NO path to your real badges short of a
+ * leave + rejoin backfill (parse_historical_messages). This closes that gap by
+ * rewriting the tag the moment USERSTATE arrives. Mirrors the cosmetics-repaint
+ * bridge in chatUserStore, but for native Twitch badges. Only raw-string copies
+ * are touched — backfilled / reconciled messages are structured objects that
+ * already carry authoritative server badges.
+ */
+function repaintOwnBadges(slice: ChannelSlice, badges: string): boolean {
+  if (!currentUserId) return false;
+  const ownTag = `user-id=${currentUserId}`;
+  let changed = false;
+  for (let i = 0; i < slice.messages.length; i++) {
+    const m = slice.messages[i];
+    if (typeof m !== 'string' || !m.includes(ownTag)) continue;
+    const current = m.match(/(?:^|;)badges=([^;]*)/)?.[1] ?? '';
+    if (current === badges) continue;
+    slice.messages[i] = m.replace(/(^|;)badges=[^;]*/, (_full, sep) => `${sep}badges=${badges}`);
+    changed = true;
+  }
+  return changed;
 }
 
 function setAllChannelsConnected(connected: boolean) {
@@ -645,6 +699,9 @@ function handleWsMessage(raw: string) {
       withSlice(channel, (slice) => {
         slice.userBadgesFromIrc = badges;
         slice.userBadges = badges;
+        // Repaint any already-sent own messages that were built before this
+        // USERSTATE landed (withSlice bumps the render revision for us).
+        repaintOwnBadges(slice, badges);
       });
     } else {
       // Legacy untagged badges — apply to whichever channel exists (only one
@@ -655,6 +712,7 @@ function handleWsMessage(raw: string) {
         const slice = channels.values().next().value as ChannelSlice;
         slice.userBadgesFromIrc = badges;
         slice.userBadges = badges;
+        repaintOwnBadges(slice, badges);
         bumpRevision();
       }
     }
@@ -676,9 +734,24 @@ function handleWsMessage(raw: string) {
         if (ch) withSlice(ch, apply);
         else for (const s of useChatConnectionStore.getState().channels.values()) apply(s);
         if (showModMsgs && ch) {
-          const who = parsed.target_user ?? 'a user';
+          const who = parsed.login ?? 'a user';
           injectSystemMessage(ch, `${who}'s message was deleted by a moderator.`);
         }
+        // Moderator log: message deletions are broadcast to every viewer over IRC,
+        // so this populates the log even when you're not a mod. The EventSub feed
+        // (mod-only) upgrades this entry in place with the acting moderator's name.
+        useAppStore.getState().addModLog({
+          id: `irc-${Date.now()}-${Math.random()}`,
+          action: 'delete',
+          timestamp: new Date().toISOString(),
+          moderator_name: 'A moderator',
+          target_user_name: (parsed.login as string) || undefined,
+          target_user_login: (parsed.login as string) || undefined,
+          message: (parsed.message as string) || undefined,
+          channel: ch,
+          source: 'irc',
+          details: parsed,
+        });
         bumpRevision();
         return;
       }
@@ -732,6 +805,62 @@ function handleWsMessage(raw: string) {
           injectSystemMessage(ch, line);
         } else if (showModMsgs && ch && !parsed.target_user_id) {
           injectSystemMessage(ch, 'Chat was cleared by a moderator.');
+        }
+        // Moderator log: timeouts/bans/clears are broadcast to every viewer over
+        // IRC (anonymized — no acting moderator). This is the baseline feed that
+        // works in any channel, live or offline, main or multi. The EventSub
+        // channel.moderate feed upgrades these with the moderator name when you
+        // moderate the channel.
+        {
+          const appState = useAppStore.getState();
+          if (parsed.target_user_id) {
+            const isTimeout = parsed.ban_duration !== undefined && parsed.ban_duration !== null;
+            // Surface the target's most recent message in this channel as the
+            // likely reason for the action — mirrors how deletions show the removed
+            // text. CLEARCHAT carries no message, so read it back from chat history:
+            // the messages are still present (CLEARCHAT only marks them cleared, it
+            // doesn't drop them). Chronological order means the last match wins.
+            let lastMessage: string | undefined;
+            const targetSlice = ch ? useChatConnectionStore.getState().channels.get(ch) : undefined;
+            if (targetSlice) {
+              for (const msg of targetSlice.messages) {
+                const msgUserId =
+                  typeof msg !== 'string'
+                    ? msg.user_id
+                    : msg.match?.(/user-id=([^;]+)/)?.[1];
+                if (msgUserId !== parsed.target_user_id) continue;
+                const text =
+                  typeof msg !== 'string'
+                    ? (msg.content as string | undefined)
+                    : msg.match?.(/PRIVMSG #\w+ :(.+)$/)?.[1];
+                if (typeof text === 'string' && text.trim()) lastMessage = text.trim();
+              }
+            }
+            appState.addModLog({
+              id: `irc-${Date.now()}-${Math.random()}`,
+              action: isTimeout ? 'timeout' : 'ban',
+              timestamp: new Date().toISOString(),
+              moderator_name: 'A moderator',
+              target_user_name: (parsed.target_user as string) || undefined,
+              target_user_id: (parsed.target_user_id as string) || undefined,
+              target_user_login: (parsed.target_user as string) || undefined,
+              duration: isTimeout ? (parsed.ban_duration as number) : undefined,
+              message: lastMessage,
+              channel: ch,
+              source: 'irc',
+              details: parsed,
+            });
+          } else {
+            appState.addModLog({
+              id: `irc-${Date.now()}-${Math.random()}`,
+              action: 'clear',
+              timestamp: new Date().toISOString(),
+              moderator_name: 'A moderator',
+              channel: ch,
+              source: 'irc',
+              details: parsed,
+            });
+          }
         }
         bumpRevision();
         return;
@@ -804,8 +933,9 @@ function handleNotice(parsed: any) {
     followers_on: 'follower_only_on',
     followers_off: 'follower_only_off',
     followers_on_zero: 'follower_only_on',
-    timeout_success: 'timeout',
-    ban_success: 'ban',
+    // timeout_success / ban_success intentionally omitted: those self-action
+    // NOTICEs only fire for the moderator who acted and carry no target, while
+    // CLEARCHAT now logs every timeout/ban universally with the real target.
     unban_success: 'unban',
     untimeout_success: 'untimeout',
     clear_chat: 'clear_chat',
@@ -827,6 +957,8 @@ function handleNotice(parsed: any) {
         moderator_name: 'Twitch System',
         target_user_name: 'Stream/Settings',
         reason: parsed.message,
+        channel: parsed.channel,
+        source: 'irc',
         details: parsed,
       });
     }
@@ -909,13 +1041,33 @@ function appendStructuredMessage(slice: ChannelSlice, parsed: any) {
   if (!messageId) return;
   if (slice.seenMessageIds.has(messageId)) return;
 
-  // Replace optimistic local-* message from this user if content matches
-  if (parsed.user_id === currentUserId) {
-    if (Array.isArray(parsed.badges)) {
-      slice.userBadgesFromIrc = parsed.badges
-        .map((b: any) => `${b.name}/${b.version}`)
-        .join(',');
-    }
+  // Deterministic own-message upgrade: if we already hold a (string) copy with
+  // this exact id — our own optimistic message stamped with the real Helix id,
+  // now awaiting its full echo — replace it in place so it picks up real
+  // badges/tenure. Only own stamped messages pre-exist with a server id, so this
+  // never matches a fresh incoming message.
+  const idMatchIdx = slice.messages.findIndex(
+    (m) => typeof m === 'string' && m.match(/(?:^|;)id=([^;]+)/)?.[1] === messageId,
+  );
+  if (idMatchIdx !== -1) {
+    slice.messages[idMatchIdx] = parsed;
+    slice.seenMessageIds.add(messageId);
+    return;
+  }
+
+  // Badge cache tracks only the PRIMARY (the IRC-connected account).
+  if (parsed.user_id === currentUserId && Array.isArray(parsed.badges)) {
+    slice.userBadgesFromIrc = parsed.badges
+      .map((b: any) => `${b.name}/${b.version}`)
+      .join(',');
+  }
+
+  // Replace an optimistic local-* copy of a message WE sent (from the primary OR
+  // a linked secondary) when the content matches. This covers the race where a
+  // secondary's IRC echo arrives before its Helix id is stamped onto the
+  // optimistic; without it, the echo (a non-primary user-id) would be pushed as
+  // a duplicate.
+  if (isOwnUserId(parsed.user_id)) {
     const optimisticIdx = slice.messages.findIndex((m) => {
       if (typeof m !== 'string' || !m.includes('id=local-')) return false;
       const contentMatch = m.match(/PRIVMSG #\w+ :(.+)$/);
@@ -976,10 +1128,27 @@ function handleRawIrcString(raw: string) {
   const userIdMatch = raw.match(/user-id=([^;]+)/);
   const userId = userIdMatch?.[1];
 
-  if (userId && currentUserId && userId === currentUserId) {
-    const badgesMatch = raw.match(/(?:^|;)badges=([^;]*)/);
-    if (badgesMatch && badgesMatch[1]) {
-      slice.userBadgesFromIrc = badgesMatch[1];
+  // Deterministic own-message upgrade (Helix-stamped real id awaiting its echo):
+  // replace the stamped optimistic string in place with the full server line.
+  if (messageId && !slice.seenMessageIds.has(messageId)) {
+    const idMatchIdx = slice.messages.findIndex(
+      (m) => typeof m === 'string' && m.match(/(?:^|;)id=([^;]+)/)?.[1] === messageId,
+    );
+    if (idMatchIdx !== -1) {
+      slice.messages[idMatchIdx] = raw;
+      slice.seenMessageIds.add(messageId);
+      bumpRevision();
+      return;
+    }
+  }
+
+  if (userId && isOwnUserId(userId)) {
+    // Badge cache tracks only the PRIMARY (the IRC-connected account).
+    if (userId === currentUserId) {
+      const badgesMatch = raw.match(/(?:^|;)badges=([^;]*)/);
+      if (badgesMatch && badgesMatch[1]) {
+        slice.userBadgesFromIrc = badgesMatch[1];
+      }
     }
     const contentMatch = raw.match(/PRIVMSG #\w+ :(.+)$/);
     const serverContent = contentMatch?.[1];
@@ -996,10 +1165,15 @@ function handleRawIrcString(raw: string) {
         return;
       }
     }
-    if (messageId) slice.seenMessageIds.add(messageId);
-    pushMessage(slice, raw);
-    bumpRevision();
-    return;
+    // Primary with no matching optimistic: push once here (prior behavior, e.g.
+    // a message the user sent from another device). Secondaries fall through to
+    // the generic id-deduped push below so they still appear exactly once.
+    if (userId === currentUserId) {
+      if (messageId) slice.seenMessageIds.add(messageId);
+      pushMessage(slice, raw);
+      bumpRevision();
+      return;
+    }
   }
 
   if (messageId) {
@@ -1128,20 +1302,37 @@ export async function sendChannelMessage(
   text: string,
   userInfo: SendUserInfo,
   replyParentMsgId?: string,
+  senderAccount?: SendAsAccount | null,
 ): Promise<void> {
   if (!text.trim()) return;
   const key = channel.toLowerCase();
   const slice = useChatConnectionStore.getState().channels.get(key);
   if (!slice || !slice.isConnected) return;
 
+  // currentUserId tracks the PRIMARY (the IRC-connected reader), regardless of
+  // which account we're sending as.
   currentUserId = userInfo.userId;
+
+  // Who the message is sent AS. Defaults to the primary; a chosen secondary
+  // sends with its own identity + token (resolved in the backend by the
+  // senderAccountId below). The secondary is registered as "own" so its echo
+  // reconciles against the optimistic copy rather than duplicating.
+  const sendingAsSecondary = !!senderAccount && senderAccount.userId !== userInfo.userId;
+  const senderUserId = senderAccount?.userId ?? userInfo.userId;
+  const senderUsername = sendingAsSecondary ? senderAccount!.login : userInfo.username;
+  const senderDisplayName = sendingAsSecondary ? senderAccount!.displayName : userInfo.displayName;
+  if (sendingAsSecondary) {
+    ownAccountIds.add(senderUserId);
+  }
 
   const tempId = `local-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const timestamp = Date.now();
-  const color = userInfo.color || '#8A2BE2';
+  const color = (sendingAsSecondary ? senderAccount!.color : userInfo.color) || '#8A2BE2';
   // USERSTATE-cached badges win because they're tenure-correct for this channel;
-  // caller-provided badges are the fallback while USERSTATE hasn't landed.
-  const badges = slice.userBadgesFromIrc || userInfo.badges || '';
+  // caller-provided badges are the fallback while USERSTATE hasn't landed. A
+  // secondary isn't the IRC-connected user, so it has no cached badges; the real
+  // echo repaints them via the id-match path.
+  const badges = sendingAsSecondary ? '' : slice.userBadgesFromIrc || userInfo.badges || '';
   const roomIdTag = slice.channelId ?? '';
 
   let replyTags = '';
@@ -1180,18 +1371,57 @@ export async function sendChannelMessage(
     }
   }
 
-  const optimistic = `@badge-info=;badges=${badges};color=${color};display-name=${userInfo.displayName};emotes=;first-msg=0;flags=;id=${tempId};mod=0;${replyTags}returning-chatter=0;room-id=${roomIdTag};subscriber=0;tmi-sent-ts=${timestamp};turbo=0;user-id=${userInfo.userId};user-type= :${userInfo.username}!${userInfo.username}@${userInfo.username}.tmi.twitch.tv PRIVMSG #${key} :${text}`;
+  const optimistic = `@badge-info=;badges=${badges};color=${color};display-name=${senderDisplayName};emotes=;first-msg=0;flags=;id=${tempId};mod=0;${replyTags}returning-chatter=0;room-id=${roomIdTag};subscriber=0;tmi-sent-ts=${timestamp};turbo=0;user-id=${senderUserId};user-type= :${senderUsername}!${senderUsername}@${senderUsername}.tmi.twitch.tv PRIVMSG #${key} :${text}`;
 
   slice.seenMessageIds.add(tempId);
   pushMessage(slice, optimistic);
   bumpRevision();
 
   try {
-    await invoke('send_chat_message', {
+    const result = await invoke<{
+      message_id: string | null;
+      is_sent: boolean;
+      drop_reason: string | null;
+    }>('send_chat_message', {
       message: text,
       replyParentMsgId: replyParentMsgId || null,
       targetChannel: key,
+      broadcasterId: slice.channelId || null,
+      senderId: senderUserId || null,
+      senderAccountId: sendingAsSecondary ? senderUserId : null,
     });
+
+    // Twitch accepted the request but dropped the message (AutoMod, etc.).
+    // Pull the optimistic copy and tell the user why.
+    if (result && result.is_sent === false) {
+      slice.messages = slice.messages.filter((m) => {
+        if (typeof m === 'string') return !m.includes(`id=${tempId}`);
+        return (m as any)?.id !== tempId;
+      });
+      slice.seenMessageIds.delete(tempId);
+      bumpRevision();
+      if (result.drop_reason) {
+        injectSystemMessage(key, `Your message was not sent: ${result.drop_reason}`);
+      }
+      return;
+    }
+
+    // Helix returns the authoritative message id. Stamp it onto the optimistic
+    // copy so deletes work immediately, with no dependency on catching the IRC
+    // echo. We do NOT mark the real id as "seen": when the echo arrives it
+    // upgrades this copy in place (real badges/tenure) via the id-match path in
+    // appendStructuredMessage / handleRawIrcString.
+    if (result && result.message_id) {
+      const realId = result.message_id;
+      const idx = slice.messages.findIndex(
+        (m) => typeof m === 'string' && m.includes(`id=${tempId}`),
+      );
+      if (idx !== -1) {
+        slice.messages[idx] = (slice.messages[idx] as string).replace(`id=${tempId}`, `id=${realId}`);
+        slice.seenMessageIds.delete(tempId);
+        bumpRevision();
+      }
+    }
   } catch (err) {
     Logger.error('[ChatStore] send_chat_message failed:', err);
     slice.messages = slice.messages.filter((m) => {

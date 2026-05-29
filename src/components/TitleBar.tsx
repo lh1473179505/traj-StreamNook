@@ -518,10 +518,7 @@ const TitleBar = () => {
 
             {isUpdating && updateInfo && (
               <div className="drops-preview-card-right">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="p-1.5 rounded-md bg-[#84ff57]/15">
-                    <RotateCw size={14} className="text-[#84ff57] animate-spin" />
-                  </div>
+                <div className="flex items-center mb-2">
                   <span className="text-xs font-semibold text-textPrimary">Updating StreamNook</span>
                 </div>
 
