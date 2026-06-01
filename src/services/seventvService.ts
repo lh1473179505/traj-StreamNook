@@ -72,12 +72,22 @@ interface PaintV4 {
   selected?: boolean;
 }
 
+interface BadgeImageV4 {
+  url: string;
+  mime?: string;
+  scale?: number;
+  frameCount?: number;
+}
+
 interface BadgeV4 {
   id: string;
   name: string;
   description?: string;
   selected?: boolean;
   localUrl?: string;
+  // Authoritative image URLs from the V4 API. A badge's id is NOT its image id
+  // in V4, so these must be used rather than constructing a URL from `id`.
+  images?: BadgeImageV4[];
 }
 
 interface UserCosmeticsResponse {
@@ -205,6 +215,12 @@ const fullBadgeQueryFields = /* GraphQL */ `
     id
     name
     description
+    images {
+      url
+      mime
+      scale
+      frameCount
+    }
   }
 `;
 
@@ -811,11 +827,25 @@ export const computePaintStyle = (
 // animated WebP at that path. Without the extension the CDN returns a
 // default/static representation, breaking animation on badges like the
 // year-streak crowns. See https://cdn.7tv.app/badge/<id>/<res>.webp
+// Pick the best image URL from a V4 badge's images[] for a target scale. A
+// badge's id is NOT its image id in V4, so these API-provided URLs are the only
+// reliable source. Prefers the requested scale, the animated (non-_static)
+// form, and webp > avif > png > gif.
+const pickBadgeImage = (images: BadgeImageV4[] | undefined, scale: number): string | undefined => {
+  if (!images?.length) return undefined;
+  const rank = (img: BadgeImageV4): number => {
+    let s = Math.abs((img.scale ?? 1) - scale) * 10;
+    if (img.url.includes('_static')) s += 3;
+    const m = img.mime ?? '';
+    s += m.includes('webp') ? 0 : m.includes('avif') ? 1 : m.includes('png') ? 2 : 4;
+    return s;
+  };
+  return [...images].sort((a, b) => rank(a) - rank(b))[0]?.url;
+};
+
 export const getBadgeImageUrl = (badge: BadgeV4): string => {
-  if (badge.localUrl) {
-    return badge.localUrl;
-  }
-  return `https://cdn.7tv.app/badge/${badge.id}/4x.webp`;
+  if (badge.localUrl) return badge.localUrl;
+  return pickBadgeImage(badge.images, 4) ?? `https://cdn.7tv.app/badge/${badge.id}/4x.webp`;
 };
 
 // Get all resolution URLs for a 7TV badge (for srcSet)
@@ -824,12 +854,12 @@ export const getBadgeImageUrls = (badge: BadgeV4): { url1x: string; url2x: strin
     // If we have a local URL, use it for all resolutions
     return { url1x: badge.localUrl, url2x: badge.localUrl, url3x: badge.localUrl, url4x: badge.localUrl };
   }
-  const baseUrl = `https://cdn.7tv.app/badge/${badge.id}`;
+  const legacy = `https://cdn.7tv.app/badge/${badge.id}`;
   return {
-    url1x: `${baseUrl}/1x.webp`,
-    url2x: `${baseUrl}/2x.webp`,
-    url3x: `${baseUrl}/3x.webp`,
-    url4x: `${baseUrl}/4x.webp`,
+    url1x: pickBadgeImage(badge.images, 1) ?? `${legacy}/1x.webp`,
+    url2x: pickBadgeImage(badge.images, 2) ?? `${legacy}/2x.webp`,
+    url3x: pickBadgeImage(badge.images, 3) ?? `${legacy}/3x.webp`,
+    url4x: pickBadgeImage(badge.images, 4) ?? `${legacy}/4x.webp`,
   };
 };
 
@@ -849,7 +879,7 @@ export const getBadgeFallbackUrls = (badgeId: string): string[] => {
 export const getBadgeImageUrlForProvider = (badge: any, provider: '7tv' | 'ffz'): string => {
   if (provider === '7tv') {
     if (badge.localUrl) return badge.localUrl;
-    return `https://cdn.7tv.app/badge/${badge.id}/3x.webp`;
+    return pickBadgeImage(badge.images, 3) ?? `https://cdn.7tv.app/badge/${badge.id}/3x.webp`;
   } else if (provider === 'ffz') {
     return badge.urls?.['4'] || badge.urls?.['2'] || badge.urls?.['1'] || badge.image;
   }

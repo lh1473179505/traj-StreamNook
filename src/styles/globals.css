@@ -234,6 +234,52 @@ body {
   background: rgba(255, 255, 255, 0.03);
 }
 
+/* Keyboard-moderation focus ring on a chat message row. Winters' Glass: a solid
+   inset accent bar on the left plus a faint surface tint, no outer glow. */
+.chat-message-row.is-mod-focus {
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 3px 0 0 0 var(--color-accent);
+}
+
+/* Realistic physical keycap (AuraKey recipe, scaled for inline UI). The radial
+   gradient pools light toward the bottom-centre like a real keycap face; the
+   stacked shadows are a dark bottom edge for depth, a crisp outline, an inset
+   bottom shadow and an inset top highlight (the moulded bevel). Neutral dark so
+   it stays on-theme with no coloured glow. */
+.sn-keycap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: #f4f5f6;
+  height: 22px;
+  min-width: 22px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: radial-gradient(75% 75% at 50% 92%, #1c1d20 0px, #0e0f11 100%);
+  box-shadow:
+    rgba(0, 0, 0, 0.45) 0 1px 0 1.5px,
+    rgba(0, 0, 0, 0.9) 0 0 0.5px 0.5px,
+    rgba(0, 0, 0, 0.25) 0 1px 1px 0.5px inset,
+    rgba(255, 255, 255, 0.18) 0 1px 1px 0.5px inset;
+  text-shadow: rgba(0, 0, 0, 0.45) 0 0.5px 0.5px;
+  user-select: none;
+}
+
+/* Compact variant for dense surfaces (the command-palette shortcut hint). */
+.sn-keycap--xs {
+  height: 18px;
+  min-width: 18px;
+  padding: 0 5px;
+  font-size: 10px;
+  border-radius: 5px;
+}
+
 /* User Profile Card specific styling with black transparency */
 .user-profile-card {
   background-color: rgba(0, 0, 0, 0.65);

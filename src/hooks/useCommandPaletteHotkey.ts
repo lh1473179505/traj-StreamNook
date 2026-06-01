@@ -7,10 +7,16 @@
 
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/AppStore';
+import { isRecordingKeybind } from '../keybindings/recorderState';
 
 export function useCommandPaletteHotkey(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // Stand down while the Keybindings recorder is capturing, so Ctrl+K is
+      // recorded as a chord (or ignored) instead of opening the palette behind
+      // the settings dialog.
+      if (isRecordingKeybind()) return;
+      if (e.isComposing || e.keyCode === 229) return;
       const mod = e.ctrlKey || e.metaKey;
       if (!mod || e.altKey || e.shiftKey) return;
       if (e.key !== 'k' && e.key !== 'K') return;

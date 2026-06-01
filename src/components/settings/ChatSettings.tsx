@@ -393,9 +393,9 @@ const ChatSettings = () => {
           description='Animate the scroll when you click the "Resume" button. New-message auto-scroll stays instant.'
           control={
             <Toggle
-              enabled={settings.chat_render?.smooth_scroll_on_resume ?? false}
+              enabled={settings.chat_render?.smooth_scroll_on_resume ?? true}
               onChange={() =>
-                setRender({ smooth_scroll_on_resume: !(settings.chat_render?.smooth_scroll_on_resume ?? false) })
+                setRender({ smooth_scroll_on_resume: !(settings.chat_render?.smooth_scroll_on_resume ?? true) })
               }
             />
           }

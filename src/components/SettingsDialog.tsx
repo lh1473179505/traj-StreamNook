@@ -9,6 +9,7 @@ import {
   Bell,
   Database,
   Command,
+  Keyboard,
   HelpCircle,
   Sparkles,
   BarChart3,
@@ -31,6 +32,7 @@ import SupportSettings from './settings/SupportSettings';
 import WhatsNewSettings from './settings/WhatsNewSettings';
 import AnalyticsSettings from './settings/AnalyticsSettings';
 import CommandPaletteSettings from './settings/CommandPaletteSettings';
+import KeybindingsSettings from './settings/KeybindingsSettings';
 import ProfileSettings from './settings/ProfileSettings';
 import SettingsSearchResults from './settings/SettingsSearchResults';
 import type { SettingsIndexEntry } from './settings/searchIndex';
@@ -54,7 +56,8 @@ const TABS: TabMeta[] = [
   { id: 'Integrations',    label: 'Integrations',    icon: Plug,          tint: 'rgba(180, 150, 210, 0.22)', description: 'Twitch ad blocker and third-party services' },
   { id: 'Notifications',   label: 'Notifications',   icon: Bell,          tint: 'rgba(220, 180, 120, 0.20)', description: 'Toasts, sounds, and update prompts' },
   { id: 'Cache',           label: 'Cache',           icon: Database,      tint: 'rgba(150, 170, 185, 0.22)', description: 'Emote, badge, and metadata caches' },
-  { id: 'Command Palette', label: 'Command Palette', icon: Command,       tint: 'rgba(140, 200, 180, 0.22)', description: 'Keyboard shortcuts and snippets' },
+  { id: 'Command Palette', label: 'Command Palette', icon: Command,       tint: 'rgba(140, 200, 180, 0.22)', description: 'The Ctrl+K palette and snippets' },
+  { id: 'Keybindings',     label: 'Keybindings',     icon: Keyboard,      tint: 'rgba(190, 160, 205, 0.22)', description: 'Customizable keyboard shortcuts' },
   { id: 'Support',         label: 'Support',         icon: HelpCircle,    tint: 'rgba(215, 165, 140, 0.22)', description: 'Logs, diagnostics, and feedback' },
   { id: "What's New",      label: "What's New",      icon: Sparkles,      tint: 'rgba(225, 195, 130, 0.20)', description: 'Recent releases and changelog' },
 ];
@@ -357,6 +360,7 @@ const SettingsDialog = () => {
                     {activeTab === 'Notifications' && <NotificationsSettings />}
                     {activeTab === 'Cache' && <CacheSettings />}
                     {activeTab === 'Command Palette' && <CommandPaletteSettings />}
+                    {activeTab === 'Keybindings' && <KeybindingsSettings />}
                     {activeTab === 'Support' && <SupportSettings />}
                     {activeTab === "What's New" && <WhatsNewSettings />}
                     {activeTab === 'Analytics' && isAdmin && <AnalyticsSettings />}

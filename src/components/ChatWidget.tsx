@@ -64,6 +64,7 @@ import {
 import { buildTemplateContext, handleSlashCommand } from '../utils/commandHandler';
 
 import { BackendChatMessage } from '../services/twitchChat';
+import { registerChatModController, type ChatModController } from '../keybindings';
 import { Tooltip } from './ui/Tooltip';
 
 interface ParsedMessage {
@@ -377,8 +378,15 @@ export interface ChatWidgetProps {
   channelOverride?: ChatWidgetChannelOverride;
 }
 
+// Minimum spacing between pause/resume transitions. Real gestures are hundreds
+// of ms apart, so this is invisible to users, but it caps machine-speed
+// scroll/auto-scroll oscillation so it can never reach React's 50-deep render
+// limit. `force` transitions (channel switch, navigation, Resume button) bypass
+// it. See `setChatPaused` in ChatWidget.
+const PAUSE_SETTLE_MS = 120;
+
 const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
-  const { messages, connectChat, sendMessage, isConnected, error, setPaused: setBufferPaused, deletedMessageIds, clearedUserContexts, roomState, userBadges } = useTwitchChat();
+  const { messages, connectChat, sendMessage, isConnected, error, setPaused: setBufferPaused, deletedMessageIds, clearedUserContexts, roomState, userBadges, liveMessageCount } = useTwitchChat();
   // Field selectors instead of whole-store subscriptions: ChatWidget re-renders
   // only when these specific fields change, not on every unrelated store tick.
   const rawCurrentStream = useAppStore((s) => s.currentStream);
@@ -490,10 +498,75 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const channelPointsRef = useRef<HTMLDivElement>(null);
   const [isPaused, setIsPaused] = useState(false);
-  const [pausedMessageCount, setPausedMessageCount] = useState(0);
+  // "N new since paused" badge. Anchored to the channel's MONOTONIC live-message
+  // counter (liveMessageCount) at the instant we enter pause, then shown as a
+  // delta — accurate even when the buffer is capped/trimmed, unlike a
+  // messages.length diff. See the capture effect below.
+  const liveCountAtPauseRef = useRef(0);
+  const prevPausedRef = useRef(false);
+  const [newSincePause, setNewSincePause] = useState(0);
   const isHoveringChatRef = useRef<boolean>(false);
   const lastResumeTimeRef = useRef<number>(0);
   const lastNavigationTimeRef = useRef<number>(0); // Track scrollToMessage navigation
+
+  // ---- Pause: single source of truth ----------------------------------------
+  // `isPaused` (above) is the one authority for paused state. The store's
+  // buffer-pause flag is a strict mirror, written ONLY through the single
+  // mutator below, so the two can never disagree. Every pause/resume in this
+  // component routes through `setChatPaused`:
+  //   • `isPausedRef` mirrors the committed value so the guard reads live state
+  //     synchronously inside a burst of scroll events. The render-time
+  //     `isPaused` closure goes stale mid-burst, which is what let repeated
+  //     toggles pile up faster than React could settle a commit.
+  //   • `lastPauseToggleRef` rate-limits transitions. Real pause/resume gestures
+  //     are hundreds of ms apart, so this settle window is invisible to users
+  //     but makes a machine-speed scroll/auto-scroll feedback storm physically
+  //     unable to drive an unbounded setState cascade. This is the chat-freeze
+  //     guard: at most one transition per window, so the 50-deep render limit
+  //     cannot be reached by oscillation. `force` bypasses it for deliberate,
+  //     non-repeating transitions (channel switch, message navigation, the
+  //     Resume button).
+  const isPausedRef = useRef(isPaused);
+  const lastPauseToggleRef = useRef(0);
+  const setChatPaused = useCallback(
+    (next: boolean, opts?: { force?: boolean; scrollToBottom?: boolean }) => {
+      if (isPausedRef.current === next) return;
+      const now = Date.now();
+      if (!opts?.force && now - lastPauseToggleRef.current < PAUSE_SETTLE_MS) return;
+      lastPauseToggleRef.current = now;
+      isPausedRef.current = next;
+      setIsPaused(next);
+      setBufferPaused(next);
+      if (!next && opts?.scrollToBottom) {
+        lastResumeTimeRef.current = now;
+        (window as Window & typeof globalThis & { __chatScrollToBottom?: () => void })
+          .__chatScrollToBottom?.();
+      }
+    },
+    [setBufferPaused],
+  );
+
+  // Dev-only re-render-storm tripwire. ChatWidget sits at the head of the
+  // scroll/pause feedback path, so if a future change reintroduces a setState
+  // loop, surface it as one labeled error early instead of letting React melt
+  // the tree at its 50-deep limit. The settle guard above should keep this from
+  // ever firing; it exists to catch the next class of regression. No-op in
+  // production. (No dep array: runs once per commit. It never sets state, so it
+  // cannot itself cause the loop it watches for.)
+  const renderStampsRef = useRef<number[]>([]);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const stamps = renderStampsRef.current;
+    stamps.push(Date.now());
+    if (stamps.length > 60) stamps.shift();
+    if (stamps.length >= 50 && stamps[stamps.length - 1] - stamps[0] < 1000) {
+      Logger.error(
+        '[ChatWidget] Re-render storm: 50+ commits in under 1s. A pause/scroll setState loop is likely; the pause settle-guard should bound this, so investigate recent effect or scroll changes.',
+      );
+      renderStampsRef.current = [];
+    }
+  });
+
   const mountTimeRef = useRef<number>(Date.now());
   const [viewerCount, setViewerCount] = useState<number | null>(null);
   const streamUptimeRef = useRef<string>('');
@@ -537,6 +610,15 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   // because we prune entries no longer present.
   const processedMessageIdsRef = useRef<Set<string>>(new Set());
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  // Keyboard moderation: the message focused via J/K (a persistent ring, distinct
+  // from the transient reply-jump highlight above). Refs mirror the latest values
+  // so the controller registered with the keybinding engine reads current data
+  // from inside a global keystroke handler.
+  const [modFocusId, setModFocusId] = useState<string | null>(null);
+  const modFocusIdRef = useRef<string | null>(null);
+  const messagesRef = useRef(messages);
+  const isModeratorRef = useRef(isModerator);
+  const broadcasterIdRef = useRef<string | undefined>(undefined);
   const [isSharedChat, setIsSharedChat] = useState<boolean>(false);
   const [replyingTo, setReplyingTo] = useState<{ messageId: string; username: string } | null>(null);
 
@@ -970,9 +1052,8 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       connectedChannelRef.current = currentStream.user_login;
       connectedRoomIdRef.current = currentStream.user_id || null;
       // Reset pause state when switching channels - ensures chat starts anchored to bottom
-      setIsPaused(false);
-      setPausedMessageCount(0);
-      setBufferPaused(false);
+      setChatPaused(false, { force: true });
+      setNewSincePause(0);
       mountTimeRef.current = Date.now(); // Reset grace period on channel switch
       // Pass roomId (user_id) to enable fetching recent messages from IVR API
       connectChat(currentStream.user_login, currentStream.user_id);
@@ -1059,7 +1140,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       if (currentStream?.user_login !== connectedChannelRef.current) connectedChannelRef.current = null;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [currentStream?.user_login, currentStream?.user_id, isMultiNookActive, channelOverride]);
+  }, [currentStream?.user_login, currentStream?.user_id, isMultiNookActive, channelOverride, setChatPaused]);
 
   // Chat refresh signal — triggered by VideoPlayer's refresh button
   const chatRefreshKey = useAppStore((s) => s.chatRefreshKey);
@@ -1084,15 +1165,11 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       
       // Small delay to let the chat container remount before interacting with it
       const timer = setTimeout(() => {
-        setIsPaused(false);
-        setBufferPaused(false);
-        if ((window as any).__chatScrollToBottom) {
-          (window as any).__chatScrollToBottom();
-        }
+        setChatPaused(false, { force: true, scrollToBottom: true });
       }, 50);
       return () => clearTimeout(timer);
     }
-  }, [activeView, setBufferPaused]);
+  }, [activeView, setChatPaused]);
 
   // Fetch channel points for current channel using direct GQL query with retry logic
   const fetchChannelPoints = useCallback(async () => {
@@ -1456,24 +1533,27 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Track paused message count for resume button
+  // Maintain the "N new since paused" badge off the monotonic live-message
+  // counter. Anchor the baseline exactly on the not-paused -> paused edge (so a
+  // brief pause flicker can't corrupt it), zero it while live, and recompute the
+  // delta as messages keep arriving while paused.
   useEffect(() => {
-    if (isPaused && pausedMessageCount === 0) {
-      setPausedMessageCount(messages.length);
+    if (isPaused && !prevPausedRef.current) {
+      liveCountAtPauseRef.current = liveMessageCount;
+      setNewSincePause(0);
     } else if (!isPaused) {
-      setPausedMessageCount(0);
+      setNewSincePause(0);
+    } else {
+      setNewSincePause(Math.max(0, liveMessageCount - liveCountAtPauseRef.current));
     }
-  }, [isPaused, messages.length, pausedMessageCount]);
+    prevPausedRef.current = isPaused;
+  }, [isPaused, liveMessageCount]);
 
 
   const handleResume = () => {
-    lastResumeTimeRef.current = Date.now();
-    setIsPaused(false);
-    setBufferPaused(false);
-    // Trigger scroll to bottom via ChatMessageList's exposed function
-    if ((window as any).__chatScrollToBottom) {
-      (window as any).__chatScrollToBottom();
-    }
+    // Button-driven resume is deliberate: force past the settle window so it
+    // always lands, then glide to the live bottom.
+    setChatPaused(false, { scrollToBottom: true, force: true });
   };
 
   const handleBadgeClick = useCallback(async (badgeKey: string, badgeInfo: any) => {
@@ -1498,10 +1578,10 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       return false;
     }
 
-    // Pause chat to prevent auto-scrolling interference
-    setIsPaused(true);
-    setBufferPaused(true);
-    
+    // Pause chat to prevent auto-scrolling interference. Force: deliberate
+    // navigation must win over the settle window.
+    setChatPaused(true, { force: true });
+
     // Mark navigation start time to prevent auto-resume from snapping back to bottom
     lastNavigationTimeRef.current = Date.now();
 
@@ -1577,7 +1657,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     }
 
     return true;
-  }, [messages, getMessageId, setBufferPaused]);
+  }, [messages, getMessageId, setChatPaused]);
 
   const handleReplyClick = useCallback((parentMsgId: string) => {
     Logger.debug('[ChatWidget] handleReplyClick called for parentMsgId:', parentMsgId);
@@ -1588,6 +1668,138 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       useAppStore.getState().addToast('Original message is no longer in chat history', 'info');
     }
   }, [scrollToMessage]);
+
+  // ---- Keyboard moderation controller --------------------------------------
+  // Bridges the global keybinding engine to this chat. Only the primary chat
+  // (no channelOverride) drives keyboard moderation; popout/MultiNook instances
+  // opt out so they never clobber the single registered controller.
+  const scrollToMessageRef = useRef(scrollToMessage);
+  useEffect(() => { scrollToMessageRef.current = scrollToMessage; }, [scrollToMessage]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => { isModeratorRef.current = isModerator; }, [isModerator]);
+  useEffect(() => { broadcasterIdRef.current = currentStream?.user_id; }, [currentStream?.user_id]);
+  useEffect(() => { modFocusIdRef.current = modFocusId; }, [modFocusId]);
+
+  // Drop the focus ring when the channel changes or chat resumes to the live
+  // bottom (resuming live reads as "done moderating that spot").
+  useEffect(() => { setModFocusId(null); }, [currentStream?.user_id]);
+  useEffect(() => { if (!isPaused) setModFocusId(null); }, [isPaused]);
+
+  useEffect(() => {
+    if (channelOverride) return; // popout / MultiNook chats don't own moderation keys
+
+    // `id` addresses the DOM row (matches data-message-id); `deleteId` is the
+    // IRC `id` tag the Helix delete endpoint expects (the existing per-message
+    // delete tool uses the tag, so mirror that and fall back to `id`).
+    interface ModMsg { id: string; deleteId: string; userId: string; username: string; displayName: string }
+    const list = (): ModMsg[] => {
+      const out: ModMsg[] = [];
+      for (const m of messagesRef.current) {
+        if (typeof m === 'string') continue;
+        const bm = m as BackendChatMessage;
+        if (!bm.id || !bm.user_id) continue;
+        out.push({
+          id: bm.id,
+          deleteId: (bm.tags && bm.tags['id']) || bm.id,
+          userId: bm.user_id,
+          username: bm.username,
+          displayName: bm.display_name || bm.username,
+        });
+      }
+      return out;
+    };
+    const focusAt = (items: ModMsg[], idx: number) => {
+      const t = items[idx];
+      if (!t) return;
+      setModFocusId(t.id);
+      scrollToMessageRef.current?.(t.id, { highlight: false, align: 'auto' });
+    };
+    const move = (dir: 1 | -1) => {
+      const items = list();
+      if (items.length === 0) return;
+      const curId = modFocusIdRef.current;
+      const curIdx = curId ? items.findIndex((x) => x.id === curId) : -1;
+      const idx = curIdx === -1 ? items.length - 1 : Math.max(0, Math.min(items.length - 1, curIdx + dir));
+      focusAt(items, idx);
+    };
+    const focused = (): { items: ModMsg[]; idx: number; t: ModMsg } | null => {
+      const curId = modFocusIdRef.current;
+      if (!curId) return null;
+      const items = list();
+      const idx = items.findIndex((x) => x.id === curId);
+      if (idx === -1) {
+        setModFocusId(null);
+        useAppStore.getState().addToast('That message left the chat buffer', 'info');
+        return null;
+      }
+      return { items, idx, t: items[idx] };
+    };
+    const fmtDur = (s: number) => (s < 60 ? `${s}s` : s < 3600 ? `${s / 60}m` : `${s / 3600}h`);
+    const act = async (
+      run: (t: ModMsg, broadcasterId: string) => Promise<unknown>,
+      label: (t: ModMsg) => string,
+      advance: boolean,
+    ) => {
+      const f = focused();
+      if (!f) return;
+      const broadcasterId = broadcasterIdRef.current;
+      if (!broadcasterId) {
+        useAppStore.getState().addToast('No channel to moderate', 'warning');
+        return;
+      }
+      try {
+        await run(f.t, broadcasterId);
+        useAppStore.getState().addToast(label(f.t), 'success');
+        if (advance) {
+          const older = f.items[f.idx - 1];
+          if (older) focusAt(f.items, f.idx - 1);
+          else setModFocusId(null);
+        }
+      } catch (err) {
+        Logger.error('[Mod] keyboard action failed:', err);
+        useAppStore.getState().addToast('Moderation action failed', 'error');
+      }
+    };
+
+    const controller: ChatModController = {
+      isModerator: () => isModeratorRef.current,
+      hasFocus: () => modFocusIdRef.current !== null,
+      focusNewer: () => move(1),
+      focusOlder: () => move(-1),
+      clearFocus: () => setModFocusId(null),
+      openUserCard: () => {
+        const f = focused();
+        if (!f) return;
+        window.dispatchEvent(new CustomEvent('streamnook-open-user-card', {
+          detail: { userId: f.t.userId, username: f.t.username, displayName: f.t.displayName },
+        }));
+      },
+      deleteFocused: () => void act(
+        (t, b) => invoke('delete_chat_message', { broadcasterId: b, messageId: t.deleteId }),
+        (t) => `Deleted message from ${t.displayName}`,
+        true,
+      ),
+      timeoutFocused: (seconds: number) => void act(
+        (t, b) => invoke('ban_user', { broadcasterId: b, targetUserId: t.userId, duration: seconds, reason: null }),
+        (t) => `Timed out ${t.displayName} (${fmtDur(seconds)})`,
+        true,
+      ),
+      banFocused: () => void act(
+        (t, b) => invoke('ban_user', { broadcasterId: b, targetUserId: t.userId, duration: null, reason: null }),
+        (t) => `Banned ${t.displayName}`,
+        true,
+      ),
+      unbanFocused: () => void act(
+        (t, b) => invoke('unban_user', { broadcasterId: b, targetUserId: t.userId }),
+        (t) => `Unbanned ${t.displayName}`,
+        false,
+      ),
+    };
+    registerChatModController(controller);
+    return () => registerChatModController(null);
+    // All other live data is read through refs, so re-registration only needs
+    // to track channelOverride (primary chat vs popout/MultiNook).
+  }, [channelOverride]);
 
   const loadEmotes = async (channelName: string, channelId?: string) => {
     setIsLoadingEmotes(true);
@@ -3038,6 +3250,18 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
               <ChatMessageList
                 messages={visibleMessages}
                 isPaused={isPaused}
+                onPauseIntent={() => {
+                  // Fired the instant the user scrolls up by any amount. This
+                  // is the primary pause path — no distance threshold, just
+                  // like Twitch: scroll up at all and chat pauses. It is safe
+                  // from layout jolts because only a real wheel/touch gesture
+                  // reaches here (a tall message moving the scrollbar does not).
+                  const now = Date.now();
+                  if (now - mountTimeRef.current < 2000) return;       // initial layout settle
+                  if (now - lastResumeTimeRef.current < 1000) return;  // post-resume inertia
+                  if (now - lastNavigationTimeRef.current < 1000) return; // scrollToMessage animation
+                  setChatPaused(true);
+                }}
                 onScroll={(distanceToBottom, isUserScroll) => {
                   // Debug logging - to be removed after verification
                   if (isUserScroll && distanceToBottom > 150) {
@@ -3055,13 +3279,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                   // User scrolled up (away from bottom) - pause chat
                   // STRICT: Only pause if Child component confirms it was a USER interaction (isUserScroll)
                   if (isUserScroll && distanceToBottom > 150 && !isPaused) {
-                    Logger.debug('[ChatWidget] PAUSING CHAT due to user scroll');
-                    setIsPaused(true);
-                    setBufferPaused(true);
+                    setChatPaused(true);
                   }
-                  // User scrolled back to bottom while paused - auto-resume
+                  // User scrolled back to bottom while paused - auto-resume.
+                  // Guarded (no force): the settle window absorbs the rapid
+                  // toggles a fast chat would otherwise produce here.
                   else if (isPaused && distanceToBottom < 30) {
-                    handleResume();
+                    setChatPaused(false, { scrollToBottom: true });
                   }
                 }}
                 onUsernameClick={handleUsernameClick}
@@ -3071,6 +3295,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                 onUsernameRightClick={handleUsernameRightClick}
                 onBadgeClick={handleBadgeClick}
                 highlightedMessageId={highlightedMessageId}
+                modFocusId={modFocusId}
                 deletedMessageIds={deletedMessageIds}
                 hiddenMessageIds={locallyHiddenMessageIds}
                 clearedUserContexts={clearedUserContexts}
@@ -3088,7 +3313,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
           <div className="absolute bottom-[60px] left-1/2 transform -translate-x-1/2 z-50 pointer-events-auto">
             <button onClick={handleResume} className="flex items-center gap-2 px-4 py-2 glass-button text-white text-sm font-medium rounded-full shadow-lg bg-black/95">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-              <span>Chat Paused ({messages.length - pausedMessageCount} new)</span>
+              <span>Chat Paused{newSincePause > 0 ? ` (${newSincePause} new)` : ''}</span>
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
             </button>
           </div>
@@ -3161,7 +3386,17 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                                   {filteredCategoryEmojis.map((emoji, idx) => (
                                     <Tooltip key={`${category}-${idx}`} content={emoji}>
                                     <button onClick={() => insertEmote(emoji)} className="flex items-center justify-center p-1.5 hover:bg-glass rounded transition-colors">
-                                      <img src={getAppleEmojiUrl(emoji)} alt={emoji} className="w-6 h-6 object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.insertAdjacentText('afterend', emoji); }} />
+                                      <img src={getAppleEmojiUrl(emoji)} alt={emoji} className="w-6 h-6 object-contain" onError={(e) => {
+                                        const t = e.currentTarget;
+                                        // Retry with the -fe0f filename (some symbols are stored that way) before falling back to the native glyph.
+                                        if (!t.dataset.fe0f && t.src.endsWith('.png') && !t.src.includes('-fe0f')) {
+                                          t.dataset.fe0f = '1';
+                                          t.src = t.src.replace(/\.png$/, '-fe0f.png');
+                                          return;
+                                        }
+                                        t.style.display = 'none';
+                                        if (t.nextSibling?.textContent !== emoji) t.insertAdjacentText('afterend', emoji);
+                                      }} />
                                     </button>
                                     </Tooltip>
                                   ))}

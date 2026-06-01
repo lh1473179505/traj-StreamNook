@@ -282,8 +282,9 @@ export interface CosmeticsSettings {
 // Render / perf controls. All optional with defaults preserving prior behavior.
 export interface ChatRenderSettings {
   // Animate the scroll when the user clicks the "Resume" button at the
-  // bottom of the chat. Auto-scroll on new messages stays instant either
-  // way — smooth-scrolling on every PRIVMSG would fight itself in fast chats.
+  // bottom of the chat (a brisk eased glide back to the live bottom).
+  // Defaults to on. Auto-scroll on new messages stays instant either way —
+  // smooth-scrolling on every PRIVMSG would fight itself in fast chats.
   smooth_scroll_on_resume?: boolean;
   // Max messages held in the local buffer per channel. Default 100.
   // Range 50-1000. Larger = more scrollback at memory cost.
@@ -433,6 +434,12 @@ export interface MultiNookSlot {
   quality?: string;          // Preferred Streamlink quality for this tile (defaults to 'best')
 }
 
+/** Customizable keyboard shortcut overrides. Maps a bindable-command id to its
+ *  user-assigned chord strings (e.g. { 'player.mute': ['M', 'Ctrl+M'] }). Absent
+ *  ids fall back to the code-defined defaults; an explicit empty array means the
+ *  user intentionally cleared all binds for that command. */
+export type KeybindingOverrides = Record<string, string[]>;
+
 export interface Settings {
   streamlink_path: string;
   streamlink_args: string;
@@ -467,6 +474,7 @@ export interface Settings {
   multi_nook_chat_hidden?: boolean; // Whether the chat panel is globally hidden in MultiNook
   show_mod_logs?: boolean; // Whether to display the Mod Logs pane
   moderation?: ModerationSettings;
+  keybindings?: KeybindingOverrides; // Customizable keyboard shortcut overrides (id -> chords)
 }
 
 export interface ModerationSettings {

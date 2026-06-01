@@ -40,7 +40,7 @@ export interface Toast {
   createdAt: number;
 }
 
-export type SettingsTab = 'Profile' | 'Interface' | 'Player' | 'Chat' | 'Moderation' | 'Theme' | 'Integrations' | 'Notifications' | 'Cache' | 'Command Palette' | 'Support' | "What's New" | 'Analytics';
+export type SettingsTab = 'Profile' | 'Interface' | 'Player' | 'Chat' | 'Moderation' | 'Theme' | 'Integrations' | 'Notifications' | 'Cache' | 'Command Palette' | 'Keybindings' | 'Support' | "What's New" | 'Analytics';
 
 export type HomeTab = 'following' | 'recommended' | 'browse' | 'search' | 'category';
 

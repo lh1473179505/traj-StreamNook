@@ -10,6 +10,7 @@ import { usemultiNookStore } from '../stores/multiNookStore';
 import { useChannelSocial } from '../hooks/useChannelSocial';
 import StreamTitleWithEmojis from './StreamTitleWithEmojis';
 import { Tooltip } from './ui/Tooltip';
+import { registerPlayerControls, type PlayerControls } from '../keybindings';
 
 import { Logger } from '../utils/logger';
 
@@ -511,10 +512,18 @@ const VideoPlayer = () => {
             muted: currentSettings.muted,
             volume: currentSettings.volume,
             invertTime: false,
-            keyboard: { focused: true, global: true },
+            // Player hotkeys are owned by StreamNook's unified keybinding
+            // engine (src/keybindings), not Plyr. Disabling Plyr's own keyboard
+            // handling prevents double-firing and keeps every player key
+            // rebindable from Settings > Keybindings.
+            keyboard: { focused: false, global: false },
             tooltips: { controls: true, seek: true },
             hideControls: true,
-            clickToPlay: true,
+            // Single click toggles play/pause, double click toggles fullscreen.
+            // Both are driven by a manual click/dblclick listener (see effect
+            // below) so a double-click never also flickers play state — Plyr's
+            // own click-to-play is disabled here.
+            clickToPlay: false,
             // Force Plyr's CSS-only fullscreen — the Tauri window is borderless
             // (decorations: false), so HTML5 element-fullscreen ends up scoped
             // to the window viewport instead of the screen. We bridge Plyr's
@@ -884,6 +893,7 @@ const VideoPlayer = () => {
         invertTime: false,
         keyboard: { focused: true, global: true },
         tooltips: { controls: true, seek: true },
+        clickToPlay: false, // single/double-click handled manually (see effect)
         // See note in the HLS.js path above — force CSS-only fullscreen so we
         // can promote it to a real OS window fullscreen via Tauri.
         fullscreen: { enabled: true, fallback: 'force', iosNative: false },
@@ -1051,6 +1061,91 @@ const VideoPlayer = () => {
       playerRef.current.muted = playerSettings.muted;
     }
   }, [playerSettings.volume, playerSettings.muted]);
+
+  // Expose an imperative control adapter to the keybinding engine. Methods read
+  // playerRef.current at call time so they survive player recreation; isActive()
+  // reports false for native-control MP4 clips (no Plyr instance), which keeps
+  // player-context hotkeys from firing when there is nothing to control.
+  useEffect(() => {
+    const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+    const controls: PlayerControls = {
+      isActive: () => playerRef.current !== null,
+      togglePlay: () => playerRef.current?.togglePlay(),
+      toggleMute: () => {
+        const p = playerRef.current;
+        if (p) p.muted = !p.muted;
+      },
+      toggleFullscreen: () => playerRef.current?.fullscreen.toggle(),
+      volumeUp: () => {
+        const p = playerRef.current;
+        if (p) p.volume = Math.min(1, Math.round((p.volume + 0.05) * 100) / 100);
+      },
+      volumeDown: () => {
+        const p = playerRef.current;
+        if (p) p.volume = Math.max(0, Math.round((p.volume - 0.05) * 100) / 100);
+      },
+      seekForward: () => playerRef.current?.forward(10),
+      seekBackward: () => playerRef.current?.rewind(10),
+      togglePip: () => {
+        const p = playerRef.current;
+        if (!p) return;
+        try {
+          p.pip = !p.pip;
+        } catch (err) {
+          Logger.debug('[Player] PiP toggle failed:', err);
+        }
+      },
+      speedUp: () => {
+        const p = playerRef.current;
+        if (!p) return;
+        const i = SPEEDS.indexOf(p.speed);
+        p.speed = SPEEDS[Math.min(SPEEDS.length - 1, (i < 0 ? 3 : i) + 1)];
+      },
+      speedDown: () => {
+        const p = playerRef.current;
+        if (!p) return;
+        const i = SPEEDS.indexOf(p.speed);
+        p.speed = SPEEDS[Math.max(0, (i < 0 ? 3 : i) - 1)];
+      },
+    };
+    registerPlayerControls(controls);
+    return () => registerPlayerControls(null);
+  }, []);
+
+  // Click vs double-click on the video surface (live/VOD Plyr path only).
+  // Single click toggles play/pause; double click toggles fullscreen. A short
+  // timer holds the single-click action just long enough that a following
+  // double-click can cancel it, so a double-click never blips play/pause (which
+  // on a live stream would force a rebuffer). Listeners live on the <video>
+  // node itself, so clicks on the controls bar and the overlay buttons are
+  // unaffected. Clip playback uses native controls (no Plyr); there playerRef
+  // is null and these handlers no-op, leaving native behavior intact.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let clickTimer: ReturnType<typeof setTimeout> | null = null;
+    const onClick = () => {
+      if (clickTimer) return; // second click of a pair — let dblclick handle it
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        playerRef.current?.togglePlay();
+      }, 250);
+    };
+    const onDblClick = () => {
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      playerRef.current?.fullscreen.toggle();
+    };
+    video.addEventListener('click', onClick);
+    video.addEventListener('dblclick', onDblClick);
+    return () => {
+      if (clickTimer) clearTimeout(clickTimer);
+      video.removeEventListener('click', onClick);
+      video.removeEventListener('dblclick', onDblClick);
+    };
+  }, []);
 
   // Update quality menu when qualities become available
   useEffect(() => {

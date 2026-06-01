@@ -5,11 +5,16 @@ import { BackendChatMessage } from '../services/twitchChat';
 import { ModerationContext } from '../hooks/useTwitchChat';
 import { useAppStore } from '../stores/AppStore';
 
-import { Logger } from '../utils/logger';
 interface ChatMessageListProps {
   messages: (string | BackendChatMessage)[];
   isPaused: boolean;
   onScroll: (distanceToBottom: number, isUserScroll: boolean) => void;
+  // Fired the instant a real user scroll-up gesture is detected (wheel/touch/
+  // keyboard), BEFORE any scroll event or distance threshold. This is the
+  // reliable pause signal in fast chats — it never depends on out-racing the
+  // auto-scroll snap-back, and it is naturally immune to layout jolts (a tall
+  // message moves the scrollbar but never emits a wheel event).
+  onPauseIntent?: () => void;
   onUsernameClick: (
     userId: string,
     username: string,
@@ -24,6 +29,8 @@ interface ChatMessageListProps {
   onUsernameRightClick: (messageId: string, username: string) => void;
   onBadgeClick: (badgeKey: string, badgeInfo: Record<string, unknown>) => void;
   highlightedMessageId: string | null;
+  /** Message id with the persistent keyboard-moderation focus ring (or null). */
+  modFocusId?: string | null;
   deletedMessageIds: Set<string>;
   // Messages whose IDs are in this set are filtered out entirely (rendered
   // nothing). Used by /clearmessages for visual-only chat clears, distinct
@@ -51,6 +58,7 @@ const ChatMessageList = memo(function ChatMessageList({
   messages,
   isPaused,
   onScroll,
+  onPauseIntent,
   onUsernameClick,
   onReplyClick,
   onMessageCopy,
@@ -58,6 +66,7 @@ const ChatMessageList = memo(function ChatMessageList({
   onUsernameRightClick,
   onBadgeClick,
   highlightedMessageId,
+  modFocusId,
   hiddenMessageIds,
   deletedMessageIds,
   clearedUserContexts,
@@ -78,6 +87,13 @@ const ChatMessageList = memo(function ChatMessageList({
   const isScrollingProgrammatically = useRef(false);
   const wasAtBottomRef = useRef(true); // Track if we were at bottom BEFORE new messages
   const prevMessageCountRef = useRef(0); // Track previous message count for channel switch detection
+  // Resume-glide animation state (see scrollToBottom). While a glide is in
+  // flight this is true, and the auto-scroll re-pin sites below stand down so
+  // freshly-arriving messages don't instant-jump and stutter the smooth scroll
+  // back to the live bottom. resumeRafRef holds the in-flight frame so a new
+  // resume (or unmount) can cancel it.
+  const isResumeAnimatingRef = useRef(false);
+  const resumeRafRef = useRef<number | null>(null);
 
   // Per-row CSS `contain-intrinsic-block-size` placeholder size. The browser
   // uses this for off-screen messages (content-visibility: auto). Picking a
@@ -108,17 +124,23 @@ const ChatMessageList = memo(function ChatMessageList({
   const userScrolledUpRef = useRef(false);
   const lastTouchY = useRef(0);
 
-  // Handle wheel events - detect scroll-up intent directly from deltaY
+  // Handle wheel events - detect scroll-up intent directly from deltaY.
+  // The wheel gesture is the single source of truth for "the user wants to
+  // scroll up" — it fires only on real input, so we act on it immediately
+  // instead of waiting for a scroll event + distance threshold that the
+  // auto-scroll would keep stomping on in a fast chat.
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (e.deltaY < 0) {
-      // Scrolling UP (away from bottom)
-      Logger.debug('[ChatMessageList] 🔼 WHEEL UP detected, setting userScrolledUpRef=true');
+      // Scrolling UP (away from bottom). Setting the ref here also halts every
+      // programmatic re-pin below on the very next frame, so the snap-back
+      // cannot yank the view back down before React commits the paused state.
       userScrolledUpRef.current = true;
+      onPauseIntent?.();
     } else if (e.deltaY > 0) {
       // Scrolling DOWN (toward bottom) - clear the flag
       userScrolledUpRef.current = false;
     }
-  }, []);
+  }, [onPauseIntent]);
 
   // Handle touch scrolling - track direction via Y position change
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
@@ -133,11 +155,12 @@ const ChatMessageList = memo(function ChatMessageList({
     if (deltaY > 0) {
       // Swiping up (scrolling up, away from bottom)
       userScrolledUpRef.current = true;
+      onPauseIntent?.();
     } else if (deltaY < 0) {
       // Swiping down (scrolling down, toward bottom) - clear the flag
       userScrolledUpRef.current = false;
     }
-  }, []);
+  }, [onPauseIntent]);
 
   // ResizeObserver: re-pin to bottom whenever the inner messages-wrapper
   // grows (badge/emote images settling, paint shaders sizing, etc.). This is
@@ -151,6 +174,13 @@ const ChatMessageList = memo(function ChatMessageList({
     const ro = new ResizeObserver(() => {
       if (!containerRef.current) return;
       if (isPaused) return;
+      // A resume glide is driving the scroll itself; an instant re-pin here
+      // would jump past the animation and kill the smoothness.
+      if (isResumeAnimatingRef.current) return;
+      // Bail the instant the user expresses scroll-up intent, even before the
+      // paused state has committed — otherwise a height change landing in that
+      // window would re-pin to bottom and fight the pause.
+      if (userScrolledUpRef.current) return;
       // Only re-pin when the user was already at bottom — never YANK them
       // down if they've scrolled up to read history.
       if (!wasAtBottomRef.current) return;
@@ -184,22 +214,34 @@ const ChatMessageList = memo(function ChatMessageList({
     
     // If paused (and not a channel load), don't auto-scroll
     if (!isChannelLoad && isPaused) return;
-    
+    // Same for fresh up-intent that hasn't propagated to `isPaused` yet — the
+    // wheel/touch handler sets this synchronously, so honoring it here closes
+    // the one-frame gap where a fast-arriving message could snap the view back
+    // down before the pause commits. (A channel load always re-pins.)
+    if (!isChannelLoad && userScrolledUpRef.current) return;
+    // A resume glide owns the scroll position until it lands; let it run
+    // rather than instant-jumping on every message and stuttering it.
+    if (isResumeAnimatingRef.current) return;
+
     // NOT PAUSED: Always scroll to bottom
     // Use double-scroll pattern to ensure we catch the final height after content-visibility resolves
-    
+
     // First scroll: immediate RAF to catch initial render
     requestAnimationFrame(() => {
       if (!containerRef.current) return;
+      if (!isChannelLoad && userScrolledUpRef.current) return;
+      if (isResumeAnimatingRef.current) return;
       isScrollingProgrammatically.current = true;
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
       wasAtBottomRef.current = true;
     });
-    
+
     // Second scroll: short delay to catch content-visibility final height calculation
     // This fixes the issue where new messages appear partially behind the input box
     setTimeout(() => {
       if (!containerRef.current || isPaused) return;
+      if (!isChannelLoad && userScrolledUpRef.current) return;
+      if (isResumeAnimatingRef.current) return;
       isScrollingProgrammatically.current = true;
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
       wasAtBottomRef.current = true;
@@ -249,34 +291,96 @@ const ChatMessageList = memo(function ChatMessageList({
       
       onScroll(distanceToBottom, isUserScroll);
     } else {
-      // For programmatic scrolls, we ARE at bottom
+      // For programmatic scrolls, we ARE at bottom.
       wasAtBottomRef.current = true;
-      userScrolledUpRef.current = false; // Clear any stale flag
+      // Do NOT clear userScrolledUpRef here. The auto-scroll fires a synthetic
+      // scroll event on every new message, and in a fast chat that ran almost
+      // continuously — wiping the flag here is what erased the user's scroll-up
+      // intent before it could ever pause. Intent is only cleared by a genuine
+      // downward gesture or by actually reaching the bottom (handled above).
     }
   }, [onScroll]);
 
-  // Scroll to bottom (for resume button). Optionally animates when the user
-  // has opted in — auto-scroll on new messages (the other 4 scrollTop sites
-  // above) intentionally stays instant; animating those would fight itself
-  // in fast chats.
+  // Scroll to bottom (for the Resume button + auto-resume). Smooth by default:
+  // a brisk eased glide back to the live bottom rather than an abrupt snap.
+  // Auto-scroll on new messages (the other scrollTop sites above) intentionally
+  // stays instant; animating those would fight itself in fast chats.
   const smoothScrollOnResume =
-    useAppStore((s) => s.settings.chat_render?.smooth_scroll_on_resume) ?? false;
+    useAppStore((s) => s.settings.chat_render?.smooth_scroll_on_resume) ?? true;
+
+  // Cancel any in-flight resume glide and release its guard.
+  const cancelResumeAnimation = useCallback(() => {
+    if (resumeRafRef.current !== null) {
+      cancelAnimationFrame(resumeRafRef.current);
+      resumeRafRef.current = null;
+    }
+    isResumeAnimatingRef.current = false;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
-    if (!containerRef.current) return;
+    const el = containerRef.current;
+    if (!el) return;
+    // A new resume supersedes any glide already running.
+    cancelResumeAnimation();
     isScrollingProgrammatically.current = true;
     wasAtBottomRef.current = true;
-    if (smoothScrollOnResume && typeof containerRef.current.scrollTo === 'function') {
-      containerRef.current.scrollTo({
-        top: containerRef.current.scrollHeight,
-        behavior: 'smooth',
+    // Resuming is a deliberate return to live — clear up-intent so the
+    // auto-scroll guards re-engage cleanly on the next message.
+    userScrolledUpRef.current = false;
+
+    const liveBottom = () => el.scrollHeight - el.clientHeight;
+    const start = el.scrollTop;
+    const distance = liveBottom() - start;
+
+    // Snap instantly for tiny gaps (e.g. the auto-resume that fires when you've
+    // manually scrolled almost to the bottom) — a 20px floaty glide reads worse
+    // than just being there. Also the fallback when smooth is toggled off.
+    if (!smoothScrollOnResume || distance < 40) {
+      el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(() => {
+        isScrollingProgrammatically.current = false;
       });
-    } else {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      return;
     }
-    requestAnimationFrame(() => {
-      isScrollingProgrammatically.current = false;
-    });
-  }, [smoothScrollOnResume]);
+
+    // Brisk, distance-proportional duration (200–420ms) with an ease-out
+    // landing — fast off the line, decelerating gently into the bottom.
+    const duration = Math.min(420, Math.max(200, distance * 0.4));
+    const startTime = performance.now();
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+
+    isResumeAnimatingRef.current = true;
+    const step = (now: number) => {
+      const node = containerRef.current;
+      // Container gone, or the user grabbed the wheel mid-glide — abort and let
+      // the (re)pause path take over cleanly.
+      if (!node || userScrolledUpRef.current) {
+        cancelResumeAnimation();
+        isScrollingProgrammatically.current = false;
+        return;
+      }
+      const t = Math.min(1, (now - startTime) / duration);
+      // Re-read the target every frame so the glide tracks messages that arrive
+      // mid-animation and still lands exactly on the newest one.
+      const target = node.scrollHeight - node.clientHeight;
+      node.scrollTop = start + (target - start) * easeOutCubic(t);
+      if (t < 1) {
+        resumeRafRef.current = requestAnimationFrame(step);
+        return;
+      }
+      // Landed: pin to the true live bottom and hand control back.
+      node.scrollTop = node.scrollHeight;
+      resumeRafRef.current = null;
+      isResumeAnimatingRef.current = false;
+      requestAnimationFrame(() => {
+        isScrollingProgrammatically.current = false;
+      });
+    };
+    resumeRafRef.current = requestAnimationFrame(step);
+  }, [smoothScrollOnResume, cancelResumeAnimation]);
+
+  // Cancel a glide in flight if the list unmounts.
+  useEffect(() => () => cancelResumeAnimation(), [cancelResumeAnimation]);
 
   // Expose scrollToBottom to parent via ref callback pattern
   useEffect(() => {
@@ -359,7 +463,7 @@ const ChatMessageList = memo(function ChatMessageList({
             <div
               key={messageId || `msg-${index}`}
               data-message-id={messageId || undefined}
-              className="chat-message-row"
+              className={`chat-message-row${modFocusId && messageId === modFocusId ? ' is-mod-focus' : ''}`}
               style={{
                 // Native virtualization: browser skips rendering off-screen items
                 contentVisibility: 'auto',

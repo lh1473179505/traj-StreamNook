@@ -453,37 +453,49 @@ pub async fn get_emoji_image(codepoint: String) -> Result<String, String> {
         }
     }
 
-    // Construct the CDN URL
-    let url = format!(
-        "https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/{}.png",
-        codepoint
-    );
+    // emoji-datasource-apple names some older text-default symbols (clock, dove,
+    // heart, etc.) WITH the -fe0f variation selector in the filename, which our
+    // codepoint strips. Try the bare codepoint first, then the -fe0f variant, so
+    // those emojis cache instead of 404ing into a permanent blank.
+    let base = "https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64";
+    let candidates = [
+        format!("{}/{}.png", base, codepoint),
+        format!("{}/{}-fe0f.png", base, codepoint),
+    ];
 
-    // Fetch the image using reqwest
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Failed to fetch emoji: {}", e))?;
+    let mut last_err = String::from("Failed to fetch emoji: no candidate URLs");
+    for url in &candidates {
+        let response = match reqwest::get(url).await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("Failed to fetch emoji: {}", e);
+                continue;
+            }
+        };
 
-    if !response.status().is_success() {
-        return Err(format!("Failed to fetch emoji: HTTP {}", response.status()));
+        if !response.status().is_success() {
+            last_err = format!("Failed to fetch emoji: HTTP {}", response.status());
+            continue;
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read emoji bytes: {}", e))?;
+
+        // Convert to base64 data URL
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let base64_data = STANDARD.encode(&bytes);
+        let data_url = format!("data:image/png;base64,{}", base64_data);
+
+        // Cache the result. `put` returns the previous value if any; we ignore it.
+        {
+            let mut cache = EMOJI_CACHE.lock().map_err(|e| e.to_string())?;
+            cache.put(codepoint.clone(), data_url.clone());
+        }
+
+        return Ok(data_url);
     }
 
-    // Get the image bytes
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read emoji bytes: {}", e))?;
-
-    // Convert to base64 data URL
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let base64_data = STANDARD.encode(&bytes);
-    let data_url = format!("data:image/png;base64,{}", base64_data);
-
-    // Cache the result. `put` returns the previous value if any; we ignore it.
-    {
-        let mut cache = EMOJI_CACHE.lock().map_err(|e| e.to_string())?;
-        cache.put(codepoint, data_url.clone());
-    }
-
-    Ok(data_url)
+    Err(last_err)
 }

@@ -96,6 +96,13 @@ interface ChannelSlice {
   clearedUserContexts: Map<string, ClearedUserEntry>;
   refCount: number;
   isPausedForBuffer: boolean;
+  /** Monotonic count of live messages appended to this channel since the slice
+   *  was created. NEVER decremented — buffer trimming, moderation removals, and
+   *  the cap don't touch it. This is the reliable baseline for "N new messages
+   *  since you paused": `messages.length` can't be used because it's capped and
+   *  trimmed. Historical backfill (prepended, not live) is intentionally
+   *  excluded — only `pushMessage` bumps it. */
+  liveMessageCount: number;
   // Internals (not surfaced via the per-channel hook):
   seenMessageIds: Set<string>;
   /** IRC USERSTATE badges string, used to repaint optimistic messages with the
@@ -277,6 +284,7 @@ function emptySlice(channel: string, channelId: string | null): ChannelSlice {
     clearedUserContexts: new Map(),
     refCount: 0,
     isPausedForBuffer: false,
+    liveMessageCount: 0,
     seenMessageIds: new Set(),
     userBadgesFromIrc: null,
   };
@@ -311,6 +319,9 @@ function pushMessage(slice: ChannelSlice, msg: any) {
   const historyMax = getActiveHistoryMax();
   const limit = slice.isPausedForBuffer ? historyMax + CHAT_BUFFER_SIZE : historyMax;
   slice.messages.push(msg);
+  // Monotonic — counts the append regardless of any trim below. Drives the
+  // accurate "N new since paused" badge.
+  slice.liveMessageCount++;
   if (slice.messages.length > limit) {
     slice.messages = slice.messages.slice(slice.messages.length - limit);
   }
@@ -1492,6 +1503,8 @@ export interface ChannelChatSnapshot {
   userBadges: string | null;
   deletedMessageIds: Set<string>;
   clearedUserContexts: Map<string, ClearedUserEntry>;
+  /** Monotonic count of live messages received (see ChannelSlice). */
+  liveMessageCount: number;
 }
 
 const EMPTY_SNAPSHOT: ChannelChatSnapshot = {
@@ -1502,6 +1515,7 @@ const EMPTY_SNAPSHOT: ChannelChatSnapshot = {
   userBadges: null,
   deletedMessageIds: new Set(),
   clearedUserContexts: new Map(),
+  liveMessageCount: 0,
 };
 
 /** React hook returning the live message count for a channel. */
@@ -1599,6 +1613,7 @@ export function useChannelChat(channel: string | null | undefined): ChannelChatS
     userBadges: slice.userBadges,
     deletedMessageIds: slice.deletedMessageIds,
     clearedUserContexts: slice.clearedUserContexts,
+    liveMessageCount: slice.liveMessageCount,
   };
 }
 

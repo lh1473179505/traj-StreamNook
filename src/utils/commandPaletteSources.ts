@@ -26,6 +26,9 @@ import { Logger } from './logger';
 import { getBuiltInSnippets, type Snippet } from './commandPaletteCopypastas';
 import type { TwitchStream, TwitchVideo, TwitchClip } from '../types';
 import type { ChannelAboutData, SocialMediaLink } from '../types/panels';
+import { getShortcutDisplayMap } from '../keybindings/registry';
+import { getPlayerControls } from '../keybindings/playerControls';
+import { getBindableCommand } from '../keybindings/commands';
 
 // Lazy-import multichatWindow to match the dynamic-import pattern other
 // consumers (ChatWidget, StreamContextMenu, commandHandler, multichatTrayBridge)
@@ -82,6 +85,9 @@ export interface PaletteItem {
   /** Marked true for snippets the user has favorited — surfaces a star icon
    *  and sorts the row to the top of its section. */
   favorite?: boolean;
+  /** Current keyboard shortcut (display form, e.g. "Ctrl+Shift+D"), shown as a
+   *  trailing chip. Populated for rows whose id matches a bindable command. */
+  shortcut?: string;
 }
 
 // ---------- Clipboard helper ------------------------------------------------
@@ -812,6 +818,26 @@ export function getSnippetItems(): PaletteItem[] {
   );
 }
 
+// Hotkey-driven actions that aren't otherwise in the static catalog — surfaced
+// so every bindable action is reachable from the palette (and shows its
+// hotkey). Player controls no-op gracefully when nothing is playing; the stream
+// nav rows reuse the keybinding registry's handlers so the logic lives in one
+// place.
+function buildPlayerControlItems(): PaletteItem[] {
+  const pc = () => getPlayerControls();
+  const runCmd = (id: string) => () => getBindableCommand(id)?.run?.();
+  return [
+    { id: 'player.playPause', section: 'Current Stream', title: 'Play / pause', keywords: 'play pause resume video player', run: () => pc()?.togglePlay() },
+    { id: 'player.mute', section: 'Current Stream', title: 'Mute / unmute', keywords: 'mute unmute audio sound volume', run: () => pc()?.toggleMute() },
+    { id: 'player.fullscreen', section: 'Current Stream', title: 'Toggle fullscreen', keywords: 'fullscreen full screen video', run: () => pc()?.toggleFullscreen() },
+    { id: 'player.pip', section: 'Current Stream', title: 'Picture-in-picture', keywords: 'pip picture in picture mini player', run: () => pc()?.togglePip() },
+    { id: 'player.volumeUp', section: 'Current Stream', title: 'Volume up', keywords: 'volume up louder increase', run: () => pc()?.volumeUp() },
+    { id: 'player.volumeDown', section: 'Current Stream', title: 'Volume down', keywords: 'volume down quieter decrease', run: () => pc()?.volumeDown() },
+    { id: 'nav.nextStream', section: 'Quick Actions', title: 'Next followed stream', subtitle: 'Switch to the next live channel you follow', keywords: 'next followed channel switch surf cycle', run: runCmd('nav.nextStream') },
+    { id: 'nav.prevStream', section: 'Quick Actions', title: 'Previous followed stream', subtitle: 'Switch to the previous live channel you follow', keywords: 'previous prev followed channel switch surf cycle', run: runCmd('nav.prevStream') },
+  ];
+}
+
 export function getStaticItems(): PaletteItem[] {
   // Static-but-dynamic: quick actions + settings catalog are truly static,
   // sleep-timer subtitles are recomputed for live countdown text, snippets
@@ -822,7 +848,8 @@ export function getStaticItems(): PaletteItem[] {
   const settings = buildSettingsItems();
   const snippets = getSnippetItems();
   const socials = getCurrentStreamSocialItems();
-  return [
+  const playerControls = buildPlayerControlItems();
+  const items: PaletteItem[] = [
     ...quick.map((it) => {
       if (it.id === 'qa.sleep15') return { ...it, subtitle: sleepTimerSubtitle(15) };
       if (it.id === 'qa.sleep30') return { ...it, subtitle: sleepTimerSubtitle(30) };
@@ -831,9 +858,14 @@ export function getStaticItems(): PaletteItem[] {
       return it;
     }),
     ...settings,
+    ...playerControls,
     ...snippets,
     ...socials,
   ];
+  // Enrich rows whose id matches a bindable command with their current key
+  // combo, so the palette doubles as a live shortcut reference.
+  const shortcuts = getShortcutDisplayMap();
+  return items.map((it) => (shortcuts[it.id] ? { ...it, shortcut: shortcuts[it.id] } : it));
 }
 
 // ---------- Followed channels (from AppStore) -------------------------------

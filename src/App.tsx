@@ -12,6 +12,7 @@ import Home from './components/Home';
 import SettingsDialog from './components/SettingsDialog';
 import CommandPalette from './components/CommandPalette';
 import { useCommandPaletteHotkey } from './hooks/useCommandPaletteHotkey';
+import { useKeybindings } from './keybindings';
 import { startSnippetSync } from './stores/snippetStore';
 import { usemultiNookStore } from './stores/multiNookStore';
 import { MultiNookView } from './components/multi-nook/MultiNookView';
@@ -67,6 +68,7 @@ const DEFAULT_CHAT_HEIGHT = 200; // For 'bottom' placement
 
 function App() {
   useCommandPaletteHotkey();
+  useKeybindings();
   useEffect(() => {
     // Subscribe to snippet-store updates from MultiChat popouts so favoriting
     // or adding a custom snippet over there propagates here without reload.
@@ -1236,9 +1238,39 @@ function App() {
       >
         <TitleBar />
       </ErrorBoundary>
+      <ErrorBoundary
+        componentName="App"
+        reportToLogService
+        fallbackRender={({ reset }) => (
+          <div className="flex flex-1 items-center justify-center bg-background">
+            <div className="glass-panel text-center px-6 py-5 rounded-xl max-w-sm">
+              <p className="text-textPrimary text-sm font-medium mb-1">Something went wrong</p>
+              <p className="text-textSecondary text-xs mb-4">
+                The main view ran into an unexpected error. You can recover without losing your session.
+              </p>
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  onClick={reset}
+                  className="glass-button text-white text-xs font-medium px-3 py-1.5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
+                >
+                  Try again
+                </button>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="text-textSecondary hover:text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  Reload app
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      >
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar - only visible when stream is playing */}
-        <Sidebar />
+        <ErrorBoundary componentName="Sidebar">
+          <Sidebar />
+        </ErrorBoundary>
 
         {/* Main content area with Home/PIP support */}
         <div className="flex-1 relative overflow-hidden">
@@ -1252,7 +1284,9 @@ function App() {
                 transition={{ duration: 0.2, ease: "easeInOut" }}
                 className="absolute inset-0 z-40 bg-background/85 backdrop-blur-2xl"
               >
-                <Home />
+                <ErrorBoundary componentName="Home" reportToLogService resetKeys={[isHomeActive]}>
+                  <Home />
+                </ErrorBoundary>
               </motion.div>
             )}
           </AnimatePresence>
@@ -1303,7 +1337,9 @@ function App() {
                           transition={{ duration: 0.15 }}
                           className="w-full h-full absolute inset-0"
                         >
-                          <MultiNookView />
+                          <ErrorBoundary componentName="MultiNook" reportToLogService>
+                            <MultiNookView />
+                          </ErrorBoundary>
                         </motion.div>
                       ) : (
                         <motion.div 
@@ -1314,7 +1350,9 @@ function App() {
                           transition={{ duration: 0.15 }}
                           className="w-full h-full absolute inset-0"
                         >
-                          <VideoPlayer key={streamUrl} />
+                          <ErrorBoundary componentName="Video" reportToLogService resetKeys={[streamUrl]}>
+                            <VideoPlayer key={streamUrl} />
+                          </ErrorBoundary>
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -1375,7 +1413,9 @@ function App() {
                       >
                         {isMultiNookActive && <MultiNookChatSwitcher />}
                         <div className="flex-1 overflow-hidden relative">
-                          <ChatWidget />
+                          <ErrorBoundary componentName="Chat" reportToLogService resetKeys={[streamUrl, currentMediaType]}>
+                            <ChatWidget />
+                          </ErrorBoundary>
                         </div>
                       </div>
                     </motion.div>
@@ -1418,7 +1458,9 @@ function App() {
                           [chatPlacement === 'right' ? 'height' : 'width']: `${modLogsSize}px`
                         }}
                       >
-                         <ModLogsWidget onOpenSettings={() => openSettings('Moderation')} />
+                         <ErrorBoundary componentName="Mod Logs" reportToLogService>
+                           <ModLogsWidget onOpenSettings={() => openSettings('Moderation')} />
+                         </ErrorBoundary>
                       </div>
                     </motion.div>
                   )}
@@ -1429,6 +1471,7 @@ function App() {
           </AnimatePresence>
         </div>
       </div>
+      </ErrorBoundary>
       <SettingsDialog />
       <DropsOverlay />
 

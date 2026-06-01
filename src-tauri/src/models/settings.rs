@@ -5,6 +5,7 @@ use crate::services::layout_service::LayoutService;
 use crate::services::mining_service::MiningService;
 use crate::services::twitch_auth_service::TwitchAuthService;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as TokioMutex, RwLock};
 
@@ -329,6 +330,10 @@ pub struct Settings {
     /// restarts and settings reloads instead of resetting to off each session.
     #[serde(default)]
     pub show_mod_logs: bool,
+    /// Customizable keyboard shortcut overrides. Maps a bindable-command id to
+    /// its user-assigned chord strings. Absent ids fall back to code defaults.
+    #[serde(default)]
+    pub keybindings: HashMap<String, Vec<String>>,
 }
 
 fn default_theme() -> String {
@@ -378,6 +383,7 @@ impl Default for Settings {
             multi_nook_slots: Vec::new(),
             multi_nook_chat_hidden: false,
             show_mod_logs: false,
+            keybindings: HashMap::new(),
         }
     }
 }

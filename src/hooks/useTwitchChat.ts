@@ -50,6 +50,10 @@ export interface UseTwitchChatReturn {
   clearedUserContexts: Map<string, ClearedUserEntry>;
   roomState: RoomState;
   userBadges: string | null;
+  /** Monotonic count of live messages received on the active channel. Reliable
+   *  baseline for the "N new since paused" badge (unlike `messages.length`,
+   *  which is capped and trimmed). */
+  liveMessageCount: number;
 }
 
 export const useTwitchChat = (): UseTwitchChatReturn => {
@@ -139,5 +143,6 @@ export const useTwitchChat = (): UseTwitchChatReturn => {
     clearedUserContexts: snapshot.clearedUserContexts,
     roomState: snapshot.roomState,
     userBadges: snapshot.userBadges,
+    liveMessageCount: snapshot.liveMessageCount,
   };
 };

@@ -61,7 +61,8 @@ declare module 'plyr' {
       toggle(): void;
     };
     pip: boolean;
-    
+    speed: number;
+
     // Methods
     play(): Promise<void>;
     pause(): void;

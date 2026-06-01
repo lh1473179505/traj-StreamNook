@@ -786,8 +786,23 @@ const ChatMessage = memo(function ChatMessageInner({ message, messageIndex = 0, 
             className={`inline h-5 w-5 ${inGrid ? '' : 'align-middle'} ${marginClass}`}
             style={gridStyle}
             onError={(e) => {
-              e.currentTarget.style.display = 'none';
-              e.currentTarget.insertAdjacentText('afterend', segment.content);
+              const t = e.currentTarget;
+              // emoji-datasource-apple names some older text-default symbols
+              // (clock, dove, heart, umbrella, etc.) WITH the -fe0f variation
+              // selector in the filename, which our codepoint strips. Retry
+              // once with it appended before giving up, so the real image loads
+              // instead of leaving a blank.
+              if (!t.dataset.fe0f && t.src.endsWith('.png') && !t.src.includes('-fe0f')) {
+                t.dataset.fe0f = '1';
+                t.src = t.src.replace(/\.png$/, '-fe0f.png');
+                return;
+              }
+              // Truly unavailable: hide the broken image and drop in the native
+              // emoji glyph so the slot is never blank.
+              t.style.display = 'none';
+              if (t.nextSibling?.textContent !== segment.content) {
+                t.insertAdjacentText('afterend', segment.content);
+              }
             }}
           />
         </Tooltip>

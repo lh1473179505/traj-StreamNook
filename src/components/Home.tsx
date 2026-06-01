@@ -472,6 +472,12 @@ const Home = () => {
 
     const isMountedRef = useRef(true);
     useEffect(() => {
+        // Re-arm on (re)setup, not only clear on cleanup. React StrictMode runs
+        // setup -> cleanup -> setup on mount in dev; without setting true here the
+        // cleanup's `false` sticks for the component's whole life, silently
+        // dropping every async .then/.finally below (category stream + detail
+        // loads then spin forever because their loading flag is never cleared).
+        isMountedRef.current = true;
         return () => { isMountedRef.current = false; };
     }, []);
 

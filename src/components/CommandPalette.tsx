@@ -646,6 +646,11 @@ function SectionBlock({ section, activeIndex, onActivate, onPick }: SectionBlock
                 </div>
               )}
             </div>
+            {row.item.shortcut && (
+              <kbd className="sn-keycap sn-keycap--xs ml-auto flex-shrink-0 self-center">
+                {row.item.shortcut}
+              </kbd>
+            )}
           </button>
         );
       })}

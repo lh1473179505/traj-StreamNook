@@ -40,8 +40,7 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "devtools": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-quic"
+        "devtools": true
       }
     ]
   },
