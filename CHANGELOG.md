@@ -1,3 +1,13 @@
+## [7.7.1] - 2026-06-02
+### ✨ Features
+- **Permanent Perks for Supporters & Subscribers**: Your commitment now grants permanent access to special profile backgrounds and StreamNook Atmospheres! Once unlocked (by being a Supporter or Subscriber), these cosmetics are yours forever, even if your active support ends. The 7TV Paint background is now a Supporter perk, and Atmospheres are a Subscriber perk.
+
+### 🐛 Bug Fixes
+- **Improved Fullscreen Experience**: Fullscreen mode now works seamlessly across both single-stream and MultiNook views, ensuring the entire display is covered (including the taskbar) and your layout is correctly restored upon exit.
+
+### 🔧 Maintenance
+- Updated internal Supabase tools.
+
 ## [7.7.0] - 2026-06-02
 ## 🚀 Native Streaming is Here
 > StreamNook now directly plays Twitch streams without needing Streamlink or the TTVLOL plugin. Enjoy faster startup times, a smaller app footprint, and more reliable ad-free viewing, all handled seamlessly within the app. This is a foundational rewrite of how StreamNook connects to Twitch.
@@ -1397,5 +1407,6 @@ ATTENTION: ALL USERS LOG OUT OF TWITCH THEN LOG BACK IN FOR SOME CHANGES OT TAKE
 
 ### Fixed
 - Issue in calculating window aspect ratio when resizing with different chat placements.
+
 
 
