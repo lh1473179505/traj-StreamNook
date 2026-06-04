@@ -1,3 +1,35 @@
+## [7.8.0] - 2026-06-03
+## 🎬 New: Twitch Clip Creation & Advanced Streamer Profiles
+> We've completely overhauled how you interact with Twitch clips and streamer profiles! Now you can create clips directly from any live stream or VOD, trim them with precision, and share them instantly. Plus, every streamer profile now includes dedicated tabs for browsing their clips and past broadcasts, complete with rich filters and reaction counts.
+
+---
+
+### ✨ Features
+- **Twitch Clip Creation**: Create clips from live streams, or trim and title clips from VODs with an intuitive in-app editor. Share your creations to chat or copy the link to share anywhere.
+- **Clip Playback & Management**: Play Twitch clips directly within StreamNook via a new modal player. Copy links, open in browser, or delete clips you own. New clips now show total reactions (likes, etc.) from other viewers.
+- **Advanced Streamer Profiles**: The streamer profile panel is now a full-featured hub with dedicated tabs for 'About', 'Clips', and 'Videos'. Browse a streamer's entire catalog of clips and past broadcasts with filters for time, popularity, and video type.
+- **New UI Customization**: Personalize StreamNook with new global interface font options and a slider to fine-tune the glass morphism transparency to your liking.
+- **Enhanced Chat System**:
+  - **Moderator Viewers List**: Moderators can now view the full list of chatters, grouped by role (Broadcaster, Mods, VIPs, Viewers).
+  - **Message Recall**: Type a message, press `ArrowUp` to recall previously sent messages (Chatterino-style!), and `ArrowDown` to navigate forward or restore your current draft.
+- **Richer Link Previews**: Twitch clips, VODs, and YouTube channel links now expand into beautiful, info-rich preview cards directly in chat.
+- **Discord Rich Presence Overhaul**: Your Discord status is now more dynamic, showing proper category art (even for 'Just Chatting' or 'Music'), personalizing idle messages with your username, and resetting the 'watching for' timer more intelligently.
+- **Easier Twitch Login**: A persistent 'Login with Twitch' button now appears on the Discover tab when you're logged out, making it simpler to sign in.
+- **Quick Sign Out**: Access a convenient 'Sign out' button directly from the Profile tab in Settings, with a quick confirmation step.
+
+### 🐛 Bug Fixes
+- Fixed an issue where watch time and stream counts for analytics were inaccurate due to how stream URLs changed during ads or quality switches.
+- Resolved a problem where re-authenticating after Twitch scope changes could leave your account in a broken state. The app now performs a full, clean re-authentication when necessary.
+- Fixed an issue where clicking on links in chat could open multiple browser tabs by removing redundant `target="_blank"` attributes.
+- Corrected an issue where stream lists would sometimes incorrectly filter historical clips, especially for 'last 30 days'.
+- Addressed a rare startup issue where the universal cache flush task could fail before the app's core services were ready.
+
+### ⚡ Performance
+- **Smoother Chat & Sidebar**: Significant performance improvements to the chat widget and sidebar by optimizing component rendering, leading to faster updates and reduced UI lag.
+- **Faster Link Previews**: Generic link previews now load much quicker by intelligently fetching only the essential parts of a webpage.
+- **Optimized Emote Display**: Improved loading and caching for 7TV emotes ensures they display faster and more reliably, even with multiple resolution tiers.
+- **Efficient Discord Integration**: The app now intelligently caches Discord's detectable game list, reducing network requests and speeding up rich presence updates.
+
 ## [7.7.2] - 2026-06-03
 ## 🎉 New: Inline Link Previews in Chat
 > Sharing a link in chat just got a whole lot more engaging! StreamNook now automatically generates rich, interactive previews for YouTube videos, X/Twitter posts and profiles, Giphy GIFs, and most other webpages. See titles, descriptions, and thumbnails directly in your chat, making conversations smoother and more informative.
@@ -1419,6 +1451,7 @@ ATTENTION: ALL USERS LOG OUT OF TWITCH THEN LOG BACK IN FOR SOME CHANGES OT TAKE
 
 ### Fixed
 - Issue in calculating window aspect ratio when resizing with different chat placements.
+
 
 
 
