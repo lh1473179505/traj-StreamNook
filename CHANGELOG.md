@@ -1,3 +1,56 @@
+## [7.8.1] - 2026-06-04
+## [7.9.0] - 2026-06-04
+## 🧰 New: Manage Your 7TV Emotes Inside StreamNook
+> Connect your 7TV account and run your emotes entirely from the app. Add, rename, remove, and organize emotes across every channel you can edit, manage your emote sets, and add or remove editors, all without opening a browser. This release also reworks chat moderation with a drag-to-moderate gesture and real channel-wide message pinning, and lets you back up your entire setup to a single file and restore it on any machine.
+
+---
+
+### ✨ Features
+- **7TV Emote Manager**: A full 7TV workspace built into StreamNook, covering your own channel and every channel you're an editor of.
+  - Browse and search the entire 7TV directory with sort (Trending, Top, Newest) and filters (Animated, Zero-width, Exact match), or add an emote by pasting its 7tv.app link.
+  - Add emotes under a custom name and as a zero-width overlay, then rename, re-toggle, or remove them later.
+  - Open an emote's detail card for large previews, tags, flags, and how many channels use it.
+  - Create, rename, resize, and switch your active emote set, with a live capacity meter.
+  - Manage editors: invite by username, grant or revoke per-area permissions, and accept or decline editor invites from other channels.
+  - Quick-add: left-click any 7TV emote in chat to drop it into a set you edit. Open the manager from the command palette or the moderator menu.
+- **Reworked Chat Moderation**:
+  - **Drag to moderate**: grab any message and drag it onto a floating dock of action buckets (Delete, Timeout, Ban, plus Unban and Untimeout for already-moderated users). Buckets snap magnetically, so no pixel-perfect aim is needed.
+  - **Dial timeouts by feel**: drag further from the Timeout bucket to set a longer duration, from 5 seconds up to Twitch's 14-day max, with a live duration label.
+  - **Undo**: ban and timeout confirmations include an Undo button.
+  - **Pin messages**: mods can pin any message in one click. Pins use Twitch's real pin system, so they appear for every viewer on every client, not just locally. A collapsed pin bar keeps it one line tall until you expand it.
+- **Settings Backup & Restore**: Export every preference (themes, chat design, keybindings, highlights, custom commands, moderation, integrations, and more) to a single file, then import it on any machine. Your Twitch login is never included, so backups are safe to move around.
+- **Search Your Settings**: A search box in Settings matches across every tab and jumps you straight to the matching section.
+- **Styled Chat Usernames**: New options for how names render in chat, including a separator glyph between name and message and several name styles (accent bar, frosted chip, brackets, and more), with a live preview in settings.
+- **Expanded Link Previews**: Rich cards now cover Discord invites (server icon, live online and member counts, Join button), Steam store pages (art, description, and current price), Spotify tracks and albums, Instagram profiles, and Tenor GIFs. A new shield button lets you permanently trust a domain so its links always expand.
+- **Customizable Player Buttons**: Choose which action buttons appear over the video (Follow, Subscribe, Create Clip, Clips & VODs, Add to MultiNook, Refresh, Close).
+- **Channel About, on Scroll**: Scroll down over the player to reveal a Twitch-style About panel with the streamer's panels, social links, and quick actions. The stream keeps playing the whole time, and social links render as rich preview cards.
+- **Color-Customizable OLED Theme**: The OLED theme now takes any accent color, with eight one-click presets. Existing OLED users keep their current look.
+- **Image-Based Atmospheres**: Premium Atmospheres can now be animated image backdrops, with a portrait mode for the profile panel and a readability frost behind chat. Atmospheres can also be earned through accolades, not just subscriptions, and new ones can arrive without an app update.
+- **Animated 7TV Profile Pictures**: Animated 7TV avatars now display on user cards.
+- **7TV Paint Usage Stats**: Sort paints by Most Used or Least Used, and see how many people wear a given paint.
+- **Redesigned Community & Integrations Tabs**: The Support and Integrations settings are now Discord-style cards with live server stats and a one-click join.
+- **Drops: How to Unlock**: Locked campaign rewards now show a tooltip explaining what they require (sub, gift sub, Prime, bits, or follow).
+
+### 🐛 Bug Fixes
+- **Streams that wouldn't load now play**: Twitch rolled out a new stream playlist format that the old parser read as having zero qualities, so some channels simply wouldn't start. The parser now handles both the old and new formats.
+- **Settings now stick between restarts**: A range of preferences (chat design, emote sizing, link-preview options, highlight phrases, custom commands, moderation preferences, custom themes, and the OLED accent color) were silently dropped on save and reset every launch. They now persist, including when loaded from older settings files.
+- **Clips that wrongly said "not found" now open**: Clip lookups no longer break when Twitch rotates an internal query ID, and real errors are surfaced instead of masked.
+- **Steadier ad-free playback**: When an ad-block proxy answers with an error page that still reports success, the app now treats it as a miss, races to another proxy, and falls back to the standard stream rather than failing outright.
+- **Drops progress tracks the right drop**: Mining now follows the unclaimed drop closest to completion instead of pinning to an already-finished one, and claiming a drop no longer snaps the title-bar progress backward.
+- **Mine any campaign you pick**: You can now preview and mine a manually chosen campaign even if it isn't in your priority list.
+- **Badge sorting**: Badge entries missing usage stats are re-fetched so Most and Least Used sort correctly, and Available Now / Coming Soon now filter the list instead of just reordering it.
+- **Reliable profiles for localized names**: Profile banners and extended profile data now resolve for users whose display name differs from their login, and profile actions (whisper, gift sub, mod commands) always target the correct account.
+- **No more blank page after search**: Leaving a stream you opened from search returns you to where you were instead of an empty results page.
+- **Overlays no longer cover the Dynamic Island or the drops hover preview.**
+
+### ⚡ Performance
+- **Instant profile cards**: Profiles open immediately from a cached snapshot and refresh in the background, so banners and backdrops no longer appear a beat late.
+- **Smoother sidebar**: The compact sidebar's glass blur now settles after it finishes expanding, removing the choppy redraw during the animation.
+
+### 🔧 Maintenance
+- Cleaned decorative emoji out of internal logs and the proxy-health panel for clearer output.
+- Renamed several built-in themes for clarity. Your current selection is preserved.
+
 ## [7.8.0] - 2026-06-03
 ## 🎬 New: Twitch Clip Creation & Advanced Streamer Profiles
 > We've completely overhauled how you interact with Twitch clips and streamer profiles! Now you can create clips directly from any live stream or VOD, trim them with precision, and share them instantly. Plus, every streamer profile now includes dedicated tabs for browsing their clips and past broadcasts, complete with rich filters and reaction counts.
@@ -1451,6 +1504,7 @@ ATTENTION: ALL USERS LOG OUT OF TWITCH THEN LOG BACK IN FOR SOME CHANGES OT TAKE
 
 ### Fixed
 - Issue in calculating window aspect ratio when resizing with different chat placements.
+
 
 
 
