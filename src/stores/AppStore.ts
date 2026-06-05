@@ -209,6 +209,18 @@ interface AppState {
   // Twitch user_id of the member whose public StreamNook profile is open in
   // the draggable viewer overlay, or null when closed.
   profileViewerUserId: string | null;
+  // When set, the viewer is showing the CURRENT user's own profile as a LIVE
+  // preview of what others see while they edit it in Settings. The overlay
+  // PREFERS these values over its fetched/local state so edits reflect
+  // instantly. null = a normal view (another member, or no preview). Cleared
+  // whenever the viewer closes or opens a different (non-preview) profile.
+  // `badgeRevision` is a bump counter: incrementing it makes the overlay
+  // re-resolve the worn-badge row (a loadout edit) without a full reload.
+  profileViewerPreview: {
+    hiddenSections: string[];
+    profileTheme: string;
+    badgeRevision: number;
+  } | null;
   isCommandPaletteOpen: boolean;
   updateInfo: { current_version: string; latest_version: string } | null;
   showLiveStreamsOverlay: boolean;
@@ -319,6 +331,17 @@ interface AppState {
   closeSettings: () => void;
   openProfileViewer: (userId: string) => void;
   closeProfileViewer: () => void;
+  // Open the viewer in LIVE-PREVIEW mode for the current user's own profile,
+  // seeding it with the values currently being edited in Settings.
+  openProfilePreview: (
+    userId: string,
+    override: { hiddenSections: string[]; profileTheme: string },
+  ) => void;
+  // Merge a partial edit into the active preview override (no-op when no
+  // preview is open). `bumpBadges` re-resolves the worn-badge row.
+  updateProfilePreview: (
+    partial: { hiddenSections?: string[]; profileTheme?: string; bumpBadges?: boolean },
+  ) => void;
   openCommandPalette: () => void;
   closeCommandPalette: () => void;
   toggleCommandPalette: () => void;
@@ -430,6 +453,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   isSettingsOpen: false,
   settingsInitialTab: null,
   profileViewerUserId: null,
+  profileViewerPreview: null,
   isCommandPaletteOpen: false,
   updateInfo: null,
   showLiveStreamsOverlay: false,
@@ -1482,8 +1506,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (followedStreamInfo) {
         info = followedStreamInfo;
       } else if (providedStreamInfo && providedStreamInfo.user_id) {
-        // If provided info has user_id, it's complete enough
+        // Provided info has a user_id, so it's complete enough to drive the
+        // stream. But a seeded object (e.g. a raid redirect, which only knows
+        // the target's user_id) can arrive with an empty title and category.
+        // Left blank, the player overlay drops its title and Home button (both
+        // gated on a non-empty title) and Discord RPC falls back to the app
+        // logo instead of the real category art. Backfill the missing fields
+        // from a channel-info lookup. On failure we keep whatever was provided.
         info = providedStreamInfo;
+        if (!info.title?.trim() || !info.game_name?.trim()) {
+          try {
+            const rawInfo = await invoke<{ title?: string; game_name?: string }>('get_channel_info', { channelName: channel });
+            info = {
+              ...info,
+              title: info.title?.trim() ? info.title : (rawInfo.title || ''),
+              game_name: info.game_name?.trim() ? info.game_name : (rawInfo.game_name || ''),
+            };
+          } catch (e) {
+            Logger.warn('Could not backfill channel info for seeded stream:', e);
+          }
+        }
       } else {
         // Fallback: get channel info to get the user_id and other details
         try {
@@ -1980,10 +2022,33 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ isSettingsOpen: false, settingsInitialTab: null });
   },
   openProfileViewer: (userId: string) => {
-    set({ profileViewerUserId: userId });
+    // A normal view (another member, or self from chat) is never a preview:
+    // drop any stale override so it can't leak onto this profile.
+    set({ profileViewerUserId: userId, profileViewerPreview: null });
   },
   closeProfileViewer: () => {
-    set({ profileViewerUserId: null });
+    set({ profileViewerUserId: null, profileViewerPreview: null });
+  },
+  openProfilePreview: (userId, override) => {
+    set({
+      profileViewerUserId: userId,
+      profileViewerPreview: {
+        hiddenSections: override.hiddenSections,
+        profileTheme: override.profileTheme,
+        badgeRevision: 0,
+      },
+    });
+  },
+  updateProfilePreview: (partial) => {
+    const cur = get().profileViewerPreview;
+    if (!cur) return; // preview not open — safe no-op
+    set({
+      profileViewerPreview: {
+        hiddenSections: partial.hiddenSections ?? cur.hiddenSections,
+        profileTheme: partial.profileTheme ?? cur.profileTheme,
+        badgeRevision: partial.bumpBadges ? cur.badgeRevision + 1 : cur.badgeRevision,
+      },
+    });
   },
   openCommandPalette: () => {
     if (!get().isCommandPaletteOpen) trackActivity('Opened Command Palette');

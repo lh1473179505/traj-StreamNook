@@ -96,6 +96,35 @@ pub async fn get_user_badges_with_earned_unified(
         .await
 }
 
+/// Resolve ONLY a user's real chat-client (third-party) badges — their actual
+/// BTTV / FFZ / Chatterino / Homies / Chatsen / Chatty / DankChat badges — from
+/// the prefetched provider databases. Cache-only (no Twitch token, no channel,
+/// no network), so chat can call it once per chatter without the per-user round
+/// trip the full unified path needs. display_badges / earned_badges come back
+/// empty.
+#[tauri::command]
+pub async fn get_third_party_badges_for_user_unified(
+    user_id: String,
+) -> Result<UserBadgesResponse, String> {
+    let service_lock = get_service().await?;
+
+    // Auto-initialize if not ready yet
+    {
+        let service_guard = service_lock.read().await;
+        if service_guard.is_none() {
+            drop(service_guard);
+            initialize_badge_service().await;
+        }
+    }
+
+    let service_guard = service_lock.read().await;
+    let service = service_guard
+        .as_ref()
+        .ok_or_else(|| "Badge service failed to initialize".to_string())?;
+
+    Ok(service.get_third_party_badges_only(&user_id).await)
+}
+
 /// Parse a badge string from IRC tags (e.g., "subscriber/12,premium/1")
 #[tauri::command]
 pub async fn parse_badge_string(badge_string: String) -> Result<Vec<String>, String> {

@@ -316,64 +316,48 @@ const EmoteGridItem = memo(({ emote, isFavorited, onInsert, onToggleFavorite }: 
 const HYPE_MESSAGES = [
   // Classic hype
   'HYYYYPE! 🚂',
-  'CHOO CHOO MOTHERFUCKERS! 🚂💨',
-  'ALL ABOARD THE HYPE TRAIN LET\'S FUCKING GOOO 🎉',
-  'WE EATING GOOD TONIGHT BOYS 🍽️🔥',
+  'CHOO CHOO! ALL ABOARD! 🚂💨',
+  'ALL ABOARD THE HYPE TRAIN LET\'S GOOO 🎉',
+  'WE EATING GOOD TONIGHT 🍽️🔥',
   'POGGERS IN CHAT 🐸',
   'TRAIN HAS LEFT THE STATION AND IT\'S ON FIRE 🚂🔥',
-  'LET\'S FUCKING GOOOOOOOOOOOOO 🔥',
+  'LET\'S GOOOOOOOOOOOOO 🔥',
   'CHAT POPPIN OFF RN 📈',
   'THIS IS THE ENERGY WE CAME FOR 🙌',
-  // Edgy / unfiltered
-  'INJECT THE HYPE STRAIGHT INTO MY FUCKING VEINS 💉',
-  'I\'M HARD AS FUCK RIGHT NOW 🍆🚂',
-  'CHAT\'S ON THAT COCAINUM ENERGY TONIGHT 🤍💊',
-  'MY BLOOD PRESSURE IS IN THE STRATOSPHERE 😤',
-  'MOMMY? SORRY. MOMMY? 🚂',
-  'I\'M GONNA NUT IF THIS KEEPS UP 🤤💦',
-  'CHAT IS 100% GOONING RIGHT NOW 👁️👄👁️',
-  'THIS IS ILLEGALLY HYPE 🚨🔥',
-  // Unhinged / nuclear
-  'I\'M FOAMING AT THE MOUTH RN 🤪💀',
-  'CRYING SCREAMING PISSING SHITTING THROWING UP 🤮💩😭',
-  'MY EYEBALLS ARE CUMMING FROM THIS PEAK 👀💦',
-  'I JUST SHATTERED MY PELVIS FROM HYPE 🚑🦴💥',
-  'I\'M LEGALLY BRAINDEAD FROM THIS ENERGY 🧠💨',
-  'CHAT IS ONE BAD MOMENT AWAY FROM A MELTDOWN 💀🔥',
-  'I\'M GONNA FUCK THE HYPE TRAIN ITSELF 🚂🍑',
-  'MY THERAPIST IS GONNA QUIT AFTER THIS STREAM 😭💀',
-  'SOMEONE SEDATE ME BEFORE I BECOME A WAR CRIME 💉🔥',
-  'MY SPINE IS LIQUID AND MY SOUL IS GONE ✨💀',
-  'I AM BECOME HYPE, DESTROYER OF CHILL ☢️🚂',
+  'TURN IT UP TO ELEVEN 🔊✨',
+  'CHAT IS GLOWING RIGHT NOW 🌟',
+  // Pure good vibes
+  'THE VIBES ARE IMMACULATE 🤩✨',
+  'BIGGEST W OF THE NIGHT 🏆',
+  'EVERYBODY IS SO BACK 🙌🔥',
+  'THIS IS PEAK PERFORMANCE 📈💯',
+  'CHAT YOU ARE INCREDIBLE 💖',
+  'MAXIMUM HYPE ACHIEVED 🚀',
+  'WE ARE SO LOCKED IN 🔒🔥',
+  'GREATEST TIMELINE CONFIRMED ✨',
+  'CHAT IS UNSTOPPABLE TONIGHT 💪',
+  'THIS IS WHAT DREAMS LOOK LIKE 🌈',
+  // Train-themed
+  'FULL STEAM AHEAD! 🚂💨',
+  'NEXT STOP: THE STRATOSPHERE 🚂🌌',
+  'THIS TRAIN HAS NO BRAKES 🚂⚡',
+  'ENGINE\'S REDLINING AND WE LOVE IT 🚂🔥',
+  'BUCKLE UP, WE\'RE GOING UP 🚂📈',
+  'CONDUCTOR SAID ONE MORE LEVEL 🚂🎩',
+  'RIDE THIS TRAIN TO THE MOON 🚂🌙',
   // StreamNook-branded hype
-  'CHOO CHOO MOTHERFUCKERS! 🚂💨',
   'ALL ABOARD THE STREAMNOOK HYPE TRAIN! 🎉',
-  'STREAMNOOK FAM LET\'S FUCKING GOOO 🔥',
+  'STREAMNOOK FAM LET\'S GOOO 🔥',
   'POGGERS IN THE NOOK 🐸🏠',
   'TRAIN HAS LEFT THE STATION AND STREAMNOOK IS DRIVING 🚂🌪️',
   'CHAT POPPIN OFF IN STREAMNOOK RN 📈',
   'STREAMNOOK ENERGY IS UNMATCHED 🙌',
-  'WE\'RE COZY AS FUCK IN THE NOOK TONIGHT 🛋️🚂',
-  // Edgy StreamNook
-  'INJECT THE STREAMNOOK HYPE STRAIGHT INTO MY VEINS 💉',
-  'I\'M HARD AS FUCK FOR THIS STREAMNOOK CLUTCH 🍆🚂',
-  'CHAT\'S ON THAT STREAMNOOK COCAINUM ENERGY 🤍🐍',
-  'MY BLOOD PRESSURE JUST SPIKED IN THE NOOK 😤',
-  'MOMMY? SORRY. STREAMNOOK MOMMY? 😏🚂',
-  'I\'M GONNA NUT IF STREAMNOOK KEEPS THIS UP 🤤💦',
-  'STREAMNOOK CHAT IS 100% GOONING RIGHT NOW 👁️👄👁️',
-  'THIS STREAMNOOK MOMENT IS ILLEGALLY HYPE 🫡🚨',
-  // Unhinged StreamNook
-  'I\'M FOAMING AT THE MOUTH AND MY DICK IS OUT 🍆🤪',
-  'MY EYEBALLS ARE CUMMING FROM THIS PEAK 👀💦',
-  'I JUST SHATTERED MY PELVIS FROM HYPE 🚑🦴💥',
-  'I\'M LEGALLY RETARDED FROM THIS ENERGY 🧠💨',
-  'CHAT IS ONE BAD MOMENT AWAY FROM A MASS SUICIDE PACT 💀🔗',
-  'I\'M GONNA FUCK THE HYPE TRAIN ITSELF 🚂🍑',
-  'MY THERAPIST IS GONNA QUIT AFTER THIS STREAM 😭🛋️',
-  'SOMEONE SEDATE ME BEFORE I BECOME A WAR CRIME 🩸💉',
-  'MY SPINE IS LIQUID AND MY SOUL IS GONE ✨🪦',
-  'I AM BECOME HYPE, DESTROYER OF CHILL ☢️🚂',
+  'COZIEST HYPE IN THE NOOK TONIGHT 🛋️🚂',
+  'THE NOOK IS GLOWING ✨🏠',
+  'NOBODY DOES IT LIKE THE NOOK 💯',
+  'STREAMNOOK FAM ON TOP AS USUAL 🏆',
+  'THIS NOOK MOMENT IS LEGENDARY 🌟🚂',
+  'WELCOME TO THE BEST SEAT IN THE NOOK 🛋️🔥',
 ];
 
 /** Lets ChatWidget render against a caller-supplied channel instead of the
@@ -3770,14 +3754,16 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
               </AnimatePresence>
               
               {/* / Command Autocomplete (Dominated Width) */}
-              {showCommandAutocomplete && (
-                <CommandAutocomplete
-                  commands={matchingCommands}
-                  selectedIndex={commandSelectedIndex}
-                  onSelect={(cmd) => insertCommand(cmd)}
-                  onSelectedIndexChange={setCommandSelectedIndex}
-                />
-              )}
+              <AnimatePresence>
+                {showCommandAutocomplete && (
+                  <CommandAutocomplete
+                    commands={matchingCommands}
+                    selectedIndex={commandSelectedIndex}
+                    onSelect={(cmd) => insertCommand(cmd)}
+                    onSelectedIndexChange={setCommandSelectedIndex}
+                  />
+                )}
+              </AnimatePresence>
               {/* Channel Points Menu - renders at full width like emote picker */}
               {showChannelPointsMenu && currentStream && (
                 <ChannelPointsMenu
@@ -3950,13 +3936,15 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                     />
                   )}
                   {/* Emote tab completion carousel */}
-                  {emoteTabState && !showMentionAutocomplete && !showCommandAutocomplete && (
-                    <EmoteAutocomplete
-                      current={emoteTabState.matches[emoteTabState.index]}
-                      backwards={emoteTabState.matches.slice(Math.max(0, emoteTabState.index - 3), emoteTabState.index)}
-                      forwards={emoteTabState.matches.slice(emoteTabState.index + 1, emoteTabState.index + 4)}
-                    />
-                  )}
+                  <AnimatePresence>
+                    {emoteTabState && !showMentionAutocomplete && !showCommandAutocomplete && (
+                      <EmoteAutocomplete
+                        current={emoteTabState.matches[emoteTabState.index]}
+                        backwards={emoteTabState.matches.slice(Math.max(0, emoteTabState.index - 3), emoteTabState.index)}
+                        forwards={emoteTabState.matches.slice(emoteTabState.index + 1, emoteTabState.index + 4)}
+                      />
+                    )}
+                  </AnimatePresence>
                   <textarea
                     id="chat-compose-input"
                     ref={inputRef}

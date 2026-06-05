@@ -1320,12 +1320,27 @@ export default function DropsCenter() {
                         Logger.debug(`[DropsCenter] Mine All complete for ${currentQueue.gameName}`);
                         addToast(`All campaigns for ${event.payload.game_name} complete!`, 'success');
                         setMineAllQueue(null);
+                        // Queue exhausted: tear down like a manual stop (disconnect the drops
+                        // WebSocket + drop the progress listener) rather than leaving them idle.
+                        try {
+                            await invoke('stop_auto_mining');
+                        } catch (err) {
+                            Logger.error('[DropsCenter] stop_auto_mining after Mine All failed:', err);
+                        }
                         useAppStore.getState().setMiningActive(false);
                     }
                 } else {
                     // Single Campaign Mining mode - stop completely
                     Logger.debug('[DropsCenter] Single campaign complete - stopping');
                     addToast(`Drops complete for ${event.payload.game_name}!`, 'success');
+                    // Backend completion soft-stops (halts the loops + clears status) but leaves the
+                    // drops WebSocket connected and the progress listener registered. Fire the real
+                    // stop so completion tears down exactly like a manual stop.
+                    try {
+                        await invoke('stop_auto_mining');
+                    } catch (err) {
+                        Logger.error('[DropsCenter] stop_auto_mining after completion failed:', err);
+                    }
                     useAppStore.getState().setMiningActive(false);
                 }
                 
@@ -1366,11 +1381,25 @@ export default function DropsCenter() {
                         // All campaigns tried - queue exhausted
                         addToast('All campaigns have no available streams', 'warning');
                         setMineAllQueue(null);
+                        // Tear down like a manual stop (the backend no-channels stop only halts
+                        // the loops + clears status, leaving the WebSocket/listener idle).
+                        try {
+                            await invoke('stop_auto_mining');
+                        } catch (err) {
+                            Logger.error('[DropsCenter] stop_auto_mining after no-channels failed:', err);
+                        }
                         useAppStore.getState().setMiningActive(false);
                     }
                 } else {
                     // Single campaign mode - just notify and stop
                     addToast(`${event.payload.reason || 'All streams offline - mining stopped'}`, 'warning');
+                    // Tear down like a manual stop (the backend no-channels stop only halts the
+                    // loops + clears status, leaving the WebSocket/listener idle).
+                    try {
+                        await invoke('stop_auto_mining');
+                    } catch (err) {
+                        Logger.error('[DropsCenter] stop_auto_mining after no-channels failed:', err);
+                    }
                     useAppStore.getState().setMiningActive(false);
                 }
                 

@@ -61,10 +61,8 @@ const TopEmotesSection = ({ userId }: { userId: string }) => {
             >
               <motion.div
                 variants={itemV}
-                className={`flex flex-col items-center gap-1 rounded-lg border p-2 ${
-                  i === 0
-                    ? 'border-accent/30 bg-accent/[0.06]'
-                    : 'border-white/[0.06] bg-white/[0.03]'
+                className={`glass-tile flex flex-col items-center gap-1 p-2 ${
+                  i === 0 ? 'border-accent/30 bg-accent/[0.06]' : ''
                 }`}
               >
                 <div className="flex h-10 items-center justify-center">

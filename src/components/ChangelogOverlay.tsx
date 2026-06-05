@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { ReleaseNotes } from '../types';
 import { parseInlineMarkdown } from '../services/markdownService';
 import { Tooltip } from './ui/Tooltip';
+import { motion } from 'framer-motion';
 
 import { Logger } from '../utils/logger';
 interface ChangelogOverlayProps {
@@ -232,11 +233,23 @@ const ChangelogOverlay = ({ version, onClose }: ChangelogOverlayProps) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+    >
       {/* Background overlay - click to close */}
       <div className="absolute inset-0" onClick={onClose} />
 
-      <div className="glass-panel p-6 w-[500px] max-w-[90vw] max-h-[80vh] shadow-2xl relative z-10 flex flex-col">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 12 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 12 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+        className="glass-panel p-6 w-[500px] max-w-[90vw] max-h-[80vh] shadow-2xl relative z-10 flex flex-col"
+      >
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
@@ -308,8 +321,8 @@ const ChangelogOverlay = ({ version, onClose }: ChangelogOverlayProps) => {
             <ExternalLink size={12} />
           </a>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };
 

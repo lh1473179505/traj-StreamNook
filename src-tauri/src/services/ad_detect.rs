@@ -212,6 +212,107 @@ pub fn filter_ad_segments(playlist: &str) -> (String, u32, u32) {
     (joined, dropped, real)
 }
 
+/// Lower the playlist's declared `#EXT-X-TARGETDURATION` to the real maximum
+/// segment length. Twitch over-declares 6s even though its live segments are ~2s,
+/// and hls.js refuses to hold the playhead closer than ~one target duration to the
+/// live edge (so a 6s declaration pins viewers ~6-8s back no matter the configured
+/// sync target). Rewriting it to `ceil(max #EXTINF)` lets the player ride much
+/// closer to live without stalling, on every channel, with no dependence on the
+/// low-latency PREFETCH tags (which normal-latency broadcasts don't send).
+///
+/// Spec-safe: TARGETDURATION must be >= every segment's duration, and this only
+/// ever LOWERS it toward that true maximum, never below it. Returns `Some(rewrite)`
+/// only when it actually changed the value, so an already-correct playlist (or a
+/// master playlist with no segments) passes through untouched (`None`).
+pub fn retarget_playlist(playlist: &str) -> Option<String> {
+    let mut max_dur = 0.0f64;
+    let mut has_extinf = false;
+    for line in playlist.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("#EXTINF:") {
+            has_extinf = true;
+            if let Some(num) = rest.split(',').next() {
+                if let Ok(d) = num.trim().parse::<f64>() {
+                    if d > max_dur {
+                        max_dur = d;
+                    }
+                }
+            }
+        }
+    }
+    // No media segments (master playlist) or unparseable durations: leave it alone.
+    if !has_extinf || max_dur <= 0.0 {
+        return None;
+    }
+    let new_td = (max_dur.ceil() as u64).max(1);
+
+    let mut changed = false;
+    let mut out = String::with_capacity(playlist.len());
+    for line in playlist.lines() {
+        if let Some(cur) = line.trim_start().strip_prefix("#EXT-X-TARGETDURATION:") {
+            let cur_val = cur.trim().parse::<u64>().unwrap_or(0);
+            if cur_val > new_td {
+                out.push_str(&format!("#EXT-X-TARGETDURATION:{}", new_td));
+                changed = true;
+            } else {
+                out.push_str(line);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Promote Twitch's low-latency `#EXT-X-TWITCH-PREFETCH:<url>` hints into real
+/// `#EXTINF` segments so hls.js actually plays them. On a low-latency broadcast
+/// Twitch appends the next ~2 in-progress segments as PREFETCH tags; hls.js
+/// ignores that proprietary tag, so without this the player can never ride closer
+/// than the last fully-published segment (~4s+ back even on a low-latency channel).
+/// Each hint becomes `#EXTINF:<dur>,live\n<url>`, extending the live edge ~2s per
+/// hint toward real time. The URLs are absolute (same CDN as the normal segments),
+/// so the player fetches them directly, exactly as it already does for the others.
+///
+/// MUST only be called on an ad-free playlist: a prefetch segment landing inside an
+/// ad break could be the ad itself, and promoting it would fast-path it past the
+/// segment filter. Callers gate on the ad-detection state. Returns `None` when there
+/// were no hints (so a normal-latency playlist passes through untouched).
+pub fn promote_prefetch(playlist: &str) -> Option<String> {
+    if !playlist.contains("#EXT-X-TWITCH-PREFETCH:") {
+        return None;
+    }
+    // Estimate the segment duration from the playlist's own segments (Twitch is a
+    // steady 2s; fall back to 2.0 if none parse).
+    let dur = playlist
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("#EXTINF:"))
+        .filter_map(|r| r.split(',').next())
+        .filter_map(|n| n.trim().parse::<f64>().ok())
+        .next_back()
+        .unwrap_or(2.0);
+
+    let mut out = String::with_capacity(playlist.len() + 96);
+    let mut promoted = false;
+    for line in playlist.lines() {
+        if let Some(url) = line.trim().strip_prefix("#EXT-X-TWITCH-PREFETCH:") {
+            out.push_str(&format!("#EXTINF:{:.3},live\n{}\n", dur, url.trim()));
+            promoted = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if promoted {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +377,69 @@ b.ts\n";
         let (_out, dropped, real) = filter_ad_segments(pl);
         assert_eq!(dropped, 0);
         assert_eq!(real, 2);
+    }
+
+    #[test]
+    fn retarget_lowers_overdeclared_targetduration() {
+        let pl = "#EXTM3U\n\
+#EXT-X-VERSION:3\n\
+#EXT-X-TARGETDURATION:6\n\
+#EXT-X-MEDIA-SEQUENCE:100\n\
+#EXTINF:2.000,live\n\
+a.ts\n\
+#EXTINF:2.000,live\n\
+b.ts\n";
+        let out = retarget_playlist(pl).expect("should lower 6 -> 2");
+        assert!(out.contains("#EXT-X-TARGETDURATION:2"));
+        assert!(!out.contains("#EXT-X-TARGETDURATION:6"));
+        // Segments and other tags survive untouched.
+        assert!(out.contains("a.ts") && out.contains("b.ts"));
+        assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:100"));
+    }
+
+    #[test]
+    fn retarget_noop_when_already_correct() {
+        let pl = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,live\na.ts\n";
+        assert!(retarget_playlist(pl).is_none());
+    }
+
+    #[test]
+    fn retarget_noop_on_master_playlist() {
+        // No #EXTINF (a master/variant playlist) -> never touch the targetduration.
+        let pl = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nchunked.m3u8\n";
+        assert!(retarget_playlist(pl).is_none());
+    }
+
+    #[test]
+    fn retarget_never_raises() {
+        // Already-low (or low-latency) declaration must not be raised toward a
+        // larger segment; only lower. Here max EXTINF is 2 but TD is 1, leave it.
+        let pl = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:2.000,live\na.ts\n";
+        assert!(retarget_playlist(pl).is_none());
+    }
+
+    #[test]
+    fn promote_prefetch_converts_hints_to_segments() {
+        let pl = "#EXTM3U\n\
+#EXT-X-TARGETDURATION:2\n\
+#EXTINF:2.000,live\n\
+https://cdn/seg1.ts\n\
+#EXT-X-TWITCH-PREFETCH:https://cdn/seg2.ts\n\
+#EXT-X-TWITCH-PREFETCH:https://cdn/seg3.ts\n";
+        let out = promote_prefetch(pl).expect("should promote hints");
+        // Hints are gone, replaced by real segments at the inherited duration.
+        assert!(!out.contains("#EXT-X-TWITCH-PREFETCH"));
+        assert!(out.contains("#EXTINF:2.000,live\nhttps://cdn/seg2.ts"));
+        assert!(out.contains("#EXTINF:2.000,live\nhttps://cdn/seg3.ts"));
+        // The original published segment is untouched.
+        assert!(out.contains("https://cdn/seg1.ts"));
+        // Two promoted + one original = three EXTINF lines.
+        assert_eq!(out.matches("#EXTINF:").count(), 3);
+    }
+
+    #[test]
+    fn promote_prefetch_noop_without_hints() {
+        let pl = "#EXTM3U\n#EXTINF:2.000,live\nhttps://cdn/seg1.ts\n";
+        assert!(promote_prefetch(pl).is_none());
     }
 }

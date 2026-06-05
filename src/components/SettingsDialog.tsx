@@ -80,7 +80,7 @@ const HERO_BEVEL =
   'inset 1px 1px 0 0 rgba(255,255,255,0.14), inset -1px -1px 0 0 rgba(0,0,0,0.22), 0 4px 10px rgba(0,0,0,0.18)';
 
 const SettingsDialog = () => {
-  const { isSettingsOpen, settingsInitialTab, closeSettings, isAuthenticated, currentUser, signOutActiveAccount } = useAppStore();
+  const { isSettingsOpen, settingsInitialTab, closeSettings, isAuthenticated, currentUser, signOutActiveAccount, settings } = useAppStore();
   const [activeTab, setActiveTab] = useState<SettingsTab>('Player');
   const [searchQuery, setSearchQuery] = useState('');
   const [signOutConfirm, setSignOutConfirm] = useState(false);
@@ -93,6 +93,10 @@ const SettingsDialog = () => {
   const HeroIcon = activeMeta.icon;
   const profileActive = activeTab === 'Profile';
   const searching = searchQuery.trim().length > 0;
+  // Default to the compact centered window. Users can opt into a full-page
+  // layout that fills the entire app via Interface › Settings Window, giving
+  // long tabs more room and less scrolling.
+  const compactWindow = settings.compact_settings_window !== false;
 
   useEffect(() => {
     if (settingsInitialTab) {
@@ -157,7 +161,18 @@ const SettingsDialog = () => {
             exit={{ opacity: 0, scale: 0.97, y: 10 }}
             transition={{ type: 'spring', stiffness: 380, damping: 30 }}
             onClick={(e) => e.stopPropagation()}
-            className="liquid-glass-panel flex w-[94vw] md:w-[90vw] lg:w-[86vw] xl:w-[82vw] max-w-[1480px] h-[90vh] max-h-[980px] overflow-hidden"
+            className={`liquid-glass-panel flex overflow-hidden ${
+              compactWindow
+                ? 'w-[94vw] md:w-[90vw] lg:w-[86vw] xl:w-[82vw] max-w-[1480px] h-[90vh] max-h-[980px]'
+                : 'w-full h-full'
+            }`}
+            // Full-page fills the window edge-to-edge, so drop the panel's
+            // rounded corners (which would otherwise reveal blurred backdrop
+            // wedges at the four corners). Explicit 12<->0 values (rather than
+            // undefined) give the radius a defined start/end in BOTH directions
+            // so the .liquid-glass-panel `transition: all` eases it symmetrically
+            // whether you're growing to full-page or shrinking back to compact.
+            style={{ borderRadius: compactWindow ? 12 : 0 }}
           >
             <aside className="flex w-[240px] flex-shrink-0 flex-col border-r border-white/[0.06] py-3">
               <div className="px-2">

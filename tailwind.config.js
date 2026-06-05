@@ -63,6 +63,12 @@ module.exports = {
           '0%': { opacity: '0', transform: 'translateY(-4px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
+        // Gentle fade + slight grow for overlays/modals so they ease in
+        // instead of snapping. Pairs with the house spring feel.
+        'scale-in': {
+          '0%': { opacity: '0', transform: 'scale(0.96)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
         shimmer: {
           '0%': { backgroundPosition: '-200% 0' },
           '100%': { backgroundPosition: '200% 0' },
@@ -132,6 +138,7 @@ module.exports = {
       },
       animation: {
         'fade-in': 'fade-in 0.3s ease-out forwards',
+        'scale-in': 'scale-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) forwards',
         shimmer: 'shimmer 2s ease-in-out infinite',
         droplet: 'droplet 2.5s ease-in-out infinite',
         splash: 'splash 0.6s ease-out forwards',

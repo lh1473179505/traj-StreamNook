@@ -563,7 +563,7 @@ const ChannelPointsMenu: React.FC<ChannelPointsMenuProps> = ({
       {/* Highlighted Message Input Modal */}
       {showHighlightModal && highlightReward && (
         <div 
-          className="glass-panel absolute inset-0 flex flex-col overflow-hidden z-50"
+          className="glass-panel animate-scale-in absolute inset-0 flex flex-col overflow-hidden z-50"
           style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)', backdropFilter: 'blur(24px)' }}
         >
           {/* Modal Header */}
@@ -636,7 +636,7 @@ const ChannelPointsMenu: React.FC<ChannelPointsMenuProps> = ({
       {/* Emote Reveal Popup */}
       {showEmoteReveal && revealedEmote && (
         <div 
-          className="glass-panel absolute inset-0 flex flex-col items-center justify-center overflow-hidden z-50"
+          className="glass-panel animate-scale-in absolute inset-0 flex flex-col items-center justify-center overflow-hidden z-50"
           style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)', backdropFilter: 'blur(24px)' }}
           onClick={() => {
             setShowEmoteReveal(false);
@@ -685,7 +685,7 @@ const ChannelPointsMenu: React.FC<ChannelPointsMenuProps> = ({
       {/* Confirmation Modal */}
       {showConfirmModal && pendingReward && (
         <div 
-          className="glass-panel absolute inset-0 flex flex-col items-center justify-center overflow-hidden z-50"
+          className="glass-panel animate-scale-in absolute inset-0 flex flex-col items-center justify-center overflow-hidden z-50"
           style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)', backdropFilter: 'blur(24px)' }}
         >
           {/* Header */}
@@ -763,7 +763,7 @@ const ChannelPointsMenu: React.FC<ChannelPointsMenuProps> = ({
       {/* Modify Emote Picker Modal */}
       {showModifyEmoteModal && modifyEmoteReward && (
         <div 
-          className="glass-panel absolute inset-0 z-50 flex flex-col overflow-hidden"
+          className="glass-panel animate-scale-in absolute inset-0 z-50 flex flex-col overflow-hidden"
           style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)', backdropFilter: 'blur(24px)' }}
         >
           {/* Header */}
@@ -986,7 +986,7 @@ const ChannelPointsMenu: React.FC<ChannelPointsMenuProps> = ({
       {/* Choose Emote Modal - Single step emote picker */}
       {showChooseEmoteModal && chooseEmoteReward && (
         <div 
-          className="glass-panel absolute inset-0 z-50 flex flex-col overflow-hidden"
+          className="glass-panel animate-scale-in absolute inset-0 z-50 flex flex-col overflow-hidden"
           style={{ backgroundColor: 'rgba(12, 12, 13, 0.95)', backdropFilter: 'blur(24px)' }}
         >
           {/* Header */}

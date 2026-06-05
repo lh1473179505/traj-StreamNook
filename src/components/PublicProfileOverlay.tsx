@@ -1,11 +1,11 @@
 import { useEffect, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { motion, AnimatePresence, useDragControls } from 'framer-motion';
-import { X, User } from 'lucide-react';
+import { X, User, Eye } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/AppStore';
 import { Logger } from '../utils/logger';
 import ProfileOverview from './settings/ProfileOverview';
-import { StreamNookTierCard, StreamNookBadge, getTierAccent } from './StreamNookBadge';
+import { StreamNookBadge, getTierAccent, getTier } from './StreamNookBadge';
 import { ProfileAccentContext, ProfileCompactContext } from './settings/profileAccentContext';
 import { getFullProfileWithFallback } from '../services/cosmeticsCache';
 import { computePaintStyle, getBadgeImageUrls, getBadgeFallbackUrls } from '../services/seventvService';
@@ -29,6 +29,8 @@ import {
   getProfileSnapshot,
   upsertProfileSnapshot,
   getUserIdentity,
+  incrementProfileView,
+  getProfileViews,
   type ProfileSnapshot,
 } from '../services/supabaseService';
 
@@ -107,9 +109,63 @@ const resolveProfileTheme = (
   return null;
 };
 
+type WornBadges = {
+  seventv: any | null;
+  twitch: { src: string; title: string } | null;
+  thirdParty: any[];
+  bttvPro: { src: string; title: string } | null;
+};
+
+// Resolve the member's worn identity badge row the SAME way chat does, so the
+// overlay shows their full cross-client combination: third-party badges from the
+// ownership-checked server bundle, BTTV Pro from the socket (the server drops
+// that key), the Twitch global badge from the loadout's `twitch:<...>` key, and
+// the active 7TV badge. Shared by the initial load AND the live-preview re-resolve
+// (a loadout edit), so both paths produce identical results. `profile` is the
+// result of getFullProfileWithFallback (carries the 7TV cosmetics).
+const resolveWornBadges = async (userId: string, profile: any): Promise<WornBadges> => {
+  const seventv =
+    (profile?.seventvCosmetics?.badges as any[] | undefined)?.find((b) => b?.selected) ?? null;
+  let twitch: { src: string; title: string } | null = null;
+  let thirdParty: any[] = [];
+  let bttvPro: { src: string; title: string } | null = null;
+  try {
+    const [resolved, rawLoadout] = await Promise.all([
+      getResolvedIdentity(userId).catch(() => null),
+      getIdentityWithCache(userId).catch(() => null),
+    ]);
+    thirdParty = (resolved?.badges ?? [])
+      .filter((b: any) => b.provider !== 'twitch')
+      .map((b: any) => ({ key: b.key, provider: b.provider, title: b.title, src: b.image_url }));
+    const keys: string[] = rawLoadout?.badges ?? [];
+    const twitchKey = keys.find((k) => k.startsWith('twitch:'));
+    if (twitchKey) {
+      const v = twitchKey.slice('twitch:'.length);
+      if (v.includes('/')) {
+        // Legacy set/version key — resolve via the global-badge cache.
+        twitch = await resolveGlobalTwitchBadge(v);
+      } else if (v) {
+        // Image-id key — the universal Twitch badge CDN URL renders the same
+        // badge for any viewer (global or channel-scoped), no cache.
+        twitch = { src: `https://static-cdn.jtvnw.net/badges/v1/${v}/3`, title: 'Twitch' };
+      }
+    }
+    if (keys.includes(BTTV_PRO_LOADOUT_KEY)) {
+      const url = await resolveBttvProUrl(userId).catch(() => null);
+      if (url) bttvPro = { src: url, title: 'BTTV Pro' };
+    }
+  } catch { /* badges optional */ }
+  return { seventv, twitch, thirdParty, bttvPro };
+};
+
 const PublicProfileOverlay = () => {
   const userId = useAppStore((s) => s.profileViewerUserId);
+  // When set, this is a LIVE preview of the current user's own profile: its
+  // values override the fetched ones so Settings edits reflect instantly.
+  const preview = useAppStore((s) => s.profileViewerPreview);
   const close = useAppStore((s) => s.closeProfileViewer);
+  // The VIEWER's own id, so we don't count self-views (or the live preview).
+  const currentUserId = useAppStore((s) => s.currentUser?.user_id);
   const dragControls = useDragControls();
 
   const [info, setInfo] = useState<TargetInfo | null>(null);
@@ -135,6 +191,28 @@ const PublicProfileOverlay = () => {
     thirdParty: any[];
     bttvPro: { src: string; title: string } | null;
   }>({ seventv: null, twitch: null, thirdParty: [], bttvPro: null });
+  // The viewed member's public profile-view count. null = unknown / unavailable.
+  const [profileViews, setProfileViews] = useState<number | null>(null);
+
+  // Record a profile view (and read the current count for display). Counting is
+  // gated: never your own profile, never the live preview, and deduped per
+  // session inside incrementProfileView. The hide toggle only affects DISPLAY
+  // (below), so a hidden count still accumulates.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!userId) {
+        if (alive) setProfileViews(null);
+        return;
+      }
+      const shouldCount = !!currentUserId && userId !== currentUserId && !preview;
+      const counted = shouldCount ? await incrementProfileView(userId) : null;
+      const n = counted ?? (await getProfileViews(userId));
+      if (alive) setProfileViews(n);
+    })();
+    return () => { alive = false; };
+    // currentUserId is stable per session; only re-run on the viewed profile.
+  }, [userId]);
 
   // Re-render when the StreamNook member / cosmetics registries update so the
   // tier card and counts resolve for the viewed user once loaded.
@@ -167,12 +245,17 @@ const PublicProfileOverlay = () => {
           setCounts(snap.counts);
           setNamePaint((snap.namePaint as CSSProperties) ?? null);
           setHiddenSections(snap.hiddenSections);
-          setWornBadges({
-            seventv: snap.seventvBadge,
-            twitch: snap.wornBadges.twitch,
-            thirdParty: snap.wornBadges.thirdParty,
-            bttvPro: snap.wornBadges.bttvPro,
-          });
+          // In live-preview mode the badge row is owned by the override path
+          // (re-resolved on each loadout edit); skip the snapshot so a late
+          // cache read can't clobber a fresher preview resolve.
+          if (!useAppStore.getState().profileViewerPreview) {
+            setWornBadges({
+              seventv: snap.seventvBadge,
+              twitch: snap.wornBadges.twitch,
+              thirdParty: snap.wornBadges.thirdParty,
+              bttvPro: snap.wornBadges.bttvPro,
+            });
+          }
           await whenAtmospheresReady();
           if (alive) {
             setTheme(resolveProfileTheme(snap.profileTheme, (snap.namePaint as CSSProperties) ?? null));
@@ -237,45 +320,11 @@ const PublicProfileOverlay = () => {
             });
           }
 
-          // Worn identity badges, resolved the same way chat does so the overlay
-          // shows the member's full customization combination cross-client:
-          //  - third-party (BTTV/FFZ/Chatterino/...) from the server-resolved,
-          //    ownership-checked bundle;
-          //  - BTTV Pro from the socket (the server drops that key, can't resolve);
-          //  - the Twitch global badge from the universal global-badge cache (the
-          //    loadout carries it as `twitch:<set>/<ver>`);
-          //  - the active 7TV badge (live) + the StreamNook badge (member number).
-          const sevenTvBadge =
-            (profile.seventvCosmetics?.badges as any[] | undefined)?.find((b) => b?.selected) ?? null;
-          let twitch: { src: string; title: string } | null = null;
-          let thirdParty: any[] = [];
-          let bttvPro: { src: string; title: string } | null = null;
-          try {
-            const [resolved, rawLoadout] = await Promise.all([
-              getResolvedIdentity(userId).catch(() => null),
-              getIdentityWithCache(userId).catch(() => null),
-            ]);
-            thirdParty = (resolved?.badges ?? [])
-              .filter((b: any) => b.provider !== 'twitch')
-              .map((b: any) => ({ key: b.key, provider: b.provider, title: b.title, src: b.image_url }));
-            const keys: string[] = rawLoadout?.badges ?? [];
-            const twitchKey = keys.find((k) => k.startsWith('twitch:'));
-            if (twitchKey) {
-              const v = twitchKey.slice('twitch:'.length);
-              if (v.includes('/')) {
-                // Legacy set/version key — resolve via the global-badge cache.
-                twitch = await resolveGlobalTwitchBadge(v);
-              } else if (v) {
-                // Image-id key — the universal Twitch badge CDN URL renders the
-                // same badge for any viewer (global or channel-scoped), no cache.
-                twitch = { src: `https://static-cdn.jtvnw.net/badges/v1/${v}/3`, title: 'Twitch' };
-              }
-            }
-            if (keys.includes(BTTV_PRO_LOADOUT_KEY)) {
-              const url = await resolveBttvProUrl(userId).catch(() => null);
-              if (url) bttvPro = { src: url, title: 'BTTV Pro' };
-            }
-          } catch { /* badges optional */ }
+          // Worn identity badges, resolved the same way chat does (see
+          // resolveWornBadges). Destructured so the snapshot build below can reuse
+          // the resolved values; the live-preview effect re-runs the same helper.
+          const { seventv: sevenTvBadge, twitch, thirdParty, bttvPro } =
+            await resolveWornBadges(userId, profile);
           if (alive) setWornBadges({ seventv: sevenTvBadge, twitch, thirdParty, bttvPro });
 
           // The member's active 7TV paint always paints their NAME (free, like
@@ -341,6 +390,26 @@ const PublicProfileOverlay = () => {
     return () => { alive = false; };
   }, [userId]);
 
+  // Live preview only: when the editor bumps badgeRevision (a loadout edit),
+  // re-resolve the worn-badge row so it matches what others will see. The editor
+  // calls setIdentity BEFORE bumping, so the identity caches are already primed
+  // (fresh loadout keys) and cleared (third-party re-fetch). Uses the same helper
+  // as the initial resolve, so the result is a true 1:1. Revision 0 is the first
+  // open, already resolved by the main effect above.
+  useEffect(() => {
+    if (!userId || !preview || preview.badgeRevision === 0) return;
+    let alive = true;
+    (async () => {
+      const login = info?.login ?? '';
+      const profile = await getFullProfileWithFallback(userId, login, userId, login).catch(() => null);
+      if (!profile || !alive) return;
+      const wb = await resolveWornBadges(userId, profile);
+      if (alive) setWornBadges(wb);
+    })();
+    return () => { alive = false; };
+    // info is read at call time on purpose; the only trigger is a revision bump.
+  }, [userId, preview?.badgeRevision]);
+
   const memberNumber = userId ? getStreamNookUserNumber(userId) : null;
   const cosmeticSlug = userId ? getActiveCosmeticSlug(userId) : null;
   const cosmeticName = cosmeticSlug ? getCosmeticBySlug(cosmeticSlug)?.name ?? null : null;
@@ -349,20 +418,27 @@ const PublicProfileOverlay = () => {
   // StreamNook Atmosphere) when set, else the free tier aura. The premium theme
   // also drives the border/accent color; the painted name is free regardless.
   const tierAccent = memberNumber !== null ? getTierAccent(memberNumber) : null;
-  const themeRgb = theme?.accentRgb ?? tierAccent?.rgb ?? null;
+  // In live-preview mode the override is authoritative for the hidden sections
+  // and theme, regardless of what the async loaders set in local state, so a
+  // Settings edit reflects instantly and a late fetch can't clobber it.
+  // getAtmosphere is a sync registry read (catalog loaded at startup), so
+  // resolving the previewed theme here is safe.
+  const effectiveHiddenSections = preview ? preview.hiddenSections : hiddenSections;
+  const effectiveTheme = preview ? resolveProfileTheme(preview.profileTheme, namePaint) : theme;
+  const themeRgb = effectiveTheme?.accentRgb ?? tierAccent?.rgb ?? null;
   const panelBorder = themeRgb ? `rgba(${themeRgb}, 0.22)` : undefined;
   const headerBorder = themeRgb ? `rgba(${themeRgb}, 0.14)` : undefined;
   const tierAura = tierAccent
     ? `radial-gradient(ellipse 90% 55% at 50% 0%, rgba(${tierAccent.rgb}, ${tierAccent.auraAlpha}), transparent 70%)`
     : undefined;
 
-  // A paint or Atmosphere backdrop is busy, so frost the header + the inner glass
-  // panels harder (override the app's --glass-strength lower = more opaque) so the
-  // content sits ON the glass instead of letting the background bleed through. The
-  // subtle tier aura keeps the normal, more see-through glass.
-  const busyBg = !!theme;
+  // The Atmosphere (subscriber tier) is the full "whole profile" theme: it fills
+  // the entire overlay and is softened to an ambient wash behind the content. A
+  // 7TV paint theme (supporter tier) is deliberately LESS than that: just a
+  // subtle accent in the hero, never bleeding through the content body, so the
+  // two tiers read clearly different (paint < atmosphere).
+  const hasAtmosphere = !!effectiveTheme?.atmosphere;
   const panelStyle = { borderColor: panelBorder } as CSSProperties & Record<string, string>;
-  if (busyBg) panelStyle['--glass-strength'] = '0.4';
 
   return (
     <AnimatePresence>
@@ -377,26 +453,20 @@ const PublicProfileOverlay = () => {
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.97 }}
           transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-          className="fixed left-[calc(50%-260px)] top-12 z-[60] flex max-h-[86vh] w-[520px] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-white/10 bg-[rgba(14,14,18,0.96)] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.8)] backdrop-blur-2xl"
+          className="fixed left-[calc(50%-380px)] top-12 z-[60] flex max-h-[86vh] w-[760px] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-white/10 bg-[rgba(14,14,18,0.96)] shadow-[0_24px_60px_-15px_rgba(0,0,0,0.8)] backdrop-blur-2xl"
           style={panelStyle}
         >
-          {/* Ambient theme behind the whole panel: a StreamNook Atmosphere
-              (transform-animated), the 7TV paint (blurred), or the tier color. */}
-          {theme?.atmosphere ? (
-            <AtmosphereBackground atm={theme.atmosphere} variant="profile" />
-          ) : theme?.paintAura ? (
-            // A 7TV paint is an ACCENT, not a full backdrop: a soft glow banded
-            // across the top that fades down, so it stays subtler than a full
-            // StreamNook Atmosphere.
-            <motion.div
-              className="pointer-events-none absolute inset-x-0 top-0 h-2/5"
-              style={{
-                ...theme.paintAura,
-                WebkitMaskImage: 'linear-gradient(to bottom, black, transparent)',
-                maskImage: 'linear-gradient(to bottom, black, transparent)',
-              }}
-              animate={{ opacity: [0.16, 0.26, 0.16] }}
-              transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
+          {/* Whole-overlay backdrop. Only the Atmosphere (subscriber tier) fills
+              the ENTIRE profile (it IS the vibe), softened to an ambient wash
+              behind the content. A 7TV paint theme does NOT go here — it's a
+              hero-only accent (below), so it stays clearly below the atmospheres.
+              Everything else gets the subtle tier radial (incl. behind a paint
+              theme). */}
+          {hasAtmosphere ? (
+            <AtmosphereBackground
+              atm={effectiveTheme!.atmosphere!}
+              variant="profile"
+              blur={!!effectiveTheme!.atmosphere!.image}
             />
           ) : tierAura ? (
             <motion.div
@@ -407,84 +477,181 @@ const PublicProfileOverlay = () => {
             />
           ) : null}
 
-          {/* Header / drag handle */}
+          {/* Hero band — identity + rank over the atmosphere (most present here).
+              Doubles as the drag handle. */}
           <div
             onPointerDown={(e) => dragControls.start(e)}
             style={{ borderBottomColor: headerBorder }}
-            className={`relative flex cursor-grab items-center gap-3 border-b border-white/[0.06] p-3 active:cursor-grabbing ${
-              busyBg ? 'bg-[rgba(12,13,18,0.5)] backdrop-blur-md' : ''
-            }`}
+            className="relative z-[2] flex-shrink-0 cursor-grab border-b border-white/[0.06] shadow-[0_12px_24px_-12px_rgba(0,0,0,0.85)] active:cursor-grabbing"
           >
-            <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-white/[0.04] ring-1 ring-inset ring-white/10">
-              {info?.avatar ? (
-                <img src={info.avatar} alt="" className="h-full w-full object-cover" draggable={false} />
-              ) : (
-                <User size={20} className="text-textSecondary" />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div
-                className="truncate text-sm font-semibold text-textPrimary"
-                style={namePaint ?? undefined}
-              >
-                {info?.displayName ?? 'StreamNook member'}
-              </div>
-              {info?.login && <div className="truncate text-[11px] text-textMuted">@{info.login}</div>}
-              {/* The identity badges this member is rocking (active 7TV badge +
-                  their chosen third-party loadout). StreamNook is the rank card. */}
-              {(() => {
-                const { seventv, twitch, thirdParty, bttvPro } = wornBadges;
-                const hasAny =
-                  !!twitch || !!seventv || memberNumber !== null || thirdParty.length > 0 || !!bttvPro;
-                if (!hasAny) return null;
-                const imgBadge = (src: string, title: string, key: string) => (
-                  <Tooltip key={key} content={title} side="bottom">
-                    <img
-                      src={src}
-                      alt={title}
-                      draggable={false}
-                      className="h-[18px] w-[18px] flex-shrink-0 object-contain"
-                    />
-                  </Tooltip>
-                );
-                return (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                    {twitch && imgBadge(twitch.src, `Twitch: ${twitch.title}`, 'tw')}
-                    {seventv && (() => {
-                      const urls = getBadgeImageUrls(seventv as any);
-                      return urls.url4x ? (
-                        <Tooltip content={`7TV: ${seventv.tooltip || seventv.name}`} side="bottom">
-                          <FallbackImage
-                            src={urls.url4x}
-                            fallbackUrls={getBadgeFallbackUrls(seventv.id).slice(1)}
-                            alt={seventv.tooltip || seventv.name}
-                            className="h-[18px] w-[18px] flex-shrink-0"
+            {/* Readability scrim so the identity reads over a busy backdrop. */}
+            <div
+              className="pointer-events-none absolute inset-0 z-[1]"
+              style={{
+                background:
+                  'linear-gradient(180deg, rgba(10,10,14,0.30) 0%, rgba(10,10,14,0.55) 55%, rgba(10,10,14,0.82) 100%)',
+              }}
+            />
+            {/* 7TV paint accent (supporter tier): a subtle blurred wash of the
+                member's paint at the TOP of the hero only, fading out. Deliberately
+                restrained vs a full Atmosphere so the paint theme reads as the
+                lesser tier. */}
+            {effectiveTheme?.paintAura && (
+              <motion.div
+                className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-full"
+                style={{
+                  ...effectiveTheme.paintAura,
+                  WebkitMaskImage: 'linear-gradient(to bottom, black, transparent 80%)',
+                  maskImage: 'linear-gradient(to bottom, black, transparent 80%)',
+                }}
+                animate={{ opacity: [0.16, 0.24, 0.16] }}
+                transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
+              />
+            )}
+            {/* Top + bottom specular hairlines (catch light, seam into content). */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-[2] h-px bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[2] h-px bg-gradient-to-r from-transparent via-white/[0.12] to-transparent" />
+
+            {/* Identity — seated and vertically centered in the hero. */}
+            <div className="relative z-10 flex items-center gap-3 p-4">
+              <div className="flex min-w-0 flex-1 items-center gap-3.5">
+                <span className="flex h-16 w-16 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-white/[0.04] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.18),0_4px_12px_rgba(0,0,0,0.5)] ring-1 ring-inset ring-white/15">
+                  {info?.avatar ? (
+                    <img src={info.avatar} alt="" className="h-full w-full object-cover" draggable={false} />
+                  ) : (
+                    <User size={28} className="text-textSecondary" />
+                  )}
+                </span>
+                <div className="min-w-0 flex-1">
+                  {/* Name, with the Preview pill inline. */}
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="truncate text-xl font-bold leading-tight text-textPrimary"
+                      style={namePaint ?? undefined}
+                    >
+                      {info?.displayName ?? 'StreamNook member'}
+                    </span>
+                    {preview && (
+                      <span className="flex-shrink-0 rounded-full border border-accent/30 bg-accent/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">
+                        Preview
+                      </span>
+                    )}
+                  </div>
+                  {/* Meta line: @handle + the worn badges grouped together, so the
+                      badges read as part of the identity instead of a stray row
+                      dangling under the name. */}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                    {info?.login && (
+                      <span className="text-[13px] leading-none text-textMuted">@{info.login}</span>
+                    )}
+                    {(() => {
+                      const { seventv, twitch, thirdParty, bttvPro } = wornBadges;
+                      const hasAny =
+                        !!twitch || !!seventv || memberNumber !== null || thirdParty.length > 0 || !!bttvPro;
+                      if (!hasAny) return null;
+                      const imgBadge = (src: string, title: string, key: string) => (
+                        <Tooltip key={key} content={title} side="bottom">
+                          <img
+                            src={src}
+                            alt={title}
+                            draggable={false}
+                            className="h-[18px] w-[18px] flex-shrink-0 object-contain"
                           />
                         </Tooltip>
-                      ) : null;
+                      );
+                      // stopPropagation so a badge click opens the nested profile
+                      // instead of starting a drag.
+                      return (
+                        <div
+                          className="flex flex-wrap items-center gap-1.5"
+                          onPointerDown={(e) => e.stopPropagation()}
+                        >
+                          {twitch && imgBadge(twitch.src, `Twitch: ${twitch.title}`, 'tw')}
+                          {seventv && (() => {
+                            const urls = getBadgeImageUrls(seventv as any);
+                            return urls.url4x ? (
+                              <Tooltip content={`7TV: ${seventv.tooltip || seventv.name}`} side="bottom">
+                                <FallbackImage
+                                  src={urls.url4x}
+                                  fallbackUrls={getBadgeFallbackUrls(seventv.id).slice(1)}
+                                  alt={seventv.tooltip || seventv.name}
+                                  className="h-[18px] w-[18px] flex-shrink-0"
+                                />
+                              </Tooltip>
+                            ) : null;
+                          })()}
+                          {memberNumber !== null && userId && (
+                            <StreamNookBadge userId={userId} userNumber={memberNumber} side="bottom" />
+                          )}
+                          {thirdParty.map((b: any) =>
+                            imgBadge(b.src, `${b.title} (${b.provider.toUpperCase()})`, b.key || b.title),
+                          )}
+                          {bttvPro && imgBadge(bttvPro.src, 'BTTV Pro', 'bttvpro')}
+                        </div>
+                      );
                     })()}
-                    {memberNumber !== null && userId && (
-                      <StreamNookBadge userId={userId} userNumber={memberNumber} side="bottom" />
+                    {/* Profile views — a subtle public counter. Hideable via the
+                        'views' visibility toggle (honored here so the live preview
+                        reflects what others see). */}
+                    {profileViews != null && !effectiveHiddenSections.includes('views') && (
+                      <Tooltip content="Profile views" side="bottom">
+                        <span className="flex items-center gap-1 text-[11px] leading-none text-textMuted">
+                          <Eye size={13} className="opacity-80" />
+                          {profileViews.toLocaleString()}
+                        </span>
+                      </Tooltip>
                     )}
-                    {thirdParty.map((b: any) =>
-                      imgBadge(b.src, `${b.title} (${b.provider.toUpperCase()})`, b.key || b.title),
+                  </div>
+                </div>
+              </div>
+
+              {/* Rank identity, lifted from the tier card but WITHOUT its chassis
+                  so it blends into the hero instead of reading as a card on top.
+                  The decode cypher still lives on the badge hover. */}
+              {memberNumber !== null && (() => {
+                const tier = getTier(memberNumber);
+                return (
+                  <div className="flex flex-shrink-0 flex-col items-end pt-0.5 text-right">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[11px] font-light leading-none text-white/35">Nº</span>
+                      <span className={tier.numberClassName}>{memberNumber.toLocaleString()}</span>
+                    </div>
+                    <div className={`mb-2 mt-2.5 h-px w-12 ${tier.hairlineClassName}`} />
+                    {tier.label && <div className={tier.labelClassName}>{tier.label}</div>}
+                    {cosmeticName && (
+                      <div className="mt-2.5 text-[10px] font-light uppercase tracking-[0.22em] text-white/70">
+                        {cosmeticName}
+                      </div>
                     )}
-                    {bttvPro && imgBadge(bttvPro.src, 'BTTV Pro', 'bttvpro')}
                   </div>
                 );
               })()}
+
+              {/* Close — inline at the top-right so it can't collide with the
+                  rank number. stopPropagation so it never starts a drag. */}
+              <button
+                onClick={close}
+                aria-label="Close"
+                onPointerDown={(e) => e.stopPropagation()}
+                className="-mr-1 -mt-1 flex-shrink-0 self-start rounded p-1.5 text-textMuted transition-colors hover:bg-white/[0.10] hover:text-textPrimary"
+              >
+                <X size={16} />
+              </button>
             </div>
-            <button
-              onClick={close}
-              aria-label="Close"
-              className="rounded p-1.5 text-textMuted transition-colors hover:bg-white/[0.06] hover:text-textPrimary"
-            >
-              <X size={16} />
-            </button>
           </div>
 
-          {/* Scrollable content */}
-          <div className="scrollbar-thin relative flex-1 overflow-y-auto p-3">
+          {/* Content region. The atmosphere continues behind here (so it themes
+              the WHOLE profile) but is softened to an ambient wash by a heavy
+              blur + dim cover, so it's felt without competing with the stats.
+              The panels stay semi-translucent so a hint of the wash tints them. */}
+          <div className="relative z-[1] min-h-0 flex-1">
+            {hasAtmosphere && (
+              <div className="pointer-events-none absolute inset-0 bg-[rgba(10,10,14,0.58)] backdrop-blur-[44px]" />
+            )}
+            <div
+              className="scrollbar-thin relative z-[1] h-full overflow-y-auto p-3"
+              style={hasAtmosphere ? ({ '--glass-strength': '0.45' } as CSSProperties & Record<string, string>) : undefined}
+            >
             {loading ? (
               <div className="flex h-32 items-center justify-center">
                 <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-white/70" />
@@ -494,27 +661,22 @@ const PublicProfileOverlay = () => {
             ) : (
               <ProfileCompactContext.Provider value={true}>
               <ProfileAccentContext.Provider value={themeRgb}>
-                <div className="space-y-4">
-                  {memberNumber !== null && (
-                    <div className="flex justify-center">
-                      <StreamNookTierCard userNumber={memberNumber} cosmeticName={cosmeticName} />
-                    </div>
-                  )}
-                  <ProfileOverview
-                    isOwnProfile={false}
-                    userId={userId}
-                    login={info.login}
-                    broadcasterType=""
-                    streamNookUserNumber={memberNumber}
-                    seventvPaintCount={counts.paints}
-                    seventvBadgeCount={counts.badges}
-                    ownedCosmeticsCount={counts.sn}
-                    hiddenSections={hiddenSections}
-                  />
-                </div>
+                <ProfileOverview
+                  isOwnProfile={false}
+                  userId={userId}
+                  login={info.login}
+                  displayName={info.displayName}
+                  broadcasterType=""
+                  streamNookUserNumber={memberNumber}
+                  seventvPaintCount={counts.paints}
+                  seventvBadgeCount={counts.badges}
+                  ownedCosmeticsCount={counts.sn}
+                  hiddenSections={effectiveHiddenSections}
+                />
               </ProfileAccentContext.Provider>
               </ProfileCompactContext.Provider>
             )}
+            </div>
           </div>
         </motion.div>
       )}

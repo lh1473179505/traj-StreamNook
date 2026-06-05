@@ -359,6 +359,10 @@ export interface UserStats {
     hours_watched: number;
     messages_sent: number;
     streams_watched: number;
+    // How many times other members have opened this member's public profile.
+    // Bumped by the `increment_profile_view` RPC; optional so older rows / a
+    // pre-migration DB don't break the read.
+    profile_views?: number;
     updated_at: string;
 }
 
@@ -602,6 +606,62 @@ export const getUserStats = async (userId: string): Promise<UserStats | null> =>
         return data as UserStats || null;
     } catch (error) {
         Logger.error('[Supabase] Failed to get user stats:', error);
+        return null;
+    }
+};
+
+// Profiles already counted this app session, so reopening a member's profile in
+// the same session doesn't keep inflating their view count (deduped total).
+const countedProfileViews = new Set<string>();
+
+/**
+ * Record a profile view: bump the VIEWED member's `profile_views` via the
+ * `increment_profile_view` RPC (security definer, so a viewer can increment
+ * someone else's count). Deduped per session. Returns the new total, or null if
+ * it was deduped / the RPC isn't available yet (best-effort, never throws).
+ */
+export const incrementProfileView = async (userId: string): Promise<number | null> => {
+    if (!supabase || !userId) return null;
+    if (countedProfileViews.has(userId)) return null; // already counted this session
+    countedProfileViews.add(userId);
+    try {
+        const { data, error } = await supabase.rpc('increment_profile_view', { p_user_id: userId });
+        if (error) {
+            // Missing column / RPC (pre-migration DB): degrade silently. Drop the
+            // session mark so it can retry once the backend exists.
+            countedProfileViews.delete(userId);
+            Logger.debug('[Supabase] increment_profile_view unavailable:', error.message);
+            return null;
+        }
+        return typeof data === 'number' ? data : null;
+    } catch (error) {
+        countedProfileViews.delete(userId);
+        Logger.debug('[Supabase] incrementProfileView failed:', error);
+        return null;
+    }
+};
+
+/**
+ * Read a member's current `profile_views` count without incrementing (used when
+ * we shouldn't count: own profile, the live preview, or an already-counted view).
+ * Returns null if unavailable.
+ */
+export const getProfileViews = async (userId: string): Promise<number | null> => {
+    if (!supabase || !userId) return null;
+    try {
+        const { data, error } = await supabase
+            .from('user_stats')
+            .select('profile_views')
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (error) {
+            Logger.debug('[Supabase] getProfileViews failed:', error.message);
+            return null;
+        }
+        const n = (data as { profile_views?: number } | null)?.profile_views;
+        return typeof n === 'number' ? n : null;
+    } catch (error) {
+        Logger.debug('[Supabase] getProfileViews failed:', error);
         return null;
     }
 };

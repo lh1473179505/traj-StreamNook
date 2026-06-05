@@ -487,6 +487,27 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   },
   {
     tab: 'Interface',
+    section: 'Motion',
+    sectionId: 'settings-section-motion',
+    title: 'Animations',
+    description: 'Choose how much the interface animates: Full, Reduced (fades only), or Off (instant and snappy, best for low-end PCs).'
+  },
+  {
+    tab: 'Interface',
+    section: 'Motion',
+    sectionId: 'settings-section-motion',
+    title: 'Reduce motion',
+    description: 'Reduce or turn off animations and transitions for accessibility or performance.'
+  },
+  {
+    tab: 'Interface',
+    section: 'Settings Window',
+    sectionId: 'settings-section-settings-window',
+    title: 'Compact settings window',
+    description: 'Show settings in a centered window, or turn off for a full-page settings layout that fills the entire app.'
+  },
+  {
+    tab: 'Interface',
     section: 'Compact View',
     title: 'Compact View',
     description: 'Choose the window size when entering Compact View mode. Perfect for fitting the app on a second monitor.'

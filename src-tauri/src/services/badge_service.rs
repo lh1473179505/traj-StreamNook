@@ -1174,6 +1174,22 @@ impl BadgeService {
         None
     }
 
+    /// Resolve ONLY a user's real chat-client (third-party) badges from the
+    /// already-prefetched provider databases. Pure in-memory cache lookup: no
+    /// Twitch GQL, no token, no network round-trip, so it is safe to call once
+    /// per chatter in the live chat path. Display/earned are left empty (chat
+    /// renders Twitch badges straight from IRC tags). BTTV *Pro* loyalty badges
+    /// are intentionally NOT included here: they live behind a per-user live
+    /// socket lookup, the one thing that would reintroduce a per-chatter network
+    /// cost, so Pro stays an opt-in identity badge resolved elsewhere.
+    pub async fn get_third_party_badges_only(&self, user_id: &str) -> UserBadgesResponse {
+        UserBadgesResponse {
+            display_badges: Vec::new(),
+            earned_badges: Vec::new(),
+            third_party_badges: self.get_third_party_badges_for_user(user_id).await,
+        }
+    }
+
     async fn get_third_party_badges_for_user(&self, user_id: &str) -> Vec<UserBadge> {
         let cache = self.cache.read().await;
         let mut badges = Vec::new();
@@ -1242,7 +1258,7 @@ impl BadgeService {
         // Chatterino badges
         if let Some(chatterino) = &cache.third_party.chatterino {
             for badge in &chatterino.badges {
-                if badge.users.contains(&user_id.to_string()) {
+                if badge.users.iter().any(|u| u == user_id) {
                     badges.push(UserBadge {
                         badge_info: BadgeInfo {
                             id: format!("chatterino-{}", badge.tooltip),
@@ -1269,7 +1285,7 @@ impl BadgeService {
         // Homies badges
         if let Some(homies) = &cache.third_party.homies {
             for badge in &homies.badges {
-                if badge.users.contains(&user_id.to_string()) {
+                if badge.users.iter().any(|u| u == user_id) {
                     badges.push(UserBadge {
                         badge_info: BadgeInfo {
                             id: format!("homies-{}", badge.tooltip),

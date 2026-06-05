@@ -56,6 +56,13 @@ pub struct LinkPreview {
 // many seconds to preview.
 const HEAD_SCAN_CAP: usize = 512 * 1024;
 
+// YouTube channel/profile pages bury their OG tags ~635 KB into a ~977 KB <head>
+// (everything before them is ytcfg / inline JSON), well past the default cap, so
+// the generic scrape stopped short and returned "no preview metadata" for every
+// channel link. They need a larger ceiling. Scoped to that one path so the
+// chat-firehose default stays tight.
+const YT_CHANNEL_SCAN_CAP: usize = 1536 * 1024;
+
 // --- HTTP client -----------------------------------------------------------
 
 /// Dedicated client with a desktop browser UA. Many sites only emit OG tags to
@@ -253,6 +260,7 @@ async fn youtube_channel_preview(url: &str) -> Result<LinkPreview, String> {
     let mut preview = fetch_generic_with_cookie(
         url,
         Some("SOCS=CAISNQgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg; CONSENT=YES+"),
+        YT_CHANNEL_SCAN_CAP,
     )
     .await?;
     preview.kind = "youtube_channel".to_string();
@@ -1235,7 +1243,7 @@ async fn tenor_preview(url: &str) -> Result<LinkPreview, String> {
         _ => return fetch_generic(url).await,
     };
 
-    let body = read_capped_body(resp).await?;
+    let body = read_capped_body(resp, HEAD_SCAN_CAP).await?;
     let html = String::from_utf8_lossy(&body).into_owned();
 
     // Scope the parsed document so it's dropped before the fallback await below:
@@ -1314,7 +1322,7 @@ fn is_image_url(url: &str) -> bool {
 /// `<head>`, so this is all we need — it turns a multi-MB download + full-DOM
 /// parse into reading the first few KB of most pages. Shared by the generic
 /// scraper and the Tenor extractor.
-async fn read_capped_body(mut resp: reqwest::Response) -> Result<Vec<u8>, String> {
+async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     loop {
         match resp.chunk().await {
@@ -1330,7 +1338,7 @@ async fn read_capped_body(mut resp: reqwest::Response) -> Result<Vec<u8>, String
                 {
                     break;
                 }
-                if buf.len() >= HEAD_SCAN_CAP {
+                if buf.len() >= cap {
                     break;
                 }
             }
@@ -1342,13 +1350,19 @@ async fn read_capped_body(mut resp: reqwest::Response) -> Result<Vec<u8>, String
 }
 
 async fn fetch_generic(url: &str) -> Result<LinkPreview, String> {
-    fetch_generic_with_cookie(url, None).await
+    fetch_generic_with_cookie(url, None, HEAD_SCAN_CAP).await
 }
 
-/// `fetch_generic`, optionally sending a `Cookie` header. The cookie skips
-/// Google's consent interstitial on YouTube channel pages (which otherwise
-/// carries no OG tags); it's None for every other host.
-async fn fetch_generic_with_cookie(url: &str, cookie: Option<&str>) -> Result<LinkPreview, String> {
+/// `fetch_generic`, optionally sending a `Cookie` header and using a caller-chosen
+/// head-scan ceiling. The cookie skips Google's consent interstitial on YouTube
+/// channel pages (which otherwise carries no OG tags); it's None for every other
+/// host. `cap` lets the YouTube channel path read deep enough to reach its OG
+/// tags while the chat firehose keeps the tight default.
+async fn fetch_generic_with_cookie(
+    url: &str,
+    cookie: Option<&str>,
+    cap: usize,
+) -> Result<LinkPreview, String> {
     // A tighter per-request timeout than the client default: a generic preview is
     // a "nice to have", so don't let an unresponsive host hold the UI's loading
     // state for the full client budget.
@@ -1398,7 +1412,7 @@ async fn fetch_generic_with_cookie(url: &str, cookie: Option<&str>) -> Result<Li
     }
 
     // Read only the page <head> (capped), then parse meta tags from it.
-    let buf = read_capped_body(resp).await?;
+    let buf = read_capped_body(resp, cap).await?;
     let html = String::from_utf8_lossy(&buf).into_owned();
     let preview = parse_meta(url, &html);
 

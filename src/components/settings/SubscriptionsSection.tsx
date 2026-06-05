@@ -170,14 +170,9 @@ const SubscriptionsSection = ({ login }: { login: string }) => {
       ) : (
         <>
           {/* Spend headline */}
-          <div className="mb-4 rounded-lg border border-white/[0.06] bg-white/[0.03] p-4">
+          <div className="glass-tile mb-4 p-4">
             <div className="mb-1 flex items-center gap-2">
-              <span
-                className="flex h-7 w-7 items-center justify-center rounded-md"
-                style={{ background: 'rgba(140, 195, 170, 0.22)', border: '1px solid transparent' }}
-              >
-                <DollarSign size={14} strokeWidth={2.25} className="text-textPrimary" />
-              </span>
+              <DollarSign size={17} strokeWidth={2.25} style={{ color: '#8fd4b4' }} />
               <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-textMuted">
                 Poured into Twitch
               </span>

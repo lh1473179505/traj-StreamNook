@@ -823,6 +823,17 @@ impl MiningService {
                                         tokio::time::interval(tokio::time::Duration::from_secs(60)); // Poll every minute
                                     poll_interval.tick().await; // Skip first immediate tick
 
+                                    // Persist across poll iterations so we can tell a not-yet-
+                                    // started campaign (never in inventory) apart from a finished
+                                    // one (was in inventory, now gone because its last drop was
+                                    // claimed and Twitch evicted the campaign from
+                                    // dropCampaignsInProgress). Only the latter is "complete";
+                                    // without this distinction the 0-progress display fallback
+                                    // below keeps resurrecting a finished campaign at 0% and mining
+                                    // never stops.
+                                    let mut ever_seen_campaign_in_inventory = false;
+                                    let mut consecutive_absences_after_seen: u32 = 0;
+
                                     loop {
                                         if !*is_running_poll.read().await {
                                             debug!("Stopping inventory polling loop for {} (mining stopped)", game_name_session);
@@ -867,6 +878,7 @@ impl MiningService {
                                                     i32,
                                                     f32,
                                                 )> = Vec::new();
+                                                let mut campaign_found_in_inventory = false;
 
                                                 for item in &inventory.items {
                                                     if item.campaign.game_name != game_name_poll {
@@ -885,6 +897,7 @@ impl MiningService {
                                                         "Found target campaign for {}: {}",
                                                         item.campaign.game_name, item.campaign.name
                                                     );
+                                                    campaign_found_in_inventory = true;
 
                                                     for time_drop in &item.campaign.time_based_drops
                                                     {
@@ -952,9 +965,28 @@ impl MiningService {
                                                     }
                                                 }
 
-                                                // FALLBACK: If inventory didn't contain our campaign (0 progress case),
-                                                // use the target_campaign_drops we cached from the API
+                                                // Did the campaign we are mining appear in the
+                                                // in-progress inventory this pass? Once we have seen
+                                                // it, a later disappearance means its last drop was
+                                                // claimed and Twitch evicted the whole campaign from
+                                                // dropCampaignsInProgress, which is itself a
+                                                // completion signal (handled below).
+                                                if campaign_found_in_inventory {
+                                                    ever_seen_campaign_in_inventory = true;
+                                                    consecutive_absences_after_seen = 0;
+                                                } else if ever_seen_campaign_in_inventory {
+                                                    consecutive_absences_after_seen += 1;
+                                                }
+
+                                                // FALLBACK: If the campaign has never appeared in
+                                                // inventory yet (genuine 0-progress fresh start),
+                                                // show the cached drops at 0% so the card isn't
+                                                // blank. Gated on !ever_seen so a FINISHED campaign
+                                                // (empty list because every drop is done) is never
+                                                // resurrected at 0% — that masked completion and was
+                                                // why mining never stopped.
                                                 if all_drops_with_progress.is_empty()
+                                                    && !ever_seen_campaign_in_inventory
                                                     && !target_campaign_drops.is_empty()
                                                 {
                                                     debug!("Campaign not in inventory yet (0 progress), using cached campaign drops as fallback");
@@ -1110,8 +1142,18 @@ impl MiningService {
                                                     }));
                                                 }
 
-                                                // Drop completion detection
-                                                if all_drops_with_progress.is_empty() {
+                                                // Drop completion detection. Complete when no
+                                                // incomplete mineable drops remain AND either the
+                                                // campaign is still present this pass (we can see
+                                                // every drop is finished) or it was present earlier
+                                                // and has now been gone for two straight polls (last
+                                                // drop claimed + campaign evicted from inventory).
+                                                // The two-poll grace rides out a transient inventory
+                                                // hiccup so a still-running campaign is never stopped.
+                                                if all_drops_with_progress.is_empty()
+                                                    && (campaign_found_in_inventory
+                                                        || consecutive_absences_after_seen >= 2)
+                                                {
                                                     debug!("All drops for campaign '{}' ({}) are complete (100%)!", campaign_name_session, game_name_session);
 
                                                     {
@@ -1749,6 +1791,17 @@ impl MiningService {
                                         tokio::time::interval(tokio::time::Duration::from_secs(60)); // Poll every minute
                                     poll_interval.tick().await; // Skip first immediate tick
 
+                                    // Persist across poll iterations so we can tell a not-yet-
+                                    // started campaign (never in inventory) apart from a finished
+                                    // one (was in inventory, now gone because its last drop was
+                                    // claimed and Twitch evicted the campaign from
+                                    // dropCampaignsInProgress). Only the latter is "complete";
+                                    // without this distinction the 0-progress display fallback
+                                    // below keeps resurrecting a finished campaign at 0% and mining
+                                    // never stops.
+                                    let mut ever_seen_campaign_in_inventory = false;
+                                    let mut consecutive_absences_after_seen: u32 = 0;
+
                                     loop {
                                         if !*is_running_poll.read().await {
                                             debug!("Stopping inventory polling loop for {} (mining stopped)", game_name_session);
@@ -1796,6 +1849,7 @@ impl MiningService {
                                                     i32,    // required_minutes
                                                     f32,    // progress_percentage
                                                 )> = Vec::new();
+                                                let mut campaign_found_in_inventory = false;
 
                                                 for item in &inventory.items {
                                                     // Filter by SPECIFIC CAMPAIGN - only show drops from the campaign user clicked on
@@ -1817,6 +1871,7 @@ impl MiningService {
                                                         "Found target campaign for {}: {}",
                                                         item.campaign.game_name, item.campaign.name
                                                     );
+                                                    campaign_found_in_inventory = true;
 
                                                     for time_drop in &item.campaign.time_based_drops
                                                     {
@@ -1830,11 +1885,18 @@ impl MiningService {
                                                         let required_minutes =
                                                             time_drop.required_minutes_watched;
 
+                                                        // Skip subscription / event drops (0 required
+                                                        // minutes) - they can't be mined and would
+                                                        // otherwise keep the list non-empty forever,
+                                                        // masking campaign completion.
+                                                        if required_minutes == 0 {
+                                                            debug!("Skipping subscription drop: {} (0 required minutes)",
+                                                                time_drop.name);
+                                                            continue;
+                                                        }
+
                                                         // Skip drops that are already complete (100%+)
-                                                        // Only skip if required_minutes > 0 to avoid division issues
-                                                        if required_minutes > 0
-                                                            && current_minutes >= required_minutes
-                                                        {
+                                                        if current_minutes >= required_minutes {
                                                             debug!("Skipping completed drop: {} ({}/{} minutes)",
                                                                 time_drop.name, current_minutes, required_minutes);
                                                             continue;
@@ -1881,9 +1943,28 @@ impl MiningService {
                                                     }
                                                 }
 
-                                                // FALLBACK: If inventory didn't contain our campaign (0 progress case),
-                                                // use the target_campaign_drops we cached from the API
+                                                // Did the campaign we are mining appear in the
+                                                // in-progress inventory this pass? Once we have seen
+                                                // it, a later disappearance means its last drop was
+                                                // claimed and Twitch evicted the whole campaign from
+                                                // dropCampaignsInProgress, which is itself a
+                                                // completion signal (handled below).
+                                                if campaign_found_in_inventory {
+                                                    ever_seen_campaign_in_inventory = true;
+                                                    consecutive_absences_after_seen = 0;
+                                                } else if ever_seen_campaign_in_inventory {
+                                                    consecutive_absences_after_seen += 1;
+                                                }
+
+                                                // FALLBACK: If the campaign has never appeared in
+                                                // inventory yet (genuine 0-progress fresh start),
+                                                // show the cached drops at 0% so the card isn't
+                                                // blank. Gated on !ever_seen so a FINISHED campaign
+                                                // (empty list because every drop is done) is never
+                                                // resurrected at 0% — that masked completion and was
+                                                // why mining never stopped.
                                                 if all_drops_with_progress.is_empty()
+                                                    && !ever_seen_campaign_in_inventory
                                                     && !target_campaign_drops.is_empty()
                                                 {
                                                     debug!("Campaign not in inventory yet (0 progress), using cached campaign drops as fallback");
@@ -2056,7 +2137,18 @@ impl MiningService {
                                                 // - This handles both single campaign (stop) and Mine All Game (frontend starts next)
                                                 //
                                                 // For start_mining (auto-mining mode), it has its own loop that continues globally.
-                                                if all_drops_with_progress.is_empty() {
+                                                //
+                                                // Complete when no incomplete mineable drops remain
+                                                // AND either the campaign is still present this pass
+                                                // (every drop visibly finished) or it was present
+                                                // earlier and has now been gone for two straight
+                                                // polls (last drop claimed + campaign evicted from
+                                                // inventory). The two-poll grace rides out a
+                                                // transient inventory blip.
+                                                if all_drops_with_progress.is_empty()
+                                                    && (campaign_found_in_inventory
+                                                        || consecutive_absences_after_seen >= 2)
+                                                {
                                                     debug!("All drops for campaign '{}' ({}) are complete (100%)!", campaign_name_session, game_name_session);
                                                     debug!("Campaign mining complete - stopping and notifying frontend");
 

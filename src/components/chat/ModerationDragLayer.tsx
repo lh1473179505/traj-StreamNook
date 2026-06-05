@@ -100,12 +100,20 @@ export default function ModerationDragLayer() {
     const panel = document.querySelector('[data-chat-panel]') as HTMLElement | null;
     const rect = panel?.getBoundingClientRect();
 
-    // Bar: a horizontal row centered just above the grabbed MESSAGE (not the
-    // whole chat widget), using the pickup point's Y; centered over chat.
+    // Bar: a horizontal row centered above the grabbed MESSAGE. Anchor to the
+    // message row's TOP edge (not the pickup point's Y) so the bar always opens
+    // fully clear above the whole message — never overlapping it or sitting
+    // right next to the cursor, no matter where on the row you grabbed.
+    // Horizontally centered over chat.
     if (dragLayout === 'bar') {
       const { origin } = useDragModerationStore.getState();
       const cx = rect && rect.width > 0 ? rect.left + rect.width / 2 : origin.x;
-      setAnchorStyle({ top: Math.max(8, origin.y - 8), left: cx, transform: 'translate(-50%, -100%)' });
+      const msgEl = dragged.messageId
+        ? (document.querySelector(`[data-message-id="${dragged.messageId}"]`) as HTMLElement | null)
+        : null;
+      const msgRect = msgEl?.getBoundingClientRect();
+      const anchorY = msgRect && msgRect.height > 0 ? msgRect.top : origin.y;
+      setAnchorStyle({ top: Math.max(8, anchorY - 10), left: cx, transform: 'translate(-50%, -100%)' });
       return;
     }
 

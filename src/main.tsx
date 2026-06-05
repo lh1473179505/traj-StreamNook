@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
 import ProfileCardPage from './pages/ProfileCardPage.tsx';
 import MultiChatWindow from './components/multichat/MultiChatWindow.tsx';
+import { MotionScope } from './components/MotionScope.tsx';
 // Side-effect import: registers `window.openMultiChatWindow` for popout spawning.
 import './utils/multichatWindow';
 // Side-effect import: listens for the tray's "Open MultiChat" menu event and
@@ -33,6 +34,8 @@ const isMultiChat = hash.startsWith('#/multichat');
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {isMultiChat ? <MultiChatWindow /> : isProfileCard ? <ProfileCardPage /> : <App />}
+    <MotionScope>
+      {isMultiChat ? <MultiChatWindow /> : isProfileCard ? <ProfileCardPage /> : <App />}
+    </MotionScope>
   </React.StrictMode>
 );

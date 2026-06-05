@@ -197,6 +197,39 @@ export async function getAllUserBadgesWithEarned(
 }
 
 /**
+ * Resolve ONLY a user's real chat-client (third-party) badges — their actual
+ * BTTV / FFZ / Chatterino / Homies / Chatsen / Chatty / DankChat badges — from
+ * the prefetched provider databases. Cache-only on the Rust side (no Twitch
+ * token, no network round-trip), so chat can call it once per chatter. Returns
+ * only the third-party set; Twitch and 7TV badges are resolved on their own
+ * paths. Does NOT include the BTTV Pro loyalty badge (that needs a per-user
+ * live socket lookup and stays an opt-in identity badge).
+ */
+export async function getGlobalThirdPartyBadges(userId: string): Promise<ThirdPartyBadge[]> {
+  try {
+    const rustResponse: RustUserBadgesResponse = await invoke('get_third_party_badges_for_user_unified', {
+      userId,
+    });
+    return (rustResponse.third_party_badges || []).map((b: RustUserBadge) => {
+      const imageUrl = b.badge_info.image_4x || b.badge_info.image_2x || b.badge_info.image_1x;
+      return {
+        id: b.badge_info.id,
+        title: b.badge_info.title,
+        imageUrl,
+        image1x: b.badge_info.image_1x || imageUrl,
+        image2x: b.badge_info.image_2x || imageUrl,
+        image4x: b.badge_info.image_4x || imageUrl,
+        provider: b.provider,
+        link: b.badge_info.click_url,
+      };
+    });
+  } catch (error) {
+    Logger.error('[badgeService] Failed to get global third-party badges:', error);
+    return [];
+  }
+}
+
+/**
  * Parse a badge string from IRC (e.g., "subscriber/12,premium/1")
  * Returns array of badge IDs
  */

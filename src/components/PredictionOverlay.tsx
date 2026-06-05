@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { Trophy, Users, ChevronDown, ChevronUp, Hourglass, PartyPopper, Frown, RefreshCw, CheckCircle2, XCircle } from 'lucide-react';
+import { motion } from 'framer-motion';
 
 // Channel Points Icon (Twitch style)
 const ChannelPointsIcon = ({ className = "", size = 14 }: { className?: string; size?: number }) => (
@@ -488,7 +489,15 @@ const PredictionOverlay = ({ channelId, channelLogin, isHypeTrainActive = false 
   if (!activePrediction) return null;
 
   return (
-    <div className={`absolute ${isHypeTrainActive ? 'top-16' : 'top-10'} left-2 right-2 z-40 transition-all duration-300 ease-in-out`}>
+    // Eases in (fade + slight drop/scale) instead of snapping. transition-[top]
+    // keeps the CSS easing for the hype-train position shift only, leaving the
+    // transform/opacity entrance to framer so the two don't fight.
+    <motion.div
+      initial={{ opacity: 0, y: -12, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+      className={`absolute ${isHypeTrainActive ? 'top-16' : 'top-10'} left-2 right-2 z-40 transition-[top] duration-300 ease-in-out`}
+    >
       {/* Floating overlay with shadow effect */}
       <div className="bg-background rounded-lg border border-border shadow-lg shadow-black/30 overflow-hidden">
         {/* Header - Always visible with channel points */}
@@ -791,7 +800,7 @@ const PredictionOverlay = ({ channelId, channelLogin, isHypeTrainActive = false 
           </div>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 };
 

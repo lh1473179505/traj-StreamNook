@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import {
@@ -52,6 +52,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { Tooltip } from '../ui/Tooltip';
+import { TwitchGlyph, TwitchVerifiedMark } from '../ui/TwitchGlyph';
 import { Logger } from '../../utils/logger';
 import {
   getUserStats,
@@ -88,17 +89,21 @@ interface ProfileOverviewProps {
   // Section keys the member hid from their public profile (honored only when
   // !isOwnProfile). Keys: roast, twitch, lifetime, emotes, accolades.
   hiddenSections?: string[];
+  // The viewed member's display name, used for contextual possessive labels
+  // (e.g. "Tyler's Twitch") when viewing someone else. Falls back to `login`.
+  displayName?: string;
 }
 
-// Soft, flat tints reused from the settings tile palette. No glow, just a
-// faint wash behind each stat icon.
-const TINT = {
-  violet: 'rgba(140, 120, 200, 0.20)',
-  sky: 'rgba(120, 175, 215, 0.22)',
-  green: 'rgba(140, 195, 170, 0.22)',
-  amber: 'rgba(220, 180, 120, 0.20)',
-  rose: 'rgba(210, 140, 150, 0.20)',
-  slate: 'rgba(150, 170, 185, 0.22)',
+// Per-stat icon colors. The color now lives on the ICON itself (vibrant, but
+// not neon), not on a flat background chip — so the row reads as a clean set of
+// colored marks rather than a rainbow of pressable-looking tiles.
+const ICON_COLOR = {
+  violet: '#b9a6ec',
+  sky: '#8fc3e8',
+  green: '#8fd4b4',
+  amber: '#e6c178',
+  rose: '#e493a0',
+  slate: '#aebfca',
 };
 
 
@@ -138,20 +143,25 @@ const useCountUp = (target: number, durationMs = 900): number => {
 
 const StatTile = ({
   icon: Icon,
+  glyph,
   label,
   count,
   value,
   caption,
-  tint,
+  color,
   tooltip,
 }: {
-  icon: LucideIcon;
+  icon?: LucideIcon;
+  // A branded mark (e.g. the Twitch logo) shown instead of a Lucide icon. The
+  // caller controls its size/color.
+  glyph?: ReactNode;
   label: string;
   // Provide `count` for an animated number, or `value` for a fixed string.
   count?: number;
   value?: string;
   caption?: string;
-  tint: string;
+  // Vibrant color applied to the ICON itself (no background chip).
+  color?: string;
   tooltip?: string;
 }) => {
   const animated = useCountUp(count ?? 0);
@@ -159,23 +169,21 @@ const StatTile = ({
   const accentRgb = useContext(ProfileAccentContext);
   const compact = useContext(ProfileCompactContext);
   const inner = (
+    // glass-tile = display depth (top-lit material + layering), NOT a button.
     <div
-      className={`h-full rounded-lg border border-white/[0.06] bg-white/[0.03] transition-colors hover:border-white/[0.12] hover:bg-white/[0.05] ${compact ? 'p-3' : 'p-4'}`}
-      style={accentRgb ? { borderColor: `rgba(${accentRgb}, 0.22)`, backgroundColor: `rgba(${accentRgb}, 0.05)` } : undefined}
+      className={`glass-tile h-full ${compact ? 'p-2.5' : 'p-4'}`}
+      style={accentRgb ? { borderColor: `rgba(${accentRgb}, 0.16)` } : undefined}
     >
-      <div className="mb-2 flex items-center gap-2">
-        <span
-          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md"
-          style={{ background: tint, border: '1px solid transparent' }}
-        >
-          <Icon size={14} strokeWidth={2.25} className="text-textPrimary" />
+      <div className={`flex items-center gap-1.5 ${compact ? 'mb-1' : 'mb-2'}`}>
+        <span className="flex flex-shrink-0 items-center justify-center" style={color ? { color } : undefined}>
+          {glyph ?? (Icon ? <Icon size={compact ? 15 : 17} strokeWidth={2.25} /> : null)}
         </span>
-        <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-textMuted">
+        <span className={`font-medium uppercase tracking-[0.08em] text-textMuted ${compact ? 'text-[10px]' : 'text-[11px]'}`}>
           {label}
         </span>
       </div>
-      <div className={`truncate font-bold tabular-nums text-textPrimary ${compact ? 'text-xl' : 'text-2xl'}`}>{display}</div>
-      {caption && <div className="mt-1 text-[11px] leading-snug text-textSecondary">{caption}</div>}
+      <div className={`truncate font-bold tabular-nums text-textPrimary ${compact ? 'text-base' : 'text-2xl'}`}>{display}</div>
+      {caption && <div className={`leading-snug text-textSecondary ${compact ? 'mt-0.5 text-[10px]' : 'mt-1 text-[11px]'}`}>{caption}</div>}
     </div>
   );
   return (
@@ -315,6 +323,11 @@ const describeAccountAge = (createdAt: string | null) => {
   return { ageLabel, years, caption, exact };
 };
 
+// "Tyler" -> "Tyler's", "Chris" -> "Chris'". Used for contextual section labels
+// when viewing another member's profile.
+const possessive = (name: string): string =>
+  /s$/i.test(name) ? `${name}'` : `${name}'s`;
+
 const ProfileOverview = ({
   userId,
   login,
@@ -325,6 +338,7 @@ const ProfileOverview = ({
   ownedCosmeticsCount,
   isOwnProfile = true,
   hiddenSections = [],
+  displayName,
 }: ProfileOverviewProps) => {
   const [stats, setStats] = useState<UserStats | null>(null);
   const [followers, setFollowers] = useState<number | null>(null);
@@ -528,214 +542,261 @@ const ProfileOverview = ({
   // viewing someone else (the self settings view always shows everything).
   const sectionHidden = (key: string) => !isOwnProfile && hiddenSections.includes(key);
   const sectionStyle = accentRgb ? { borderColor: `rgba(${accentRgb}, 0.3)` } : undefined;
-  const sectionPad = compact ? 'p-4' : 'p-5';
-  const gridGap = compact ? 'gap-2.5' : 'gap-3';
-  const headMb = compact ? 'mb-3' : 'mb-4';
+  const sectionPad = compact ? 'p-3.5' : 'p-5';
+  const gridGap = compact ? 'gap-2' : 'gap-3';
+  const headMb = compact ? 'mb-2.5' : 'mb-4';
+  // Contextual section label: your own profile says "Your", another member's
+  // says e.g. "Tyler's".
+  const twitchLabel = isOwnProfile ? 'Your Twitch' : `${possessive(displayName ?? login)} Twitch`;
   // In the compact overlay, show only earned accolades by default (it's a public
   // showcase) with an expander for the locked ones, so the wall doesn't dominate.
   const accoladesShown = compact && !showAllAccolades ? earnedMedallions : sortedAccolades;
 
-  return (
-    <div className={compact ? 'space-y-4' : 'space-y-6'}>
-      {/* Hours-watched roast hero. The whole card is a re-roll button. */}
-      {!sectionHidden('roast') && (
-      <motion.button
-        type="button"
-        onClick={compact ? undefined : rerollRoast}
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: 'easeOut' }}
-        className={`w-full rounded-xl glass-panel text-left transition-colors ${
-          compact ? 'cursor-default p-4' : 'group p-6 hover:bg-white/[0.02]'
-        }`}
-        style={sectionStyle}
+  // Each section is computed once, then arranged differently per layout:
+  // compact (public/preview) is a wide landscape grid; full (Settings) is the
+  // original vertical stack. Sections keep their own hide guards.
+
+  // Hours-watched roast hero. The whole card is a re-roll button (pressable).
+  const heroEl = sectionHidden('roast') ? null : (
+    <motion.button
+      type="button"
+      onClick={compact ? undefined : rerollRoast}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
+      className={`w-full rounded-xl glass-panel text-left transition-colors ${
+        compact ? 'h-full cursor-default p-4' : 'group p-6 hover:bg-white/[0.02]'
+      }`}
+      style={sectionStyle}
+    >
+      <div className={`flex items-center gap-2 ${compact ? 'mb-2' : 'mb-3'}`}>
+        <Clock size={16} strokeWidth={2.25} style={{ color: ICON_COLOR.amber }} />
+        <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-textMuted">
+          Hours watched
+        </span>
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className={`font-bold tabular-nums text-textPrimary ${compact ? 'text-4xl' : 'text-5xl'}`}>
+          {animatedHours.toLocaleString()}
+        </span>
+        <span className="text-sm text-textMuted">hrs</span>
+      </div>
+      {roast && (
+        <div className={`flex items-start justify-between gap-3 ${compact ? 'mt-2' : 'mt-3'}`}>
+          <p className={`leading-relaxed text-textSecondary ${compact ? 'text-[12px]' : 'text-[15px]'}`}>
+            {roast.text}
+          </p>
+          {!compact && (
+            <span className="mt-0.5 inline-flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-textMuted opacity-0 transition-opacity group-hover:opacity-100">
+              <Dices size={12} /> Tap for another
+            </span>
+          )}
+        </div>
+      )}
+    </motion.button>
+  );
+
+  const twitchEl = sectionHidden('twitch') ? null : (
+    <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
+      <h4 className={`${headMb} flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-textPrimary`}>
+        <TwitchGlyph size={14} className="text-[#9146FF]" /> {twitchLabel}
+      </h4>
+      <motion.div
+        variants={containerV}
+        initial="hidden"
+        animate="show"
+        className={`grid grid-cols-2 ${gridGap} ${compact ? '' : 'sm:grid-cols-3'}`}
       >
-        <div className="mb-3 flex items-center gap-2">
-          <span
-            className="flex h-7 w-7 items-center justify-center rounded-md"
-            style={{ background: TINT.amber, border: '1px solid transparent' }}
-          >
-            <Clock size={14} strokeWidth={2.25} className="text-textPrimary" />
-          </span>
-          <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-textMuted">
-            Hours watched
-          </span>
+        {age ? (
+          <StatTile icon={Cake} label="Twitch age" value={age.ageLabel} caption={age.caption} color={ICON_COLOR.rose} tooltip={`Joined ${age.exact}`} />
+        ) : (
+          <StatTile icon={Cake} label="Twitch age" value="Unknown" color={ICON_COLOR.rose} />
+        )}
+        <StatTile
+          icon={Users}
+          label="Followers"
+          count={followers ?? undefined}
+          value={followers === null ? 'Unknown' : undefined}
+          color={ICON_COLOR.sky}
+        />
+        {/* Account type spans the row in the compact 2-col grid so it fills. */}
+        <div className={compact ? 'col-span-2' : undefined}>
+          <StatTile
+            glyph={
+              accountType === 'Partner' || accountType === 'Twitch Staff' ? (
+                <TwitchVerifiedMark size={17} className="text-[#9146FF]" />
+              ) : accountType === 'Affiliate' ? (
+                <TwitchGlyph size={16} className="text-[#9146FF]" />
+              ) : (
+                <Award size={17} strokeWidth={2.25} style={{ color: ICON_COLOR.violet }} />
+              )
+            }
+            label="Account type"
+            value={accountType}
+          />
         </div>
-        <div className="flex items-baseline gap-2">
-          <span className={`font-bold tabular-nums text-textPrimary ${compact ? 'text-3xl' : 'text-5xl'}`}>
-            {animatedHours.toLocaleString()}
-          </span>
-          <span className="text-sm text-textMuted">hrs</span>
-        </div>
-        {roast && (
-          <div className="mt-3 flex items-start justify-between gap-3">
-            <p className={`leading-relaxed text-textSecondary ${compact ? 'text-[13px]' : 'text-[15px]'}`}>
-              {roast.text}
-            </p>
-            {!compact && (
-              <span className="mt-0.5 inline-flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] font-medium text-textMuted opacity-0 transition-opacity group-hover:opacity-100">
-                <Dices size={12} /> Tap for another
-              </span>
-            )}
+      </motion.div>
+    </div>
+  );
+
+  const lifetimeEl = sectionHidden('lifetime') ? null : (
+    <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
+      <h4 className={`${headMb} flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-textPrimary`}>
+        <Tv size={14} className="text-textMuted" /> Lifetime in StreamNook
+      </h4>
+      <motion.div
+        variants={containerV}
+        initial="hidden"
+        animate="show"
+        className={`grid grid-cols-2 ${gridGap} ${compact ? '' : 'sm:grid-cols-3'}`}
+      >
+        {isOwnProfile && (
+          <StatTile
+            icon={Coins}
+            label="Channel points"
+            count={pointsHeld ?? undefined}
+            value={pointsHeld === null ? 'Unknown' : undefined}
+            caption={pointsChannels > 0 ? `held across ${pointsChannels} channels` : 'watch a stream to start tracking'}
+            color={ICON_COLOR.amber}
+          />
+        )}
+        <StatTile
+          icon={MessageSquare}
+          label="Messages sent"
+          count={messages}
+          caption="into the void"
+          color={ICON_COLOR.green}
+        />
+        <StatTile icon={Tv} label="Streams watched" count={streams} color={ICON_COLOR.sky} />
+        {isOwnProfile && (
+          <StatTile
+            icon={Gift}
+            label="Drops claimed"
+            count={dropsClaimed ?? undefined}
+            value={dropsClaimed === null ? 'Unknown' : undefined}
+            color={ICON_COLOR.violet}
+          />
+        )}
+        <StatTile
+          icon={Palette}
+          label="Cosmetics"
+          count={cosmeticsTotal}
+          caption={`${seventvPaintCount} paints, ${seventvBadgeCount} badges, ${ownedCosmeticsCount} StreamNook`}
+          color={ICON_COLOR.rose}
+        />
+        {favoriteChannel && (
+          <StatTile
+            icon={Heart}
+            label="Favorite channel"
+            value={favoriteChannel.channel_name}
+            caption={`${Math.round(favoriteChannel.minutes / 60).toLocaleString()}h watched`}
+            color={ICON_COLOR.rose}
+          />
+        )}
+        {topPointsChannel && (
+          <StatTile
+            icon={Coins}
+            label="Most points"
+            value={topPointsChannel}
+            caption="channel points banked"
+            color={ICON_COLOR.amber}
+          />
+        )}
+        {streamNookUserNumber !== null && (
+          <StatTile
+            icon={Sparkles}
+            label="Member rank"
+            value={`#${streamNookUserNumber.toLocaleString()}`}
+            caption={
+              totalMembers
+                ? `of ${totalMembers.toLocaleString()}${tier?.label ? ` · ${tier.label}` : ''}`
+                : tier?.label || 'StreamNook member'
+            }
+            color={ICON_COLOR.slate}
+          />
+        )}
+      </motion.div>
+    </div>
+  );
+
+  const subsEl = isOwnProfile ? <SubscriptionsSection login={login} /> : null;
+
+  const emotesEl = sectionHidden('emotes') ? null : <TopEmotesSection userId={userId} />;
+
+  // Accolades - collectible medallions. A big wall, so it anchors the bottom.
+  const accoladesEl = sectionHidden('accolades') ? null : (
+    <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
+      <div className={`flex items-center gap-1.5 ${compact ? 'mb-2.5' : 'mb-5'}`}>
+        <Trophy size={14} className="text-textMuted" />
+        <h4 className="text-sm font-semibold uppercase tracking-wide text-textPrimary">
+          Accolades
+        </h4>
+        <span className="ml-auto text-[11px] tabular-nums text-textMuted">
+          {earnedCount} / {accolades.length} unlocked
+        </span>
+      </div>
+      <motion.div
+        variants={containerV}
+        initial="hidden"
+        animate="show"
+        className={`grid ${compact ? 'grid-cols-6 gap-2.5 sm:grid-cols-8' : 'grid-cols-4 gap-4 sm:grid-cols-6'}`}
+      >
+        {accoladesShown.map((a) => (
+          <AccoladeMedallion key={a.id} a={a} isOwnProfile={isOwnProfile} />
+        ))}
+      </motion.div>
+      {compact && lockedCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowAllAccolades((v) => !v)}
+          className="mt-3 w-full text-[11px] font-medium text-textMuted transition-colors hover:text-textPrimary"
+        >
+          {showAllAccolades ? 'Show fewer' : `Show all ${accolades.length} (${lockedCount} locked)`}
+        </button>
+      )}
+      <div className={`${compact ? 'mt-3' : 'mt-5'} h-1.5 overflow-hidden rounded-full bg-white/[0.06]`}>
+        <div
+          className="h-full rounded-full bg-accent/70 transition-[width] duration-700 ease-out"
+          style={{ width: `${Math.round((earnedCount / accolades.length) * 100)}%` }}
+        />
+      </div>
+    </div>
+  );
+
+  // Compact (public / preview): the hero (hours) leads full width on the solid
+  // content surface (identity + tier emblem live in the overlay's hero band
+  // above), then the two stat sections side by side (items-stretch keeps them
+  // equal height, no L-gap), then the wide grids full width.
+  if (compact) {
+    return (
+      <div className="space-y-3">
+        {heroEl}
+        {twitchEl && lifetimeEl ? (
+          <div className="grid grid-cols-2 items-stretch gap-3">
+            {twitchEl}
+            {lifetimeEl}
           </div>
+        ) : (
+          <>
+            {twitchEl}
+            {lifetimeEl}
+          </>
         )}
-      </motion.button>
-      )}
-
-      {/* Your Twitch */}
-      {!sectionHidden('twitch') && (
-      <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
-        <h4 className={`${headMb} flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-textPrimary`}>
-          <Sparkles size={14} className="text-textMuted" /> Your Twitch
-        </h4>
-        <motion.div
-          variants={containerV}
-          initial="hidden"
-          animate="show"
-          className={`grid grid-cols-2 ${gridGap} sm:grid-cols-3`}
-        >
-          {age ? (
-            <StatTile icon={Cake} label="Twitch age" value={age.ageLabel} caption={age.caption} tint={TINT.rose} tooltip={`Joined ${age.exact}`} />
-          ) : (
-            <StatTile icon={Cake} label="Twitch age" value="Unknown" tint={TINT.rose} />
-          )}
-          <StatTile
-            icon={Users}
-            label="Followers"
-            count={followers ?? undefined}
-            value={followers === null ? 'Unknown' : undefined}
-            tint={TINT.sky}
-          />
-          <StatTile icon={Award} label="Account type" value={accountType} tint={TINT.violet} />
-        </motion.div>
+        {emotesEl}
+        {accoladesEl}
       </div>
-      )}
+    );
+  }
 
-      {/* Lifetime in StreamNook */}
-      {!sectionHidden('lifetime') && (
-      <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
-        <h4 className={`${headMb} flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-textPrimary`}>
-          <Tv size={14} className="text-textMuted" /> Lifetime in StreamNook
-        </h4>
-        <motion.div
-          variants={containerV}
-          initial="hidden"
-          animate="show"
-          className={`grid grid-cols-2 ${gridGap} sm:grid-cols-3`}
-        >
-          {isOwnProfile && (
-            <StatTile
-              icon={Coins}
-              label="Channel points"
-              count={pointsHeld ?? undefined}
-              value={pointsHeld === null ? 'Unknown' : undefined}
-              caption={pointsChannels > 0 ? `held across ${pointsChannels} channels` : 'watch a stream to start tracking'}
-              tint={TINT.amber}
-            />
-          )}
-          <StatTile
-            icon={MessageSquare}
-            label="Messages sent"
-            count={messages}
-            caption="into the void"
-            tint={TINT.green}
-          />
-          <StatTile icon={Tv} label="Streams watched" count={streams} tint={TINT.sky} />
-          {isOwnProfile && (
-            <StatTile
-              icon={Gift}
-              label="Drops claimed"
-              count={dropsClaimed ?? undefined}
-              value={dropsClaimed === null ? 'Unknown' : undefined}
-              tint={TINT.violet}
-            />
-          )}
-          <StatTile
-            icon={Palette}
-            label="Cosmetics"
-            count={cosmeticsTotal}
-            caption={`${seventvPaintCount} paints, ${seventvBadgeCount} badges, ${ownedCosmeticsCount} StreamNook`}
-            tint={TINT.rose}
-          />
-          {favoriteChannel && (
-            <StatTile
-              icon={Heart}
-              label="Favorite channel"
-              value={favoriteChannel.channel_name}
-              caption={`${Math.round(favoriteChannel.minutes / 60).toLocaleString()}h watched`}
-              tint={TINT.rose}
-            />
-          )}
-          {topPointsChannel && (
-            <StatTile
-              icon={Coins}
-              label="Most points"
-              value={topPointsChannel}
-              caption="channel points banked"
-              tint={TINT.amber}
-            />
-          )}
-          {streamNookUserNumber !== null && (
-            <StatTile
-              icon={Sparkles}
-              label="Member rank"
-              value={`#${streamNookUserNumber.toLocaleString()}`}
-              caption={
-                totalMembers
-                  ? `of ${totalMembers.toLocaleString()}${tier?.label ? ` · ${tier.label}` : ''}`
-                  : tier?.label || 'StreamNook member'
-              }
-              tint={TINT.slate}
-            />
-          )}
-        </motion.div>
-      </div>
-      )}
-
-      {isOwnProfile && <SubscriptionsSection login={login} />}
-
-      {!sectionHidden('emotes') && <TopEmotesSection userId={userId} />}
-
-      {/* Accolades - collectible medallions. Placed last on purpose: it's a
-          big wall, so the stat cards lead and this anchors the bottom. */}
-      {!sectionHidden('accolades') && (
-      <div className={`glass-panel rounded-xl ${sectionPad}`} style={sectionStyle}>
-        <div className={`flex items-center gap-1.5 ${compact ? 'mb-3' : 'mb-5'}`}>
-          <Trophy size={14} className="text-textMuted" />
-          <h4 className="text-sm font-semibold uppercase tracking-wide text-textPrimary">
-            Accolades
-          </h4>
-          <span className="ml-auto text-[11px] tabular-nums text-textMuted">
-            {earnedCount} / {accolades.length} unlocked
-          </span>
-        </div>
-        <motion.div
-          variants={containerV}
-          initial="hidden"
-          animate="show"
-          className={`grid grid-cols-4 sm:grid-cols-6 ${compact ? 'gap-2.5' : 'gap-4'}`}
-        >
-          {accoladesShown.map((a) => (
-            <AccoladeMedallion key={a.id} a={a} isOwnProfile={isOwnProfile} />
-          ))}
-        </motion.div>
-        {compact && lockedCount > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowAllAccolades((v) => !v)}
-            className="mt-3 w-full text-[11px] font-medium text-textMuted transition-colors hover:text-textPrimary"
-          >
-            {showAllAccolades ? 'Show fewer' : `Show all ${accolades.length} (${lockedCount} locked)`}
-          </button>
-        )}
-        <div className={`${compact ? 'mt-3' : 'mt-5'} h-1.5 overflow-hidden rounded-full bg-white/[0.06]`}>
-          <div
-            className="h-full rounded-full bg-accent/70 transition-[width] duration-700 ease-out"
-            style={{ width: `${Math.round((earnedCount / accolades.length) * 100)}%` }}
-          />
-        </div>
-      </div>
-      )}
+  // Full (Settings self-view): the original vertical stack.
+  return (
+    <div className="space-y-6">
+      {heroEl}
+      {twitchEl}
+      {lifetimeEl}
+      {subsEl}
+      {emotesEl}
+      {accoladesEl}
     </div>
   );
 };

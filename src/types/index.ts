@@ -480,6 +480,10 @@ export interface MultiNookSlot {
  *  user intentionally cleared all binds for that command. */
 export type KeybindingOverrides = Record<string, string[]>;
 
+// Animation level for the whole UI (Interface > Motion). 'full' animates
+// everything; 'reduced' keeps quick fades but drops movement; 'off' is instant.
+export type MotionMode = 'full' | 'reduced' | 'off';
+
 export interface Settings {
   quality: string;
   chat_placement: string;
@@ -520,6 +524,14 @@ export interface Settings {
   // Undefined = show all (the default). Each button still respects its own
   // context gate (clip only when clippable, multinook/refresh only when live, …).
   player_overlay_buttons?: string[];
+  // How the Settings UI is presented. true (or undefined) = a centered window
+  // (the default). false = a full-page layout that fills the entire app, so long
+  // tabs are easier to scan with less scrolling.
+  compact_settings_window?: boolean;
+  // Animation level for the whole UI (Interface > Motion). 'full' (or undefined)
+  // animates everything; 'reduced' keeps fades but drops movement; 'off' is
+  // instant. Applied app-wide by MotionScope (data-motion + framer MotionConfig).
+  motion_mode?: MotionMode;
 }
 
 export interface ModerationSettings {

@@ -9,6 +9,7 @@ import { useAppStore } from '../stores/AppStore';
 import { usemultiNookStore } from '../stores/multiNookStore';
 import { useChannelSocial } from '../hooks/useChannelSocial';
 import StreamTitleWithEmojis from './StreamTitleWithEmojis';
+import PlayerStatsOverlay from './PlayerStatsOverlay';
 import { Tooltip } from './ui/Tooltip';
 import { registerPlayerControls, type PlayerControls } from '../keybindings';
 import { qualitiesEquivalent } from '../utils/quality';
@@ -57,6 +58,11 @@ const VideoPlayer = () => {
   const [playerReady, setPlayerReady] = useState(false);
   // Overlay visibility state (works in both normal and fullscreen modes)
   const [showOverlay, setShowOverlay] = useState(false);
+  // Live telemetry panel ("behind live" + FPS). Toggled from the Plyr settings
+  // menu's "Stats" item; the ref lets the menu injection read the latest value.
+  const [showStats, setShowStats] = useState(false);
+  const showStatsRef = useRef(showStats);
+  showStatsRef.current = showStats;
   const overlayTimerRef = useRef<NodeJS.Timeout | null>(null);
   const OVERLAY_HIDE_DELAY = 2600; // Match Plyr's native control hide timing (2.6s)
 
@@ -472,9 +478,9 @@ const VideoPlayer = () => {
         nudgeOffset: 0.2, // Restored closer to default — buffer gate fixes the real issue
         nudgeMaxRetry: 3, // Restored to default
         maxFragLookUpTolerance: 0.5, // More tolerant fragment lookup
-        liveSyncDuration: currentSettings.low_latency_mode ? 6 : 8, // Seconds behind live edge. Force absolute time.
-        liveMaxLatencyDuration: 60, // Capped to 60s to allow GC. Prevents holding massive 10min TS buffers in RAM.
-        maxLiveSyncPlaybackRate: 1.15, // Rubber-band playback speed to catch up to live edge
+        liveSyncDuration: currentSettings.low_latency_mode ? 4 : 8, // Seconds behind the live edge. 4 is the proven sweet spot: it matched twitch.tv (~5.2s vs its 5.12s) on a NORMAL-latency stream and held steady. 3 stalled there (normal-latency delivery is jittery, gaps up to ~3s between segments drain a 3s cushion; twitch.tv sits at ~5s for the same reason). Both the relay targetduration rewrite (ad_detect::retarget_playlist) and the cold-start buffer-gate SNAP are required for even this 4 to be effective and safe. Toggle off = 8s. Going below 4 needs a LOW-latency broadcast (smooth delivery + PREFETCH); that path is per-stream adaptive, not a blanket lower constant.
+        liveMaxLatencyDuration: 60, // Capped to 60s to allow GC. Prevents holding massive 10min TS buffers in RAM. Must stay > liveSyncDuration.
+        maxLiveSyncPlaybackRate: 1.15, // Rubber-band catch-up speed. Kept gentle on purpose: aggressive catch-up outruns live segment production and stalls at the edge.
         liveDurationInfinity: true, // Live stream has infinite duration
         manifestLoadingTimeOut: 10000, // 10s timeout for manifest
         manifestLoadingMaxRetry: 3, // Retry manifest 3 times
@@ -815,12 +821,22 @@ const VideoPlayer = () => {
         }
       });
 
-      // ──── Cold-Start Buffer Gate ────
-      // Empirical data (hls-diag.mjs): Twitch segments are 2s, TARGETDURATION=5s.
-      // After 2 segments (4s buffer), surplus is +2.8s — safe to sustain playback.
-      // Gate threshold: 4s. Expected wall-clock wait: ~1.2s.
+      // ──── Cold-Start Buffer Gate + live-sync snap ────
+      // Twitch segments are ~2s. Wait for a little buffer so a cold start doesn't
+      // stall, THEN snap the playhead to the live-sync point. The snap is the
+      // load-bearing part: the buffer this gate accumulates piles up BEHIND the
+      // advancing live edge, so without it the cold-start buffer (not
+      // liveSyncDuration) decides how far back we play, pinning latency ~6-8s no
+      // matter the configured cushion. Snapping to (freshest buffered edge minus
+      // liveSyncDuration), clamped into the buffered range, makes the cushion
+      // actually control latency. This mirrors a manual "scrub close to live",
+      // which sustains without stalling.
+      // Threshold is 3, not 4: two 2s segments measure as ~3.96s, which just
+      // misses a 4 threshold and forces a ~2s wait for a freshly-produced third
+      // segment (the slow-load regression). 3 clears on the two already-available
+      // segments instead.
       let playStarted = false;
-      const GATE_THRESHOLD = 4;
+      const GATE_THRESHOLD = 3;
 
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
         if (playStarted || !currentSettings.autoplay) return;
@@ -828,11 +844,24 @@ const VideoPlayer = () => {
         const buffered = video.buffered;
         if (buffered.length === 0) return;
 
-        const depth = buffered.end(buffered.length - 1) - buffered.start(0);
+        const bufStart = buffered.start(0);
+        const bufEnd = buffered.end(buffered.length - 1);
+        const depth = bufEnd - bufStart;
         if (depth < GATE_THRESHOLD) return;
 
         playStarted = true;
-        Logger.debug(`[HLS] Buffer gate cleared: ${depth.toFixed(1)}s — starting playback`);
+
+        // Snap to the live-sync point (cushion behind the freshest buffered edge),
+        // clamped so we never seek into an unbuffered hole. No-op when the buffer
+        // is already within the cushion (e.g. low-latency off), so it never pushes
+        // anyone CLOSER than their setting asks for.
+        const syncDur = hls.config.liveSyncDuration ?? 4;
+        const target = Math.max(bufStart, bufEnd - syncDur);
+        if (target > video.currentTime + 0.5) {
+          video.currentTime = target;
+        }
+
+        Logger.debug(`[HLS] Buffer gate cleared: ${depth.toFixed(1)}s buffered, edge ${bufEnd.toFixed(1)}, snap to ${target.toFixed(1)} — starting playback`);
         video.play().catch(e => {
           Logger.debug('[HLS] Autoplay failed:', e);
           video.muted = true;
@@ -854,6 +883,33 @@ const VideoPlayer = () => {
         return res.text();
       }).then(text => {
         Logger.debug(`[Debug] Initial M3U8 Content Start: ${text.substring(0, 200)}`);
+        // Latency probe: does Twitch send low-latency PREFETCH hints (the
+        // in-progress segments a low-latency player rides ahead of the published
+        // edge), and what URL form do they use? hls.js ignores them today; this
+        // confirms the exact format for the planned relay-side prefetch promotion.
+        const lines = text.split('\n');
+        const prefetch = lines.filter(l => l.includes('TWITCH-PREFETCH'));
+        const target = lines.find(l => l.startsWith('#EXT-X-TARGETDURATION'));
+        Logger.debug(`[Debug] ${target ?? 'no targetduration'} | prefetch hints: ${prefetch.length}`);
+        prefetch.forEach((l, i) => Logger.debug(`[Debug] PREFETCH[${i}]: ${l.trim()}`));
+        Logger.debug(`[Debug] M3U8 tail:\n${lines.slice(-12).join('\n')}`);
+
+        // Adaptive low-latency cushion. The relay tags low-latency broadcasts
+        // (where it promoted Twitch's PREFETCH segments) with #EXT-X-STREAMNOOK-LL.
+        // Those deliver smoothly, so we can ride a ~2s cushion; jittery
+        // normal-latency streams (no tag) keep the safe ~4s the buffer gate uses.
+        // Only when the user's Low Latency Mode is on. The buffer-gate snap reads
+        // hls.config.liveSyncDuration, so updating it here retunes the snap; if
+        // playback already started at the wider cushion, pull forward now.
+        if (currentSettings.low_latency_mode && text.includes('STREAMNOOK-LL')) {
+          hls.config.liveSyncDuration = 2;
+          Logger.debug('[HLS] Low-latency channel detected — cushion tightened to 2s');
+          if (playStarted && video.buffered.length > 0) {
+            const bEnd = video.buffered.end(video.buffered.length - 1);
+            const tgt = Math.max(video.buffered.start(0), bEnd - 2);
+            if (tgt > video.currentTime + 0.5) video.currentTime = tgt;
+          }
+        }
       }).catch(e => {
         Logger.error(`[Debug] Initial M3U8 Fetch Failed:`, e);
       });
@@ -1193,6 +1249,46 @@ const VideoPlayer = () => {
     }
   }, [availableQualities, playerReady, updateQualityMenu]);
 
+  // Inject a "Stats" toggle into the Plyr settings (gear) menu, alongside Quality
+  // and Speed, so the latency panel is opened from there (not a floating button).
+  // Re-runs whenever Plyr is (re)created. Mirrors the quality-menu injection: the
+  // menu DOM can appear after this fires, so retry until it exists.
+  useEffect(() => {
+    if (!playerReady) return;
+    const container = containerRef.current;
+    if (!container) return;
+    let attempts = 0;
+    let cancelled = false;
+    const inject = () => {
+      if (cancelled) return;
+      const settingsHome = container.querySelector('.plyr__menu [role="menu"]');
+      if (!settingsHome) {
+        if (attempts++ < 25) setTimeout(inject, 200);
+        return;
+      }
+      if (settingsHome.querySelector('[data-streamnook-stats]')) return; // already present
+      const item = document.createElement('button');
+      item.className = 'plyr__control';
+      item.setAttribute('data-streamnook-stats', '');
+      item.setAttribute('type', 'button');
+      item.setAttribute('role', 'menuitem');
+      item.innerHTML = `<span>Stats<span class="plyr__menu__value" data-stats-value>${showStatsRef.current ? 'On' : 'Off'}</span></span>`;
+      item.addEventListener('click', () => setShowStats((s) => !s));
+      settingsHome.appendChild(item);
+    };
+    inject();
+    return () => {
+      cancelled = true;
+    };
+  }, [playerReady]);
+
+  // Keep the menu item's On/Off value in sync however showStats changes (the menu
+  // item or the panel's own close button).
+  useEffect(() => {
+    const span = containerRef.current?.querySelector('[data-streamnook-stats] [data-stats-value]');
+    if (span) span.textContent = showStats ? 'On' : 'Off';
+  }, [showStats]);
+
   // Start overlay hide timer - use ref to avoid dependency issues
   const startOverlayHideTimer = useCallback(() => {
     if (overlayTimerRef.current) {
@@ -1201,6 +1297,20 @@ const VideoPlayer = () => {
     overlayTimerRef.current = setTimeout(() => {
       setShowOverlay(false);
     }, OVERLAY_HIDE_DELAY);
+  }, []);
+
+  // Snap the playhead back to the live edge (used by the stats panel's "Go Live"
+  // button and after scrubbing into the DVR window). hls.js exposes the synced
+  // live position; jump there and resume if paused.
+  const goLive = useCallback(() => {
+    const hls = hlsRef.current;
+    const video = videoRef.current;
+    if (!hls || !video) return;
+    const pos = hls.liveSyncPosition;
+    if (pos != null && Number.isFinite(pos)) {
+      video.currentTime = pos;
+      if (video.paused) video.play().catch(() => { /* autoplay policy / teardown */ });
+    }
   }, []);
 
   // Handle mouse events for overlay visibility (works in both normal and fullscreen modes)
@@ -1438,7 +1548,7 @@ const VideoPlayer = () => {
 
       {/* Stream Title Overlay — Top-left, shares hover timing with controls */}
       <AnimatePresence>
-        {currentStream?.title?.trim() && showOverlay && (
+        {currentStream && showOverlay && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1503,13 +1613,15 @@ const VideoPlayer = () => {
               )
             )}
             <div className="min-w-0">
-              <Tooltip content={currentStream.title || ''} side="bottom" delay={300}>
-              <h3
-                className="text-white text-sm font-medium line-clamp-1 drop-shadow-lg"
-              >
-                <StreamTitleWithEmojis title={currentStream.title} />
-              </h3>
-              </Tooltip>
+              {currentStream.title?.trim() && (
+                <Tooltip content={currentStream.title} side="bottom" delay={300}>
+                <h3
+                  className="text-white text-sm font-medium line-clamp-1 drop-shadow-lg"
+                >
+                  <StreamTitleWithEmojis title={currentStream.title} />
+                </h3>
+                </Tooltip>
+              )}
               {currentStream.game_name && (
                 <p className="text-white/70 text-xs mt-0.5 drop-shadow-md">
                   {currentMediaType === 'live' 
@@ -1524,6 +1636,19 @@ const VideoPlayer = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Live telemetry panel, bottom-left. Collapsed toggle rides the hover
+          overlay; the panel itself persists once opened. Live streams only. */}
+      {currentMediaType === 'live' && streamUrl && streamUrl !== 'offline' && (
+        <PlayerStatsOverlay
+          hlsRef={hlsRef}
+          videoRef={videoRef}
+          open={showStats}
+          onToggle={() => setShowStats((s) => !s)}
+          onGoLive={goLive}
+          adSource={adSource}
+        />
+      )}
 
       {/* Follow & Subscribe Button Overlay */}
       <AnimatePresence>

@@ -4,7 +4,7 @@ import {
   getCosmeticsWithFallback,
   subscribeToCosmetics,
 } from '../services/cosmeticsCache';
-import { isStreamNookUser, getProfilePrefs, whenAtmospheresReady, subscribeAtmospheresVersion } from '../services/supabaseService';
+import { isStreamNookUser, getProfilePrefs, whenAtmospheresReady, subscribeAtmospheresVersion, subscribeStreamNookRegistryVersion } from '../services/supabaseService';
 import { getAtmosphere } from '../services/atmospheres';
 import {
   getResolvedIdentity,
@@ -13,7 +13,7 @@ import {
   subscribeResolvedIdentity,
   type ResolvedBadge,
 } from '../services/identityService';
-import type { ThirdPartyBadge } from '../services/badgeService';
+import { getGlobalThirdPartyBadges, type ThirdPartyBadge } from '../services/badgeService';
 import {
   BTTV_PRO_LOADOUT_KEY,
   BTTV_PRO_BADGE_ID,
@@ -25,16 +25,17 @@ import { snapshotOverrides } from '../utils/userChatOverrides';
 /**
  * Represents a user who has chatted in the current channel.
  * Used for @ mention autocomplete suggestions and as the canonical store for
- * a user's 7TV paint + 7TV badge + StreamNook third-party badge loadout.
+ * a user's 7TV paint + 7TV badge + third-party chat-client badges.
  * Per-message components subscribe to these instead of each maintaining its
  * own useState + fetch effect.
  *
  * Third-party chat-client badges (FFZ / Chatterino / Homies / Chatsen / Chatty /
- * DankChat / BTTV) are resolved here ONLY for StreamNook members, ONCE per
- * unique chatter, via the Identity API (the server returns the member's curated
- * set already resolved to images). That keeps the per-message render path free
- * of network calls — the lag/paint-starvation that an earlier per-message
- * resolve caused. Non-members never trigger a fetch.
+ * DankChat / BTTV) are resolved here ONCE per unique chatter. For StreamNook
+ * members it is their curated loadout (resolved + ownership-checked by the
+ * Identity API), which overrides their raw set. For everyone else it is their
+ * REAL provider badges, looked up from the prefetched provider databases in
+ * Rust (a cache-only call, no per-user network round-trip), the way Chatterino
+ * shows them. Either way the per-message render path stays free of network calls.
  */
 export interface ChatUser {
   userId: string;
@@ -47,8 +48,9 @@ export interface ChatUser {
   paint?: any;
   /** Currently-selected 7TV badge if available */
   seventvBadge?: any;
-  /** StreamNook member's curated third-party badges, resolved to images.
-   *  Undefined until resolved; empty array = member with nothing opted in. */
+  /** Third-party chat-client badges resolved to images: a member's curated
+   *  loadout, or a non-member's real provider badges. Undefined until resolved;
+   *  empty array = member who opted into nothing. */
   thirdPartyBadges?: ThirdPartyBadge[];
   /** The id of the StreamNook Atmosphere this member themes with (if any), so
    *  chat can render the matching animated wash. Undefined until resolved; null =
@@ -136,6 +138,17 @@ function enqueueCosmeticUpdate(userId: string, paint: any, seventvBadge: any) {
 const pendingThirdPartyUpdates = new Map<string, ThirdPartyBadge[]>();
 let pendingThirdPartyFlushScheduled = false;
 
+// Non-members whose real provider badges have already been resolved this session.
+// The Rust lookup reads only the prefetched provider databases, so a non-member's
+// result can't change within a session — resolving them once is enough. Without
+// this guard a non-member re-triggers the Rust IPC lookup on EVERY message until
+// their (separate) 7TV cosmetics resolve flips the cosmeticsResolved fast path,
+// which floods a busy channel with thousands of redundant cross-process calls.
+// Members are intentionally NOT gated here (they go through their own identity
+// resolve cache, so a live loadout edit still re-resolves). Pruned alongside the
+// user map (eviction + channel switch) so it never outgrows the tracked users.
+const thirdPartyNonMemberResolved = new Set<string>();
+
 function scheduleThirdPartyFlush() {
   if (pendingThirdPartyFlushScheduled) return;
   pendingThirdPartyFlushScheduled = true;
@@ -170,23 +183,50 @@ function mapResolvedBadges(badges: ResolvedBadge[]): ThirdPartyBadge[] {
   }));
 }
 
-// Resolve a member's curated badges once and push them into the store. Cache
-// hit → enqueue immediately; miss → kick the fetch and let the resolved-identity
-// listener below enqueue when it lands (so we never write the store twice).
-// Non-members and empty ids are no-ops, so chat only ever fetches for members.
+// Resolve a chatter's third-party badges once and push them into the store.
+//
+// Members: their CURATED loadout (the badges they opted into on their StreamNook
+// profile), which overrides their raw set. Cache hit -> enqueue immediately;
+// miss -> kick the fetch and let the resolved-identity listener below enqueue
+// when it lands (so we never write the store twice).
+//
+// Everyone else: their REAL provider badges (BTTV / FFZ / Chatterino / Homies /
+// Chatsen / Chatty / DankChat), looked up from the prefetched provider databases
+// in Rust. That call is a pure in-memory cache hit (no per-user network round
+// trip), so it is safe in this once-per-chatter path. We skip the store write
+// when the chatter carries no third-party badges (the common case) to avoid
+// needless churn. BTTV Pro is intentionally NOT resolved for non-members: it
+// needs a per-user live socket lookup, the one thing that would bring back the
+// per-chatter network cost, so it stays an opt-in member identity badge.
 function ensureThirdPartyResolved(userId: string | undefined) {
-  if (!userId || !isStreamNookUser(userId)) return;
-  const cached = getResolvedIdentityFromCache(userId);
-  if (cached) {
-    pendingThirdPartyUpdates.set(userId, mapResolvedBadges(cached.badges));
-    scheduleThirdPartyFlush();
-  } else {
-    void getResolvedIdentity(userId).catch(() => {});
+  if (!userId) return;
+
+  if (isStreamNookUser(userId)) {
+    const cached = getResolvedIdentityFromCache(userId);
+    if (cached) {
+      pendingThirdPartyUpdates.set(userId, mapResolvedBadges(cached.badges));
+      scheduleThirdPartyFlush();
+    } else {
+      void getResolvedIdentity(userId).catch(() => {});
+    }
+    // BTTV Pro is WebSocket-only, so the Identity API can't resolve it like the
+    // other providers (its loadout key passes through unresolved). Resolve it
+    // client-side and merge it into this member's row if they opted it in.
+    ensureBttvProResolved(userId);
+    return;
   }
-  // BTTV Pro is WebSocket-only, so the Identity API can't resolve it like the
-  // other providers (its loadout key passes through unresolved). Resolve it
-  // client-side and merge it into this member's row if they opted it in.
-  ensureBttvProResolved(userId);
+
+  // Resolve a non-member at most once per session. Mark BEFORE the async call so
+  // concurrent messages from the same chatter can't each kick a duplicate lookup.
+  if (thirdPartyNonMemberResolved.has(userId)) return;
+  thirdPartyNonMemberResolved.add(userId);
+  void getGlobalThirdPartyBadges(userId)
+    .then((badges) => {
+      if (badges.length === 0) return;
+      pendingThirdPartyUpdates.set(userId, badges);
+      scheduleThirdPartyFlush();
+    })
+    .catch(() => {});
 }
 
 // Resolve + merge a member's BTTV Pro badge when their loadout opted it in.
@@ -331,6 +371,7 @@ function evictStaleUsers(
   for (let i = 0; i < removeCount; i++) {
     const victim = sorted[i];
     users.delete(victim.userId);
+    thirdPartyNonMemberResolved.delete(victim.userId);
     const unameKey = victim.username.toLowerCase();
     if (usernameToId.get(unameKey) === victim.userId) {
       usernameToId.delete(unameKey);
@@ -445,6 +486,10 @@ export const useChatUserStore = create<ChatUserStore>((set, get) => ({
   },
   
   clearUsers: () => {
+    // The third-party badge data lives inside the user records being wiped here,
+    // so drop the resolved-guard too: a chatter reappearing in the next channel
+    // re-resolves cleanly instead of being skipped with no badges.
+    thirdPartyNonMemberResolved.clear();
     set({ users: new Map(), usernameToId: new Map() });
   },
 }));
@@ -496,4 +541,17 @@ subscribeToCosmetics((userId, cosmetics) => {
 subscribeResolvedIdentity((userId) => {
   if (!useChatUserStore.getState().users.has(userId)) return;
   ensureThirdPartyResolved(userId);
+});
+
+// The StreamNook member registry loads/refreshes asynchronously. A member first
+// seen before it finished loading was classified as a non-member and shown their
+// raw provider badges; when the registry lands, re-resolve any tracked member so
+// their curated loadout (which overrides) takes over. Mirrors the atmosphere
+// re-resolve above. Non-members are unaffected by a registry change, so we only
+// touch users now known to be members.
+subscribeStreamNookRegistryVersion(() => {
+  const users = useChatUserStore.getState().users;
+  for (const uid of users.keys()) {
+    if (isStreamNookUser(uid)) ensureThirdPartyResolved(uid);
+  }
 });

@@ -578,6 +578,7 @@ fn main() {
             // Unified Badge Service commands
             get_user_badges_unified,
             get_user_badges_with_earned_unified,
+            get_third_party_badges_for_user_unified,
             parse_badge_string,
             prefetch_global_badges_unified,
             prefetch_channel_badges_unified,

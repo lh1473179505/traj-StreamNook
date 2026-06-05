@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Eye, EyeOff, Columns, X } from 'lucide-react';
+import { Eye, EyeOff, Columns, X, Sparkles, Gauge, Zap } from 'lucide-react';
 import CompactViewSettings from './CompactViewSettings';
 import { SettingsSection, SettingsRow } from './_primitives';
+import { useAppStore } from '../../stores/AppStore';
+import type { MotionMode } from '../../types';
 
 export type SidebarMode = 'expanded' | 'compact' | 'hidden' | 'disabled';
 
@@ -44,9 +46,40 @@ const SIDEBAR_MODE_OPTIONS: { value: SidebarMode; label: string; hint: string; I
     { value: 'disabled', label: 'Disabled', hint: 'Completely hidden', Icon: X },
 ];
 
+const MOTION_MODE_OPTIONS: { value: MotionMode; label: string; hint: string; Icon: typeof Columns }[] = [
+    { value: 'full', label: 'Full', hint: 'All animations', Icon: Sparkles },
+    { value: 'reduced', label: 'Reduced', hint: 'Fades only', Icon: Gauge },
+    { value: 'off', label: 'Off', hint: 'Instant, snappy', Icon: Zap },
+];
+
 const InterfaceSettings = () => {
+    const { settings, updateSettings } = useAppStore();
     const [sidebarMode, setSidebarMode] = useState<SidebarMode>('compact');
     const [expandOnHover, setExpandOnHover] = useState(true);
+
+    // Compact (centered window) is the default; turning it off grows Settings
+    // to a full-page layout that fills the entire app.
+    const compactSettingsWindow = settings.compact_settings_window !== false;
+    const handleCompactSettingsWindowChange = (enabled: boolean) => {
+        void updateSettings({ ...settings, compact_settings_window: enabled });
+    };
+
+    // Full (default) animates everything; Reduced keeps fades but drops
+    // movement; Off makes the UI instant and snappy (best on low-end PCs).
+    const motionMode: MotionMode = settings.motion_mode ?? 'full';
+    const handleMotionModeChange = (mode: MotionMode) => {
+        void updateSettings({ ...settings, motion_mode: mode });
+    };
+    const motionDescription = (() => {
+        switch (motionMode) {
+            case 'full':
+                return 'All animations and transitions play normally.';
+            case 'reduced':
+                return 'Keeps quick fades but removes sliding, scaling, and bouncing motion. Easier on the eyes and lighter on slower machines.';
+            case 'off':
+                return 'Turns animations off for an instant, snappy feel. Best on low-end PCs, since the frosted-glass blur is expensive to animate. Loading spinners still spin.';
+        }
+    })();
 
     useEffect(() => {
         const settings = getSidebarSettings();
@@ -120,6 +153,47 @@ const InterfaceSettings = () => {
                         }
                     />
                 )}
+            </SettingsSection>
+
+            <SettingsSection id="settings-section-motion" label="Motion">
+                <SettingsRow
+                    title="Animations"
+                    description={motionDescription}
+                >
+                    <div className="grid grid-cols-3 gap-2">
+                        {MOTION_MODE_OPTIONS.map(({ value, label, hint, Icon }) => {
+                            const isActive = motionMode === value;
+                            return (
+                                <button
+                                    key={value}
+                                    onClick={() => handleMotionModeChange(value)}
+                                    style={{ borderRadius: 8 }}
+                                    className={`flex flex-col items-center gap-2 p-3 text-sm font-medium transition-all ${isActive
+                                        ? 'glass-input text-textPrimary'
+                                        : 'glass-button text-textSecondary hover:text-textPrimary'
+                                        }`}
+                                >
+                                    <Icon size={24} />
+                                    <span className="text-xs font-medium">{label}</span>
+                                    <span className="text-[10px] text-textMuted text-center">{hint}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </SettingsRow>
+            </SettingsSection>
+
+            <SettingsSection id="settings-section-settings-window" label="Settings Window">
+                <SettingsRow
+                    title="Compact settings window"
+                    description="Show settings in a centered window. Turn this off to open settings as a full page that fills the entire app, giving long tabs more room so you can see all the options at once with less scrolling."
+                    control={
+                        <Toggle
+                            enabled={compactSettingsWindow}
+                            onChange={() => handleCompactSettingsWindowChange(!compactSettingsWindow)}
+                        />
+                    }
+                />
             </SettingsSection>
 
             <div id="settings-section-compact">

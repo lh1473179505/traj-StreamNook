@@ -378,16 +378,61 @@ impl StreamServer {
         if !request_path.ends_with(".ts") {
             if let Ok(text) = std::str::from_utf8(&bytes) {
                 detect_ads_in_playlist(text);
+                // Snapshot whether THIS playlist carries an ad, to gate prefetch
+                // promotion below (never fast-path an in-progress ad segment).
+                let ads_now = AD_STATE.lock().unwrap().ads_present;
+                // A playlist carrying PREFETCH hints is a low-latency broadcast.
+                // Delivery on those is smooth, so the player can safely ride a
+                // tighter cushion; tag it so the frontend knows (this is decided
+                // from the RAW text, before promotion rewrites the hints away).
+                let is_low_latency = text.contains("#EXT-X-TWITCH-PREFETCH:");
+
                 let (filtered, dropped, real) =
                     crate::services::ad_detect::filter_ad_segments(text);
+                maybe_trigger_pivot(dropped > 0 && real == 0);
                 if dropped > 0 {
                     debug!(
                         "[StreamServer] stripped {} ad segment(s); {} real remain",
                         dropped, real
                     );
-                    bytes = filtered.into_bytes();
                 }
-                maybe_trigger_pivot(dropped > 0 && real == 0);
+
+                // Build the served playlist: ad-filtered base, then two rewrites.
+                let mut work: String = if dropped > 0 {
+                    filtered
+                } else {
+                    text.to_string()
+                };
+
+                // 1) Lower Twitch's over-declared #EXT-X-TARGETDURATION (6s for ~2s
+                //    segments) to the real segment size so hls.js can ride closer to
+                //    the live edge without stalling.
+                if let Some(rt) = crate::services::ad_detect::retarget_playlist(&work) {
+                    work = rt;
+                }
+
+                // 2) Promote Twitch's low-latency PREFETCH hints into real segments
+                //    (moves the live edge ~4s closer on low-latency channels). hls.js
+                //    ignores the raw PREFETCH tag, so this is what unlocks ~2s. Gated
+                //    on an ad-free playlist so a prefetch ad segment can never be
+                //    fast-pathed past the filter; entitled streams (no ads) always
+                //    promote, normal-latency streams have no hints so this is a no-op.
+                if !ads_now {
+                    if let Some(pp) = crate::services::ad_detect::promote_prefetch(&work) {
+                        work = pp;
+                    }
+                }
+
+                // 3) Tag low-latency broadcasts so the player adopts a ~2s cushion
+                //    on them (and only them); normal-latency streams stay at the
+                //    safe ~4s. hls.js ignores this unknown #EXT-X- tag.
+                if is_low_latency && !work.contains("#EXT-X-STREAMNOOK-LL") {
+                    if let Some(nl) = work.find('\n') {
+                        work.insert_str(nl + 1, "#EXT-X-STREAMNOOK-LL:1\n");
+                    }
+                }
+
+                bytes = work.into_bytes();
             }
         }
 

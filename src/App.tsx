@@ -1594,12 +1594,14 @@ function App() {
         />
         )}
       </AnimatePresence>
-      {showChangelog && changelogVersion && (
-        <ChangelogOverlay
-          version={changelogVersion}
-          onClose={handleChangelogClose}
-        />
-      )}
+      <AnimatePresence>
+        {showChangelog && changelogVersion && (
+          <ChangelogOverlay
+            version={changelogVersion}
+            onClose={handleChangelogClose}
+          />
+        )}
+      </AnimatePresence>
       <WhispersWidget
         isOpen={showWhispersOverlay}
         onClose={() => setShowWhispersOverlay(false)}

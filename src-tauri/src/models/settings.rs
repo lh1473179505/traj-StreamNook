@@ -23,6 +23,11 @@ pub struct VideoPlayerSettings {
 impl Default for VideoPlayerSettings {
     fn default() -> Self {
         Self {
+            // Off by default. On this stack a tighter live-sync can't actually beat
+            // ~6-8s: hls.js won't hold closer than Twitch's declared targetduration
+            // (~6s, even though segments are ~2s) without stalling. Real low latency
+            // is a relay-side change (rewrite the targetduration + promote PREFETCH
+            // segments), not this toggle, so leaving the toggle on just risks stalls.
             low_latency_mode: false,
             max_buffer_length: 120,
             autoplay: true,

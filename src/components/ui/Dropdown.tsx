@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Check } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export interface DropdownOption<T extends string | number> {
     value: T;
@@ -118,12 +119,17 @@ export function Dropdown<T extends string | number>({
                     className={`text-textSecondary shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
                 />
             </button>
-            {open &&
-                createPortal(
-                    <div
+            {createPortal(
+                <AnimatePresence>
+                    {open && (
+                    <motion.div
                         ref={menuRef}
                         role="listbox"
                         style={menuStyle}
+                        initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                        transition={{ duration: 0.14, ease: 'easeOut' }}
                         className="glass-panel border border-borderLight rounded-lg p-1 shadow-xl max-h-72 overflow-y-auto custom-scrollbar"
                     >
                         {options.map(opt => {
@@ -148,9 +154,11 @@ export function Dropdown<T extends string | number>({
                                 </button>
                             );
                         })}
-                    </div>,
-                    document.body,
-                )}
+                    </motion.div>
+                    )}
+                </AnimatePresence>,
+                document.body,
+            )}
         </>
     );
 }
