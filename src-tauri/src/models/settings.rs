@@ -9,6 +9,63 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as TokioMutex, RwLock};
 
+/// Web Audio processing for the player: a dynamics compressor followed by a
+/// makeup-gain stage. Together they level out loud/quiet swings and let the
+/// stream be pushed louder than the source without the clipping you'd get from
+/// raising volume past 100%. Off by default; flipping `enabled` applies the
+/// values below, which are tuned as a gentle, pleasant starting point the user
+/// can then adjust.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AudioBoostSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_audio_gain")]
+    pub gain: f32, // Makeup gain multiplier applied after compression (1.0 = unity)
+    #[serde(default = "default_audio_threshold")]
+    pub threshold: f32, // dB, level where compression begins
+    #[serde(default = "default_audio_knee")]
+    pub knee: f32, // dB, how gradually compression ramps in around the threshold
+    #[serde(default = "default_audio_ratio")]
+    pub ratio: f32, // x:1 compression ratio above the threshold
+    #[serde(default = "default_audio_attack")]
+    pub attack: f32, // seconds to clamp down once over the threshold
+    #[serde(default = "default_audio_release")]
+    pub release: f32, // seconds to ease back off once under the threshold
+}
+
+fn default_audio_gain() -> f32 {
+    1.5
+}
+fn default_audio_threshold() -> f32 {
+    -30.0
+}
+fn default_audio_knee() -> f32 {
+    30.0
+}
+fn default_audio_ratio() -> f32 {
+    6.0
+}
+fn default_audio_attack() -> f32 {
+    0.003
+}
+fn default_audio_release() -> f32 {
+    0.25
+}
+
+impl Default for AudioBoostSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gain: default_audio_gain(),
+            threshold: default_audio_threshold(),
+            knee: default_audio_knee(),
+            ratio: default_audio_ratio(),
+            attack: default_audio_attack(),
+            release: default_audio_release(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VideoPlayerSettings {
     pub low_latency_mode: bool,
@@ -18,6 +75,8 @@ pub struct VideoPlayerSettings {
     pub volume: f32,
     pub start_quality: i32,
     pub lock_aspect_ratio: bool,
+    #[serde(default)]
+    pub audio_boost: AudioBoostSettings,
 }
 
 impl Default for VideoPlayerSettings {
@@ -35,6 +94,7 @@ impl Default for VideoPlayerSettings {
             volume: 1.0,
             start_quality: -1,
             lock_aspect_ratio: false,
+            audio_boost: AudioBoostSettings::default(),
         }
     }
 }
@@ -260,10 +320,25 @@ pub struct LiveNotificationSettings {
     // Quick update: clicking update toast immediately starts update
     #[serde(default)]
     pub quick_update_on_toast: bool,
+    // Toast placement: which screen anchor toasts appear at, and how far they
+    // sit from the anchored top/bottom edge (raise the offset to lift toasts off
+    // the chat input).
+    #[serde(default = "default_toast_position")]
+    pub toast_position: String,
+    #[serde(default = "default_toast_edge_offset")]
+    pub toast_edge_offset: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_toast_position() -> String {
+    "bottom-right".to_string()
+}
+
+fn default_toast_edge_offset() -> u32 {
+    72
 }
 
 impl Default for LiveNotificationSettings {
@@ -284,6 +359,8 @@ impl Default for LiveNotificationSettings {
             use_native_notifications: false,
             native_only_when_unfocused: true,
             quick_update_on_toast: false,
+            toast_position: "bottom-right".to_string(),
+            toast_edge_offset: 72,
         }
     }
 }

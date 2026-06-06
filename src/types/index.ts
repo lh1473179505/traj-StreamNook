@@ -1,3 +1,26 @@
+export interface AudioBoostSettings {
+  enabled: boolean;
+  gain: number; // Makeup gain multiplier applied after compression (1 = unity)
+  threshold: number; // dB, level where compression begins
+  knee: number; // dB, how gradually compression ramps in around the threshold
+  ratio: number; // x:1 compression ratio above the threshold
+  attack: number; // seconds to clamp down once over the threshold
+  release: number; // seconds to ease back off once under the threshold
+}
+
+// Gentle, pleasant defaults: enabling the feature with these values gives an
+// immediately nicer, slightly louder and more even mix that the user can tweak.
+// Off by default so playback is never touched until the user opts in.
+export const DEFAULT_AUDIO_BOOST: AudioBoostSettings = {
+  enabled: false,
+  gain: 1.5,
+  threshold: -30,
+  knee: 30,
+  ratio: 6,
+  attack: 0.003,
+  release: 0.25,
+};
+
 export interface VideoPlayerSettings {
   low_latency_mode: boolean;
   max_buffer_length: number;
@@ -6,6 +29,7 @@ export interface VideoPlayerSettings {
   volume: number;
   start_quality: number;
   lock_aspect_ratio: boolean;
+  audio_boost?: AudioBoostSettings;
 }
 
 export interface CacheSettings {
@@ -345,6 +369,21 @@ export interface ChatInputSettings {
   emote_tab_complete_include_chatters?: boolean;
 }
 
+// Screen anchor a toast popup appears at. Mirrors the Rust `toast_position`
+// string field; keep the two in sync.
+export type ToastPosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right';
+
+export const DEFAULT_TOAST_POSITION: ToastPosition = 'bottom-right';
+// Default gap from the anchored top/bottom edge, in px. Lifts toasts clear of
+// the chat input (which sits in the bottom-right corner) out of the box.
+export const DEFAULT_TOAST_EDGE_OFFSET = 72;
+
 export interface LiveNotificationSettings {
   enabled: boolean;
   play_sound: boolean;
@@ -365,6 +404,9 @@ export interface LiveNotificationSettings {
   native_only_when_unfocused?: boolean;
   // Quick update: clicking update toast immediately starts update
   quick_update_on_toast?: boolean;
+  // Toast placement: anchor + distance from the anchored top/bottom edge (px)
+  toast_position?: ToastPosition;
+  toast_edge_offset?: number;
 }
 
 export type AutoSwitchMode = 'same_category' | 'followed_streams';
