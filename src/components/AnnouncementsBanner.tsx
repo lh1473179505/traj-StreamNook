@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
-import { AlertTriangle, Info, AlertOctagon, X, ExternalLink } from 'lucide-react';
+import { AlertTriangle, AlertOctagon, X, ExternalLink } from 'lucide-react';
 import { Logger } from '../utils/logger';
 
 interface AnnouncementAction {
@@ -59,25 +59,33 @@ const saveDismissed = (ids: Set<string>) => {
   }
 };
 
+// Solid, opaque tones — framing via an amber rim, a left inset bevel bar and a
+// dark drop shadow (no outer glow). The fill is near-opaque so the box stays
+// readable regardless of the glass slider, which strips backdrop blur at 0%.
 const severityTone = (severity: string) => {
   switch (severity) {
     case 'critical':
       return {
-        wrap: 'bg-red-500/10 border-red-500/30',
-        icon: 'text-red-400',
+        bg: 'rgba(40, 14, 12, 0.97)',
+        border: 'border-red-400/55',
+        bar: '#f87171',
+        icon: 'text-red-300',
+        title: 'text-red-50',
+        body: 'text-red-100/85',
+        link: 'text-red-200 hover:text-red-100',
         Icon: AlertOctagon,
       };
-    case 'warning':
-      return {
-        wrap: 'bg-amber-500/10 border-amber-500/30',
-        icon: 'text-amber-400',
-        Icon: AlertTriangle,
-      };
+    // warning + info both render as the amber box.
     default:
       return {
-        wrap: 'bg-blue-500/10 border-blue-500/30',
-        icon: 'text-blue-400',
-        Icon: Info,
+        bg: 'rgba(46, 32, 8, 0.97)',
+        border: 'border-amber-400/55',
+        bar: '#fbbf24',
+        icon: 'text-amber-300',
+        title: 'text-amber-50',
+        body: 'text-amber-100/85',
+        link: 'text-amber-200 hover:text-amber-100',
+        Icon: AlertTriangle,
       };
   }
 };
@@ -154,7 +162,11 @@ const AnnouncementsBanner = () => {
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              className={`pointer-events-auto rounded-lg border ${tone.wrap} backdrop-blur-md p-3 shadow-lg`}
+              style={{
+                background: tone.bg,
+                boxShadow: `inset 3px 0 0 0 ${tone.bar}, 0 8px 24px rgba(0, 0, 0, 0.55)`,
+              }}
+              className={`pointer-events-auto rounded-lg border ${tone.border} p-3.5 pl-4`}
             >
               <div className="flex items-start gap-3">
                 <div className={`mt-0.5 ${tone.icon}`}>
@@ -162,7 +174,7 @@ const AnnouncementsBanner = () => {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
-                    <h3 className="text-sm font-semibold text-textPrimary">{a.title}</h3>
+                    <h3 className={`text-sm font-semibold ${tone.title}`}>{a.title}</h3>
                     {allowDismiss && (
                       <button
                         onClick={() => dismiss(a.id)}
@@ -173,13 +185,13 @@ const AnnouncementsBanner = () => {
                       </button>
                     )}
                   </div>
-                  <p className="mt-1 text-xs text-textSecondary whitespace-pre-line">
+                  <p className={`mt-1 text-xs leading-relaxed whitespace-pre-line ${tone.body}`}>
                     {a.body}
                   </p>
                   {a.action && (
                     <button
                       onClick={() => handleAction(a.action!.url)}
-                      className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
+                      className={`mt-2 inline-flex items-center gap-1 text-xs hover:underline ${tone.link}`}
                     >
                       {a.action.label} <ExternalLink size={11} />
                     </button>
