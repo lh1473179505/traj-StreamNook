@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use reqwest::Client;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -46,6 +46,10 @@ pub fn ad_state() -> AdDetectionState {
 
 fn reset_ad_state() {
     *AD_STATE.lock().unwrap() = AdDetectionState::default();
+    // Per-stream relay flags reset alongside the ad state (called on stream
+    // start, hot-swap, and stop). Low-latency is unknown until the new stream's
+    // first playlist is scanned.
+    LOW_LATENCY.store(false, Ordering::Relaxed);
 }
 
 /// Fold a relayed media playlist into the solo stream's ad-detection state. We
@@ -92,6 +96,16 @@ static APP_HANDLE: once_cell::sync::OnceCell<tauri::AppHandle> = once_cell::sync
 /// Consecutive polls where inline filtering couldn't yield a playable (real)
 /// segment — i.e. the region is serving an all-ad window. Drives the pivot.
 static PIVOT_EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
+/// Whether the currently-relayed stream is a low-latency broadcast (the relay
+/// sees Twitch's PREFETCH hints on it). The player reads this via the
+/// `get_stream_low_latency` command to decide whether to ride a ~2s cushion,
+/// instead of re-downloading the manifest itself just to look.
+static LOW_LATENCY: AtomicBool = AtomicBool::new(false);
+
+/// True when the live stream being relayed carries low-latency PREFETCH hints.
+pub fn is_low_latency() -> bool {
+    LOW_LATENCY.load(Ordering::Relaxed)
+}
 
 /// Store the app handle so the pivot task can emit the `ad-pivot` reload event.
 pub fn set_app_handle(handle: tauri::AppHandle) {
@@ -417,19 +431,38 @@ impl StreamServer {
                 //    on an ad-free playlist so a prefetch ad segment can never be
                 //    fast-pathed past the filter; entitled streams (no ads) always
                 //    promote, normal-latency streams have no hints so this is a no-op.
-                if !ads_now {
+                //
+                // TEMPORARILY DISABLED while chasing the low-latency `levelParsingError`
+                // freeze: a promoted prefetch is an in-progress edge segment presented to
+                // hls.js as a finalized one, which can desync its live-refresh consistency
+                // check across polls. Flip `ENABLE_PREFETCH_PROMOTION` back to true to
+                // restore. retarget_playlist (above) keeps its own edge-tightening.
+                let enable_prefetch_promotion = false;
+                if enable_prefetch_promotion && !ads_now {
                     if let Some(pp) = crate::services::ad_detect::promote_prefetch(&work) {
                         work = pp;
                     }
                 }
 
-                // 3) Tag low-latency broadcasts so the player adopts a ~2s cushion
-                //    on them (and only them); normal-latency streams stay at the
-                //    safe ~4s. hls.js ignores this unknown #EXT-X- tag.
-                if is_low_latency && !work.contains("#EXT-X-STREAMNOOK-LL") {
-                    if let Some(nl) = work.find('\n') {
-                        work.insert_str(nl + 1, "#EXT-X-STREAMNOOK-LL:1\n");
-                    }
+                // 3) Record whether this is a low-latency broadcast so the player
+                //    can adopt a ~2s cushion on it (and only it) via the
+                //    `get_stream_low_latency` command — no manifest re-download.
+                LOW_LATENCY.store(is_low_latency, Ordering::Relaxed);
+
+                // Loud diagnostic: a media playlist hls.js can parse needs a target
+                // duration AND at least one segment. If we're about to serve one
+                // missing either, that's the shape that throws `levelParsingError`.
+                // Log it, and whether the RAW upstream body had them — so we can tell
+                // a rewrite bug (raw ok, served broken) from an empty/garbage upstream
+                // (raw also broken, e.g. a 0-byte body during a reload race).
+                if !work.contains("#EXTINF") || !work.contains("#EXT-X-TARGETDURATION") {
+                    error!(
+                        "[StreamServer] serving UNPARSEABLE playlist (served_len={} raw_len={} raw_had_segs={} raw_had_td={})",
+                        work.len(),
+                        text.len(),
+                        text.contains("#EXTINF"),
+                        text.contains("#EXT-X-TARGETDURATION"),
+                    );
                 }
 
                 bytes = work.into_bytes();

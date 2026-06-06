@@ -187,6 +187,15 @@ pub async fn stop_stream() -> Result<(), String> {
     StreamServer::stop().await.map_err(|e| e.to_string())
 }
 
+/// Whether the live stream currently being relayed is a low-latency Twitch
+/// broadcast (the relay sees PREFETCH hints on it). The player polls this once
+/// after playback starts to decide whether to ride a tighter live cushion —
+/// cheaper than re-downloading the manifest just to look for the hints itself.
+#[tauri::command]
+pub fn get_stream_low_latency() -> bool {
+    crate::services::stream_server::is_low_latency()
+}
+
 /// Current ad-detection state for the live stream the local player is pulling.
 /// The detector scans every media-playlist poll for Twitch ad-stitch markers,
 /// so this reflects whether ads are slipping through the proxy right now.
