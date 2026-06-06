@@ -2,6 +2,9 @@ import { Dropdown } from '../ui/Dropdown';
 import { useAppStore } from '../../stores/AppStore';
 import ProxyHealthChecker from './ProxyHealthChecker';
 import { SettingsSection, SettingsRow, SegmentedSelect } from './_primitives';
+import { DEFAULT_AUDIO_BOOST } from '../../types';
+import { Fader } from '../AudioBoostFaders';
+import { audioBoostFaderDefs, audioBoostResetPatch } from '../../utils/audioBoost';
 
 const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
   <button
@@ -49,6 +52,19 @@ const PlayerSettings = () => {
   const autoSwitchRaid = autoSwitch?.auto_redirect_on_raid ?? true;
   const autoSwitchOfflineChat = autoSwitch?.stay_in_offline_chat ?? false;
   const videoPlayer = settings.video_player;
+
+  // Audio boost: a compressor + makeup-gain stage on the player audio. Merge the
+  // persisted values over the shared defaults so a missing/partial object still
+  // renders, and write the whole object back (it persists as one nested field).
+  const audioBoost = { ...DEFAULT_AUDIO_BOOST, ...(videoPlayer?.audio_boost ?? {}) };
+  const setAudioBoost = (patch: Partial<typeof audioBoost>) => {
+    updateSettings({
+      ...settings,
+      video_player: { ...videoPlayer, audio_boost: { ...audioBoost, ...patch } },
+    });
+  };
+  // Shared fader descriptors (Boost first, then the five compressor params).
+  const boostFaders = audioBoostFaderDefs(audioBoost);
 
   const setAutoSwitch = (patch: Partial<NonNullable<typeof autoSwitch>>) => {
     updateSettings({
@@ -409,6 +425,79 @@ const PlayerSettings = () => {
             }
             className="w-full accent-accent cursor-pointer"
           />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        id="settings-section-audio-boost"
+        label="Audio Boost"
+        description="Even out loud and quiet moments and push the stream a little louder than the source, without the harsh clipping you get from raising volume past 100%. Turn it on for a clean, balanced lift, then fine-tune to taste."
+      >
+        <SettingsRow
+          title="Enable Audio Boost"
+          description="Run the stream's audio through a compressor and a makeup-gain stage. Stacks on top of the normal volume slider."
+          control={
+            <Toggle
+              enabled={audioBoost.enabled}
+              onChange={() => setAudioBoost({ enabled: !audioBoost.enabled })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Boost"
+          description="How much louder to make the stream after compression. 100% is no extra boost; higher is louder."
+          disabled={!audioBoost.enabled}
+        >
+          <div className="flex justify-center pt-1">
+            <Fader
+              label={boostFaders[0].label}
+              display={boostFaders[0].display}
+              value={boostFaders[0].value}
+              min={boostFaders[0].min}
+              max={boostFaders[0].max}
+              step={boostFaders[0].step}
+              onChange={(v) => setAudioBoost(boostFaders[0].apply(v))}
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title="Advanced Compressor Controls"
+          description="Shape exactly how the compressor responds. Hover a label for what it does; the defaults are a gentle, natural starting point."
+          disabled={!audioBoost.enabled}
+        >
+          <details className="group">
+            <summary className="cursor-pointer text-sm font-medium text-textSecondary hover:text-textPrimary transition-colors flex items-center gap-2">
+              <span className="transform transition-transform group-open:rotate-90">▶</span>
+              Show advanced controls
+            </summary>
+            <div className="mt-5 flex flex-wrap items-end justify-center gap-x-6 gap-y-6">
+              {boostFaders.slice(1).map((d) => (
+                <Fader
+                  key={d.key}
+                  label={d.label}
+                  display={d.display}
+                  value={d.value}
+                  min={d.min}
+                  max={d.max}
+                  step={d.step}
+                  hint={d.hint}
+                  onChange={(v) => setAudioBoost(d.apply(v))}
+                />
+              ))}
+            </div>
+
+            <div className="mt-5 flex justify-center">
+              <button
+                onClick={() => setAudioBoost(audioBoostResetPatch())}
+                style={{ borderRadius: 8 }}
+                className="glass-button text-textSecondary hover:text-textPrimary text-sm px-3 py-2"
+              >
+                Reset to defaults
+              </button>
+            </div>
+          </details>
         </SettingsRow>
       </SettingsSection>
     </div>

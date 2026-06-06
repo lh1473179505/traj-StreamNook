@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import Hls from 'hls.js';
 import Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
@@ -16,6 +17,26 @@ import { qualitiesEquivalent } from '../utils/quality';
 
 import { Logger } from '../utils/logger';
 import { syncTauriWindowFullscreen } from '../utils/windowFullscreen';
+import {
+  applyAudioBoost,
+  resolveAudioBoost,
+  audioBoostFaderDefs,
+  audioBoostResetPatch,
+} from '../utils/audioBoost';
+import type { AudioBoostSettings } from '../types';
+import { Fader, Toggle } from './AudioBoostFaders';
+
+// Paint the Audio Boost toggle that gets injected into Plyr's control bar so it
+// reflects on/off. The `is-active` class lights it up as an accent chip (fill +
+// inset rim, styled in globals.css, no outer glow); off falls back to the normal
+// control. Module-level so the inject and sync effects share one copy.
+function paintAudioBoostButton(btn: Element | null, on: boolean): void {
+  if (!btn) return;
+  btn.classList.toggle('is-active', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  const tip = btn.querySelector('.plyr__tooltip');
+  if (tip) tip.textContent = on ? 'Audio Boost: On' : 'Audio Boost: Off';
+}
 
 const VideoPlayer = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -80,6 +101,136 @@ const VideoPlayer = () => {
       preClipMuteRef.current = null;
     }
   }, [clipModalOpen]);
+
+  // Route the live audio through the optional compressor + makeup-gain graph.
+  // Re-applied whenever the audio-boost settings change and after each stream
+  // swap (the player is rebuilt then, but the <video> element itself persists,
+  // so its one-time audio tap stays valid and we just reconfirm the routing).
+  // While the feature has never been turned on, this is a no-op and playback is
+  // left completely untouched. Scoped to the main player; MultiNook tiles keep
+  // their own per-tile audio.
+  const audioBoostSettings = playerSettings?.audio_boost;
+  useEffect(() => {
+    applyAudioBoost(videoRef.current, resolveAudioBoost(audioBoostSettings));
+  }, [audioBoostSettings, streamUrl, playerReady]);
+
+  // Resolved current settings (defaults filled in) drive both the control-bar
+  // toggle's appearance and the in-player popover below. The ref lets the
+  // injection effect paint the button's initial state without re-running on
+  // every toggle.
+  const resolvedBoost = resolveAudioBoost(audioBoostSettings);
+  const audioBoostEnabled = resolvedBoost.enabled;
+  const audioBoostEnabledRef = useRef(audioBoostEnabled);
+  audioBoostEnabledRef.current = audioBoostEnabled;
+
+  // In-player popover for editing boost/compressor on the fly without leaving the
+  // stream. Opened by right-clicking the control-bar toggle (left-click still
+  // does the quick on/off).
+  const [audioPanelOpen, setAudioPanelOpen] = useState(false);
+  const audioPanelRef = useRef<HTMLDivElement>(null);
+
+  // Write a patch to the persisted audio_boost settings. Reads fresh state so a
+  // rapid edit never clobbers a concurrent change; the apply effect and the
+  // popover both react to the result.
+  const applyBoostPatch = (patch: Partial<AudioBoostSettings>) => {
+    const { settings: s, updateSettings } = useAppStore.getState();
+    const current = s.video_player;
+    const resolved = resolveAudioBoost(current?.audio_boost);
+    updateSettings({
+      ...s,
+      video_player: { ...current, audio_boost: { ...resolved, ...patch } },
+    });
+  };
+
+  // Inject the Audio Boost toggle into Plyr's control bar, right after the volume
+  // group. Plyr's `controls` option only accepts its built-in items, so (like the
+  // quality menu and the Stats item) the button is added to the DOM directly.
+  // Re-runs whenever Plyr is (re)created (playerReady cycles false->true on every
+  // stream swap); the control bar can appear after this fires, so it retries
+  // until the DOM exists and guards against double-insertion.
+  useEffect(() => {
+    if (!playerReady) return;
+    const container = containerRef.current;
+    if (!container) return;
+    let attempts = 0;
+    let cancelled = false;
+    const inject = () => {
+      if (cancelled) return;
+      const controls = container.querySelector('.plyr__controls');
+      if (!controls) {
+        if (attempts++ < 25) setTimeout(inject, 200);
+        return;
+      }
+      if (controls.querySelector('[data-streamnook-audioboost]')) return; // already present
+
+      const btn = document.createElement('button');
+      btn.className = 'plyr__controls__item plyr__control';
+      btn.type = 'button';
+      btn.setAttribute('data-streamnook-audioboost', '');
+      btn.innerHTML = `
+        <svg class="plyr__icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"></path>
+        </svg>
+        <span class="plyr__tooltip" role="tooltip">Audio Boost</span>
+      `;
+      // Click opens the in-player popover (which holds the on/off toggle plus
+      // all the faders), so everything is adjustable on the fly.
+      btn.addEventListener('click', () => {
+        setAudioPanelOpen((o) => !o);
+      });
+
+      // Sit immediately after the volume group (mute + slider) when present.
+      const volume = controls.querySelector('.plyr__volume');
+      if (volume && volume.parentElement === controls) {
+        volume.insertAdjacentElement('afterend', btn);
+      } else {
+        const menu = controls.querySelector('.plyr__menu');
+        if (menu) controls.insertBefore(btn, menu);
+        else controls.appendChild(btn);
+      }
+      paintAudioBoostButton(btn, audioBoostEnabledRef.current);
+    };
+    inject();
+    return () => {
+      cancelled = true;
+    };
+  }, [playerReady]);
+
+  // Keep the injected toggle's color, tooltip and pressed state in sync whenever
+  // Audio Boost is flipped (from this button, the settings panel, or anywhere).
+  useEffect(() => {
+    const btn = containerRef.current?.querySelector('[data-streamnook-audioboost]');
+    paintAudioBoostButton(btn ?? null, audioBoostEnabled);
+  }, [audioBoostEnabled, playerReady]);
+
+  // Close the popover on Escape or an outside click (but not on the toggle
+  // itself, so right-click can open/close it cleanly). Capture phase so it runs
+  // before the player's own pointer handlers.
+  useEffect(() => {
+    if (!audioPanelOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAudioPanelOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      const panel = audioPanelRef.current;
+      const btn = containerRef.current?.querySelector('[data-streamnook-audioboost]');
+      const target = e.target as Node;
+      if (panel && !panel.contains(target) && !(btn && btn.contains(target))) {
+        setAudioPanelOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown, true);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown, true);
+    };
+  }, [audioPanelOpen]);
+
+  // Close the popover when the stream changes (the control bar is rebuilt then).
+  useEffect(() => {
+    setAudioPanelOpen(false);
+  }, [streamUrl]);
 
   // Transient top-left "stream note" (ad source + any quality fallback). Shows
   // briefly when a new live stream resolves, then fades. Replaces the per-stream
@@ -522,6 +673,28 @@ const VideoPlayer = () => {
         fatalErrorCountRef.current = 0;
         manifestErrorCountRef.current = 0;
 
+        // Adaptive low-latency cushion. The relay scans every playlist and flags
+        // low-latency broadcasts; ask it once here (one cheap IPC, no manifest
+        // re-download). On a low-latency stream with Low Latency on, tighten the
+        // cushion to ~2s.
+        //
+        // TEMPORARILY DISABLED in lockstep with the relay's prefetch promotion
+        // (stream_server.rs `enable_prefetch_promotion`). The 2s cushion is only
+        // safe when promotion has pushed the live edge ~2s forward; with promotion
+        // off the edge sits further back, so 2s parks the playhead on the buffered
+        // edge and any segment jitter stalls it (see the liveSyncDuration config
+        // note: "going below 4 needs a LOW-latency broadcast"). Low Latency on
+        // keeps the safe 4s base. Re-enable both flags together.
+        const ENABLE_LL_CUSHION_TIGHTEN: boolean = false;
+        if (ENABLE_LL_CUSHION_TIGHTEN && currentSettings.low_latency_mode) {
+          invoke<boolean>('get_stream_low_latency').then((lowLatency) => {
+            if (lowLatency && hlsRef.current === hls) {
+              hls.config.liveSyncDuration = 2;
+              Logger.debug('[HLS] Low-latency channel — cushion tightened to 2s');
+            }
+          }).catch(() => { /* command unavailable / stream gone */ });
+        }
+
         // Initialize Plyr AFTER we have the video loaded
         if (!playerRef.current) {
           const player = new Plyr(video, {
@@ -635,6 +808,14 @@ const VideoPlayer = () => {
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         Logger.error('[HLS] Error:', JSON.stringify({ type: data.type, details: data.details, fatal: data.fatal }));
+        // hls.js packs the precise reason into data.error.message — for a
+        // levelParsingError that is the exact parser failure (e.g. "media sequence
+        // mismatch …" or "discontinuity sequence mismatch …" with BOTH playlists
+        // embedded, or "Missing Target Duration" / "No Segments found"). The line
+        // above drops it, which is why level parse failures have been opaque.
+        if (data.error?.message) {
+          Logger.error('[HLS] Error detail:', data.error.message);
+        }
 
         // Handle non-fatal errors with improved recovery
         if (!data.fatal) {
@@ -877,42 +1058,6 @@ const VideoPlayer = () => {
           video.play().catch(() => {});
         }
       }, 5000);
-      // DEBUG: Verify manifest contents manually before HLS
-      fetch(streamUrl).then(res => {
-        Logger.debug(`[Debug] Initial M3U8 response status: ${res.status}`);
-        return res.text();
-      }).then(text => {
-        Logger.debug(`[Debug] Initial M3U8 Content Start: ${text.substring(0, 200)}`);
-        // Latency probe: does Twitch send low-latency PREFETCH hints (the
-        // in-progress segments a low-latency player rides ahead of the published
-        // edge), and what URL form do they use? hls.js ignores them today; this
-        // confirms the exact format for the planned relay-side prefetch promotion.
-        const lines = text.split('\n');
-        const prefetch = lines.filter(l => l.includes('TWITCH-PREFETCH'));
-        const target = lines.find(l => l.startsWith('#EXT-X-TARGETDURATION'));
-        Logger.debug(`[Debug] ${target ?? 'no targetduration'} | prefetch hints: ${prefetch.length}`);
-        prefetch.forEach((l, i) => Logger.debug(`[Debug] PREFETCH[${i}]: ${l.trim()}`));
-        Logger.debug(`[Debug] M3U8 tail:\n${lines.slice(-12).join('\n')}`);
-
-        // Adaptive low-latency cushion. The relay tags low-latency broadcasts
-        // (where it promoted Twitch's PREFETCH segments) with #EXT-X-STREAMNOOK-LL.
-        // Those deliver smoothly, so we can ride a ~2s cushion; jittery
-        // normal-latency streams (no tag) keep the safe ~4s the buffer gate uses.
-        // Only when the user's Low Latency Mode is on. The buffer-gate snap reads
-        // hls.config.liveSyncDuration, so updating it here retunes the snap; if
-        // playback already started at the wider cushion, pull forward now.
-        if (currentSettings.low_latency_mode && text.includes('STREAMNOOK-LL')) {
-          hls.config.liveSyncDuration = 2;
-          Logger.debug('[HLS] Low-latency channel detected — cushion tightened to 2s');
-          if (playStarted && video.buffered.length > 0) {
-            const bEnd = video.buffered.end(video.buffered.length - 1);
-            const tgt = Math.max(video.buffered.start(0), bEnd - 2);
-            if (tgt > video.currentTime + 0.5) video.currentTime = tgt;
-          }
-        }
-      }).catch(e => {
-        Logger.error(`[Debug] Initial M3U8 Fetch Failed:`, e);
-      });
 
       // Load the stream
       hls.loadSource(streamUrl);
@@ -1817,6 +1962,71 @@ const VideoPlayer = () => {
           </button>
           </Tooltip>
           )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Audio Boost popover — edit boost/compressor on the fly without leaving
+          the stream. Opened by right-clicking the control-bar toggle. Sits just
+          above the control bar; stops pointer events so it never toggles
+          play/pause underneath. */}
+      <AnimatePresence>
+        {audioPanelOpen && (
+          <motion.div
+            ref={audioPanelRef}
+            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.98 }}
+            transition={{ duration: 0.16, ease: 'easeOut' }}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            className="liquid-glass-panel absolute bottom-16 right-3 z-[60] rounded-xl p-4"
+            style={{ width: 'min(460px, calc(100% - 24px))' }}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-[13px] font-semibold text-textPrimary">Audio Boost</span>
+              <Toggle
+                enabled={audioBoostEnabled}
+                onChange={() => applyBoostPatch({ enabled: !audioBoostEnabled })}
+              />
+            </div>
+            <div className={audioBoostEnabled ? '' : 'opacity-50 pointer-events-none'}>
+              <div className="flex flex-wrap items-end justify-center gap-x-5 gap-y-4">
+                {audioBoostFaderDefs(resolvedBoost).map((d) => (
+                  <Fader
+                    key={d.key}
+                    label={d.label}
+                    display={d.display}
+                    value={d.value}
+                    min={d.min}
+                    max={d.max}
+                    step={d.step}
+                    hint={d.hint}
+                    onChange={(v) => applyBoostPatch(d.apply(v))}
+                  />
+                ))}
+              </div>
+            </div>
+            <div className="mt-3 flex items-center justify-center gap-4">
+              <button
+                onClick={() => applyBoostPatch(audioBoostResetPatch())}
+                style={{ borderRadius: 8 }}
+                className="glass-button text-textSecondary hover:text-textPrimary text-xs px-3 py-1.5"
+              >
+                Reset to defaults
+              </button>
+              <button
+                onClick={() => {
+                  setAudioPanelOpen(false);
+                  useAppStore.getState().openSettings('Player', 'settings-section-audio-boost');
+                }}
+                className="text-xs text-textSecondary underline-offset-2 hover:text-textPrimary hover:underline"
+              >
+                Open in Settings
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
