@@ -2,13 +2,33 @@ use crate::services::universal_cache_service::{
     assign_badge_metadata_positions, auto_sync_if_stale, cache_file, cache_item,
     cleanup_expired_entries, clear_universal_cache, export_manifest_for_github,
     get_all_cached_items_by_type, get_cached_file_path, get_cached_files_list, get_cached_item,
-    get_cached_items_batch, get_universal_cache_stats, sync_universal_cache, CacheType,
-    UniversalCacheEntry, UniversalCacheStats,
+    get_cached_items_batch, get_universal_cache_dir, get_universal_cache_stats,
+    sync_universal_cache, CacheType, UniversalCacheEntry, UniversalCacheStats,
 };
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::command;
+
+/// Open the universal cache folder in the OS file manager. Local paths cannot go
+/// through the shell plugin (its `open` scope only allows http/mailto/tel URLs),
+/// so this launches the platform file manager directly.
+#[command]
+pub async fn open_universal_cache_folder() -> Result<(), String> {
+    let dir = get_universal_cache_dir().map_err(|e| e.to_string())?;
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(dir.as_os_str())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 #[command]
 pub async fn get_universal_cached_item(

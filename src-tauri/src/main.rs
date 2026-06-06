@@ -29,9 +29,9 @@
 use commands::{
     accounts::*, announcements::*, app::*, automation::*, badge_metadata::*, badge_service::*,
     badges::*, cache::*, channel_panels::*, chat::*, chat_identity::*, components::*,
-    cosmetics_cache::*, diagnostic_logging::*, discord::*, drops::*, emoji::*, emotes::*,
-    eventsub::*, hype_train::*, identity::*, justlog::*, layout::*, link_preview::*, logs::*,
-    mod_log_storage::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
+    cosmetics_cache::*, diagnostic_logging::*, discord::*, drops::*, emoji::*, emote_prefetch::*,
+    emotes::*, eventsub::*, hype_train::*, identity::*, justlog::*, layout::*, link_preview::*,
+    logs::*, mod_log_storage::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
     screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
     streaming::*, subscriptions::*, twitch::*, universal_cache::*, user_profile::*,
     watch_streak::*, whisper_storage::*,
@@ -165,6 +165,34 @@ fn main() {
         }
     }
 
+    // One-time, FFZ-only purge so previously cached static FFZ frames re-download
+    // as their animated variants. Targeted by source URL, so other providers'
+    // emote caches are left intact.
+    match services::universal_cache_service::migrate_ffz_animated_cache() {
+        Ok(purged) => {
+            if purged {
+                debug!("[Main] FFZ emote cache purged for animated re-fetch");
+            }
+        }
+        Err(e) => {
+            error!("[Main] Failed to purge FFZ emote cache: {}", e);
+        }
+    }
+
+    // One-time purge of OLD non-7TV emote files (bare-id keys + URL-derived
+    // `.0`/`.bin` extensions) so they re-cache under provider-namespaced keys with
+    // content-typed extensions. 7TV files (already correct) are kept.
+    match services::universal_cache_service::migrate_emote_namespace_cache() {
+        Ok(purged) => {
+            if purged {
+                debug!("[Main] Non-7TV emote cache purged for namespaced re-fetch");
+            }
+        }
+        Err(e) => {
+            error!("[Main] Failed to purge non-7TV emote cache: {}", e);
+        }
+    }
+
     // Load settings from our custom location in the same directory as cache
     let settings = load_settings_from_file().unwrap_or_else(|_| Settings::default());
 
@@ -196,6 +224,11 @@ fn main() {
     ));
     let emote_service_state = commands::emotes::EmoteServiceState(emote_service.clone());
 
+    // Initialize AFK emote prefetch service (bulk disk-cache of followed-channel emotes)
+    let emote_prefetch_state = commands::emote_prefetch::EmotePrefetchServiceState(Arc::new(
+        services::emote_prefetch_service::EmotePrefetchService::new(emote_service.clone()),
+    ));
+
     // Initialize EventSub service
     let eventsub_service = Arc::new(tokio::sync::RwLock::new(
         services::eventsub_service::EventSubService::new(),
@@ -212,6 +245,7 @@ fn main() {
         .manage(whisper_service.clone())
         .manage(layout_service.clone())
         .manage(emote_service_state)
+        .manage(emote_prefetch_state)
         .manage(eventsub_service_state)
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -498,6 +532,7 @@ fn main() {
             resolve_clip_media,
             stop_stream,
             get_ad_detection,
+            get_stream_low_latency,
             get_stream_qualities,
             change_stream_quality,
             // Multi-stream commands
@@ -613,6 +648,7 @@ fn main() {
             cleanup_universal_cache,
             clear_all_universal_cache,
             get_universal_cache_statistics,
+            open_universal_cache_folder,
             assign_badge_positions,
             export_manifest,
             download_and_cache_file,
@@ -705,6 +741,11 @@ fn main() {
             fetch_channel_emotes,
             get_emote_by_name,
             clear_emote_cache,
+            // Emote prefetch (AFK bulk cache) commands
+            emote_prefetch_plan,
+            emote_prefetch_start,
+            emote_prefetch_stop,
+            emote_prefetch_status,
             // 7TV commands
             seventv_graphql,
             seventv_graphql_authed,

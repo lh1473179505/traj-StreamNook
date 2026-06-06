@@ -16,6 +16,7 @@ pub mod diagnostic_logging;
 pub mod discord;
 pub mod drops;
 pub mod emoji;
+pub mod emote_prefetch;
 pub mod emotes;
 pub mod eventsub;
 pub mod hype_train;

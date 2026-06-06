@@ -469,6 +469,24 @@ pub async fn save_cached_item(entry: UniversalCacheEntry) -> Result<()> {
     Ok(())
 }
 
+/// Insert many file entries with a SINGLE manifest clone-pair under one lock,
+/// instead of `save_cached_item`'s two full-manifest clones PER entry. A bulk
+/// caller (the AFK emote prefetch) downloading 10k+ files would otherwise make
+/// manifest cloning O(N^2); batching the inserts keeps it linear. Inserts are
+/// idempotent upserts, so re-running with already-present ids is harmless.
+pub async fn save_cached_items_batch(entries: Vec<UniversalCacheEntry>) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let _lock = MANIFEST_LOCK.lock().unwrap();
+    let mut manifest = load_manifest()?;
+    for entry in entries {
+        manifest.entries.insert(entry.id.clone(), entry);
+    }
+    save_manifest(&manifest)?;
+    Ok(())
+}
+
 /// Save a new item to cache with metadata
 /// Preserves existing position if the entry already exists (avoids losing sort order)
 pub async fn cache_item(
@@ -904,7 +922,208 @@ pub fn migrate_emote_cache_on_version_change(_current_version: &str) -> Result<b
     Ok(false)
 }
 
-/// Cache a file from a URL
+/// One-time, FFZ-only emote cache purge.
+///
+/// FrankerFaceZ emotes are keyed on disk by bare emote id, and their CDN URL
+/// carries no file extension, so a file lands at `{id}.bin` regardless of
+/// whether it was the static PNG (`/emote/{id}/1`) or the animated WebP
+/// (`/emote/{id}/animated/1`). An emote first cached as its static frame would
+/// therefore keep being served even after the fetcher started preferring the
+/// animated URL. This deletes ONLY FrankerFaceZ emote files (matched by the
+/// `frankerfacez.com/emote/` source URL recorded in the manifest) so they
+/// re-download as the animated variant on next display; every other provider's
+/// cache — and FFZ room badges, which live under `frankerfacez.com/room-badge/`
+/// — is left untouched. Gated by its own token file so it runs exactly once.
+const FFZ_ANIMATED_MIGRATION_TOKEN: &str = "FFZ_ANIMATED_2026_V1";
+
+pub fn migrate_ffz_animated_cache() -> Result<bool> {
+    let cache_dir = get_universal_cache_dir()?;
+    let token_file = cache_dir.join(".ffz_animated_migration");
+
+    let stored_token = if token_file.exists() {
+        fs::read_to_string(&token_file)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    if stored_token == FFZ_ANIMATED_MIGRATION_TOKEN {
+        return Ok(false);
+    }
+
+    debug!(
+        "[UniversalCache] One-time FFZ emote cache purge: '{}' -> '{}'",
+        if stored_token.is_empty() {
+            "<none>"
+        } else {
+            &stored_token
+        },
+        FFZ_ANIMATED_MIGRATION_TOKEN
+    );
+
+    // Match on the emote-path URL specifically so FFZ room badges (same CDN host,
+    // `/room-badge/` path) survive — only `/emote/` files are stale.
+    let is_ffz_emote = |entry: &UniversalCacheEntry| {
+        entry
+            .data
+            .get("url")
+            .and_then(|u| u.as_str())
+            .map(|u| u.contains("frankerfacez.com/emote/"))
+            .unwrap_or(false)
+    };
+
+    let manifest_path = cache_dir.join("manifest.json");
+    if manifest_path.exists() {
+        if let Ok(mut manifest) = load_manifest() {
+            // Delete the on-disk files for matching FFZ entries first.
+            for entry in manifest.entries.values() {
+                if is_ffz_emote(entry) {
+                    if let Some(path) = entry.data.get("local_path").and_then(|p| p.as_str()) {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+            }
+
+            // Then drop those manifest entries so stale paths are never served.
+            let initial_count = manifest.entries.len();
+            manifest.entries.retain(|_key, entry| !is_ffz_emote(entry));
+            let removed_count = initial_count - manifest.entries.len();
+
+            if removed_count > 0 {
+                // Mirror the existing migration: update the in-memory manifest and
+                // write through to disk now. This runs before the async runtime, so
+                // the debounced flush task can't run yet; a direct write guarantees
+                // the pruned manifest survives even if the app exits early.
+                let _ = save_manifest(&manifest);
+                let _ = save_manifest_to_disk(&manifest);
+                debug!(
+                    "[UniversalCache] Purged {} FFZ emote entries from cache",
+                    removed_count
+                );
+            }
+        }
+    }
+
+    // Write token (prevents re-triggering on future launches).
+    fs::write(&token_file, FFZ_ANIMATED_MIGRATION_TOKEN)?;
+
+    Ok(true)
+}
+
+/// One-time migration to provider-namespaced cache keys + content-typed
+/// extensions. Purges ONLY the non-7TV emote files (Twitch/BTTV/FFZ): they were
+/// keyed by bare id (so a Twitch and an FFZ emote sharing an integer id could
+/// collide) and saved with URL-derived extensions (`.0`/`.bin`). They re-download
+/// under `{provider}-{id}` keys with correct extensions on next display/prefetch.
+/// 7TV files (already `{id}@{tier}.avif`, correctly keyed/typed, and costly to
+/// re-enumerate while the 7TV API is flaky) are KEPT, identified by the source
+/// URL recorded in the manifest. Gated by its own token so it runs exactly once.
+const EMOTE_NAMESPACE_MIGRATION_TOKEN: &str = "NAMESPACE_CONTENT_EXT_2026_V1";
+
+pub fn migrate_emote_namespace_cache() -> Result<bool> {
+    let cache_dir = get_universal_cache_dir()?;
+    let token_file = cache_dir.join(".emote_namespace_migration");
+
+    let stored_token = if token_file.exists() {
+        fs::read_to_string(&token_file)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    if stored_token == EMOTE_NAMESPACE_MIGRATION_TOKEN {
+        return Ok(false);
+    }
+
+    if let Ok(mut manifest) = load_manifest() {
+        let initial_count = manifest.entries.len();
+        let mut files_deleted = 0usize;
+        manifest.entries.retain(|key, entry| {
+            // Only touch cached emote FILES.
+            if entry.cache_type != CacheType::Emote || !key.starts_with("file:") {
+                return true;
+            }
+            // Keep 7TV (already correctly keyed/typed).
+            let url = entry.data.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if url.contains("7tv") {
+                return true;
+            }
+            // Purge the rest: delete the on-disk file and drop the manifest entry.
+            if let Some(path) = entry.data.get("local_path").and_then(|p| p.as_str()) {
+                if fs::remove_file(path).is_ok() {
+                    files_deleted += 1;
+                }
+            }
+            false
+        });
+
+        let removed = initial_count - manifest.entries.len();
+        if removed > 0 {
+            let _ = save_manifest(&manifest);
+            let _ = save_manifest_to_disk(&manifest);
+            debug!(
+                "[UniversalCache] Namespace migration: dropped {} non-7TV emote entries, deleted {} files",
+                removed, files_deleted
+            );
+        }
+    }
+
+    fs::write(&token_file, EMOTE_NAMESPACE_MIGRATION_TOKEN)?;
+    Ok(true)
+}
+
+/// Pick the correct file extension from the downloaded bytes (magic numbers,
+/// most reliable) with the response Content-Type as a fallback. Emote/badge CDNs
+/// frequently serve images from extension-less URLs (BTTV/FFZ) or misleading ones
+/// (Twitch `.../3.0`), so deriving the extension from the URL mislabels the file
+/// and makes the asset server hand back the wrong Content-Type. Typing it from
+/// the real content keeps the cache self-describing and rendering robust.
+fn detect_image_ext(bytes: &[u8], content_type: Option<&str>) -> &'static str {
+    if bytes.len() >= 12 {
+        if bytes.starts_with(b"\x89PNG") {
+            return "png";
+        }
+        if bytes.starts_with(b"GIF8") {
+            return "gif";
+        }
+        if &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            return "webp";
+        }
+        if &bytes[4..8] == b"ftyp" && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis") {
+            return "avif";
+        }
+    }
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return "jpg";
+    }
+    if let Some(ct) = content_type {
+        let ct = ct.to_ascii_lowercase();
+        if ct.contains("avif") {
+            return "avif";
+        }
+        if ct.contains("webp") {
+            return "webp";
+        }
+        if ct.contains("gif") {
+            return "gif";
+        }
+        if ct.contains("png") {
+            return "png";
+        }
+        if ct.contains("jpeg") || ct.contains("jpg") {
+            return "jpg";
+        }
+    }
+    "bin"
+}
+
+/// Cache a file from a URL. The on-disk extension is derived from the ACTUAL
+/// downloaded content (magic bytes, Content-Type fallback), not the URL, so the
+/// file is correctly typed regardless of what the provider's URL looks like.
 pub async fn cache_file(
     cache_type: CacheType,
     id: String,
@@ -924,77 +1143,38 @@ pub async fn cache_file(
         fs::create_dir_all(&type_dir).context("Failed to create cache type directory")?;
     }
 
-    // Determine extension from URL
-    let url_path = PathBuf::from(&url);
-    let extension = url_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("bin");
-
-    // Sanitize ID for filename - replace path separators with underscores
-    let safe_id = id.replace(['/', '\\'], "_");
-
-    // Use a prefix for the file ID in the manifest to avoid collision with metadata
-    // But for the filename, we use the sanitized ID
-    let file_name = format!("{}.{}", safe_id, extension);
-    let file_path = type_dir.join(&file_name);
-
-    // Check if file already exists on disk - skip download if so
-    if file_path.exists() {
-        let path_str = file_path.to_string_lossy().to_string();
-        // Ensure it's in the manifest (might have been missed on a previous run)
-        let manifest_id = format!("file:{}", id);
-        let manifest = load_manifest()?;
-        if !manifest.entries.contains_key(&manifest_id) {
-            // File exists but not in manifest - add it
-            let entry = UniversalCacheEntry {
-                id: manifest_id,
-                cache_type,
-                data: serde_json::json!({
-                    "local_path": path_str,
-                    "url": url,
-                    "file_name": file_name
-                }),
-                metadata: CacheMetadata {
-                    timestamp: get_current_timestamp(),
-                    expiry_days,
-                    source: "universal_file".to_string(),
-                    version: CACHE_VERSION,
-                },
-                position: None,
-            };
-            save_cached_item(entry).await?;
-        }
-        return Ok(path_str);
-    }
-
     debug!(
         "[UniversalCache] Downloading and caching file: {} (type: {:?})",
         id, cache_type
     );
 
-    // Download via the shared pooled client so this request reuses a warm
-    // connection (HTTP/2 multiplexing) and is bounded by the client's timeouts.
+    // Download via the shared pooled client (warm HTTP/2 connection, bounded by
+    // the client timeouts). Callers dedup before reaching here, so we always
+    // fetch rather than guessing a filename from the URL up front.
     let response = DOWNLOAD_CLIENT.get(&url).send().await?;
-
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
             "Failed to download file: {}",
             response.status()
         ));
     }
-
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let bytes = response.bytes().await?;
+
+    let extension = detect_image_ext(&bytes, content_type.as_deref());
+    let safe_id = id.replace(['/', '\\'], "_");
+    let file_name = format!("{}.{}", safe_id, extension);
+    let file_path = type_dir.join(&file_name);
 
     let mut file = fs::File::create(&file_path)?;
     std::io::copy(&mut Cursor::new(bytes), &mut file)?;
 
     let path_str = file_path.to_string_lossy().to_string();
-
-    // Update manifest
-    // We use "file:" prefix for the ID in the manifest
     let manifest_id = format!("file:{}", id);
-
     let entry = UniversalCacheEntry {
         id: manifest_id,
         cache_type,
@@ -1011,11 +1191,79 @@ pub async fn cache_file(
         },
         position: None,
     };
-
     save_cached_item(entry).await?;
 
     debug!("[UniversalCache] Successfully cached file: {}", path_str);
     Ok(path_str)
+}
+
+/// Download a file to disk and RETURN its manifest entry WITHOUT writing the
+/// manifest. Lets a bulk caller (the AFK emote prefetch) collect many entries
+/// and persist them in one `save_cached_items_batch` call, sidestepping the
+/// per-file manifest clone that makes `cache_file` O(N^2) in a tight loop. The
+/// extension is derived from the actual content (see `detect_image_ext`), not
+/// the URL. Callers (the prefetch plan) dedup upstream, so this always fetches.
+pub async fn download_file_to_disk(
+    cache_type: CacheType,
+    id: String,
+    url: String,
+    expiry_days: u32,
+) -> Result<UniversalCacheEntry> {
+    let cache_dir = get_universal_cache_dir()?;
+    let type_str = match cache_type {
+        CacheType::Badge => "badges",
+        CacheType::Emote => "emotes",
+        CacheType::ThirdPartyBadge => "third-party-badges",
+        CacheType::Cosmetic => "cosmetics",
+    };
+
+    let type_dir = cache_dir.join(type_str);
+    if !type_dir.exists() {
+        fs::create_dir_all(&type_dir).context("Failed to create cache type directory")?;
+    }
+
+    let response = DOWNLOAD_CLIENT.get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to download file: {}",
+            response.status()
+        ));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let bytes = response.bytes().await?;
+
+    // Type the file by its real content; the manifest id keeps the raw (already
+    // provider-namespaced) id, only path separators stripped for the filename.
+    let extension = detect_image_ext(&bytes, content_type.as_deref());
+    let safe_id = id.replace(['/', '\\'], "_");
+    let file_name = format!("{}.{}", safe_id, extension);
+    let file_path = type_dir.join(&file_name);
+
+    let mut file = fs::File::create(&file_path)?;
+    std::io::copy(&mut Cursor::new(bytes), &mut file)?;
+
+    let path_str = file_path.to_string_lossy().to_string();
+    let manifest_id = format!("file:{}", id);
+    Ok(UniversalCacheEntry {
+        id: manifest_id,
+        cache_type,
+        data: serde_json::json!({
+            "local_path": path_str,
+            "url": url,
+            "file_name": file_name
+        }),
+        metadata: CacheMetadata {
+            timestamp: get_current_timestamp(),
+            expiry_days,
+            source: "universal_file".to_string(),
+            version: CACHE_VERSION,
+        },
+        position: None,
+    })
 }
 
 /// Get cached file path if exists and valid

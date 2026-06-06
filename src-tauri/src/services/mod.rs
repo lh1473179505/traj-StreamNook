@@ -17,6 +17,7 @@ pub mod drops_auth_service;
 pub mod drops_service;
 pub mod drops_websocket_service;
 pub mod emoji_service;
+pub mod emote_prefetch_service;
 pub mod emote_service;
 pub mod eventsub_moderation;
 pub mod eventsub_service;

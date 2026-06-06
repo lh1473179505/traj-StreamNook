@@ -76,7 +76,12 @@ export function sevenTvTierUrl(id: string, tier: EmoteTier = inlineEmoteTier()):
  * `@` survives the Rust filename sanitizer (which only strips path separators).
  */
 function emoteCacheKey(id: string, provider?: string, tier: EmoteTier = inlineEmoteTier()): string {
-  return provider === '7tv' ? `${id}@${tier}` : id;
+  if (provider === '7tv') return `${id}@${tier}`;
+  // Provider-namespaced so a Twitch emote and an FFZ emote that share a numeric
+  // id can't collide in the flat cache map. Must match emote_cache_target() in
+  // src-tauri/src/services/emote_prefetch_service.rs. Falls back to the bare id
+  // only when provider is unknown (callers should pass it).
+  return provider ? `${provider}-${id}` : id;
 }
 
 // Pending downloads to prevent duplicate requests
@@ -90,12 +95,40 @@ const pendingDownloads: Map<string, Promise<string | null>> = new Map();
 // trickle cheap per request, so going from 3 concurrent to 1 costs almost
 // nothing in fill time while removing the bandwidth contention that made the
 // stream stutter.
-const MAX_CONCURRENT_DOWNLOADS = 1;
-const MIN_DELAY_BETWEEN_DOWNLOADS_MS = 250; // Real gap so caching yields to the stream
+// Two fill rates. POLITE is the original stream-safe trickle: one serial
+// download with a real gap, idle-scheduled, so background caching never competes
+// with the live video. BURST kicks in only while an emote picker is open (the
+// one moment the user is actively waiting on emotes). The burst is safe because:
+// the chat-ingestion rAF coalescing landed after this trickle was written, so
+// chat renders no longer starve the video's main-thread buffer appends; the
+// downloads themselves run in Rust/tokio OFF the JS main thread on tiny files;
+// and the sibling badge cache (badgeImageCacheService) already runs 5 concurrent
+// with no playback impact. When no picker is open we fall back to POLITE so we
+// are not needlessly hammering the free provider CDNs for the whole session.
+const POLITE_CONCURRENT = 1;
+const POLITE_DELAY_MS = 250; // Real gap so background caching yields to the stream
+const BURST_CONCURRENT = 5;
+const BURST_DELAY_MS = 15;
+let burstRefs = 0;
 const downloadQueue: Array<{ id: string, url: string }> = [];
 let activeDownloads = 0;
 let processingScheduled = false;
 let lastDownloadTime = 0;
+
+function burstActive(): boolean { return burstRefs > 0; }
+function currentConcurrency(): number { return burstActive() ? BURST_CONCURRENT : POLITE_CONCURRENT; }
+function currentDelayMs(): number { return burstActive() ? BURST_DELAY_MS : POLITE_DELAY_MS; }
+
+/**
+ * Raise (true) or lower (false) the emote disk-cache fill rate. Ref-counted so
+ * multiple open pickers (split panes, popouts) compose — the burst stays on
+ * until the last one closes. Call `true` when a picker opens and `false` from
+ * the matching effect cleanup when it closes. Safe to over-call; clamps at zero.
+ */
+export function setEmoteCacheBurst(active: boolean) {
+  burstRefs = Math.max(0, burstRefs + (active ? 1 : -1));
+  if (burstActive()) pumpQueue();
+}
 
 // Settings cache
 let cachedSettings: { enabled: boolean; expiryDays: number } | null = null;
@@ -117,51 +150,46 @@ async function getEmoteCacheSettings(): Promise<{ enabled: boolean; expiryDays: 
   }
 }
 
-// Schedule queue processing during idle time to avoid UI stutters
-// Uses a very long timeout to ensure we only cache when truly idle
-function scheduleQueueProcessing() {
+// Drain the cache queue. POLITE mode stays one-at-a-time and waits for the main
+// thread to go idle between downloads (the original stream-safe trickle). BURST
+// mode (a picker is open) launches up to BURST_CONCURRENT in flight with a tiny
+// spacing and does NOT wait for idle, so the set lands on disk fast while the
+// user is looking at it. The HTTP fetch + disk write happen in Rust either way,
+// so this only governs how many tiny requests are in flight at once.
+function pumpQueue() {
   if (processingScheduled || downloadQueue.length === 0) return;
+  if (activeDownloads >= currentConcurrency()) return;
+
+  const sinceLast = Date.now() - lastDownloadTime;
+  const delay = Math.max(0, currentDelayMs() - sinceLast);
+
   processingScheduled = true;
-  
-  // Calculate how long to wait before next download
-  const timeSinceLastDownload = Date.now() - lastDownloadTime;
-  const delayNeeded = Math.max(0, MIN_DELAY_BETWEEN_DOWNLOADS_MS - timeSinceLastDownload);
-  
-  if (typeof requestIdleCallback === 'function') {
-    // Wait for minimum delay, then wait for true idle
-    setTimeout(() => {
-      requestIdleCallback(() => {
-        processingScheduled = false;
-        processDownloadQueue();
-      }, { timeout: 10000 }); // 10 second timeout - very patient
-    }, delayNeeded);
+  const launch = () => {
+    processingScheduled = false;
+    // Fill every free slot the current mode allows, then let each completion
+    // re-pump. Polite mode has a single slot, so this runs serially.
+    while (activeDownloads < currentConcurrency() && downloadQueue.length > 0) {
+      const next = downloadQueue.shift();
+      if (!next) break;
+      activeDownloads++;
+      lastDownloadTime = Date.now();
+      void downloadEmoteIfNeeded(next.id, next.url)
+        .catch((e) => Logger.debug(`[EmoteService] Error processing queue item ${next.id}:`, e))
+        .finally(() => {
+          activeDownloads--;
+          pumpQueue();
+        });
+    }
+  };
+
+  if (burstActive()) {
+    // User is waiting on these — don't gate on main-thread idle.
+    setTimeout(launch, delay);
+  } else if (typeof requestIdleCallback === 'function') {
+    // Background: wait the polite gap, then for a true idle moment.
+    setTimeout(() => requestIdleCallback(launch, { timeout: 10000 }), delay);
   } else {
-    setTimeout(() => {
-      processingScheduled = false;
-      processDownloadQueue();
-    }, delayNeeded + 200);
-  }
-}
-
-async function processDownloadQueue() {
-  if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS || downloadQueue.length === 0) {
-    return;
-  }
-
-  const next = downloadQueue.shift();
-  if (!next) return;
-
-  activeDownloads++;
-  lastDownloadTime = Date.now();
-
-  try {
-    await downloadEmoteIfNeeded(next.id, next.url);
-  } catch (e) {
-    Logger.debug(`[EmoteService] Error processing queue item ${next.id}:`, e);
-  } finally {
-    activeDownloads--;
-    // Schedule next batch during idle time with delay
-    scheduleQueueProcessing();
+    setTimeout(launch, delay + 200);
   }
 }
 
@@ -214,8 +242,8 @@ export function queueEmoteForCaching(id: string, url: string, priority: boolean 
   } else {
     downloadQueue.push({ id, url });
   }
-  // Schedule during idle time to avoid stuttering during scroll
-  scheduleQueueProcessing();
+  // Drain the queue: idle-gated trickle normally, fast burst while a picker is open.
+  pumpQueue();
 }
 
 export function getCachedEmoteUrl(
@@ -240,11 +268,33 @@ export function queueEmoteForDisplayCaching(
   provider: string | undefined,
   url: string,
   tier: EmoteTier = inlineEmoteTier(),
+  priority: boolean = false,
 ) {
   if (provider === '7tv') {
-    queueEmoteForCaching(emoteCacheKey(id, '7tv', tier), sevenTvTierUrl(id, tier));
+    queueEmoteForCaching(emoteCacheKey(id, '7tv', tier), sevenTvTierUrl(id, tier), priority);
   } else {
-    queueEmoteForCaching(id, url);
+    queueEmoteForCaching(emoteCacheKey(id, provider), url, priority);
+  }
+}
+
+/**
+ * Proactively queue an ENTIRE channel emote set for disk caching at the size
+ * each emote actually renders (per-DPI tier for 7TV, canonical URL otherwise).
+ * This is what lets the emote menu render disk-first: by the time the menu is
+ * opened, the polite background trickle has pulled the set to disk, so a fresh
+ * mount (a later session, or a remount after the in-memory set is refreshed)
+ * serves local files instead of re-hitting the provider CDNs on every open.
+ *
+ * Deliberately reuses the SAME single-serial, idle-scheduled queue as display
+ * caching, so this only adds more items to drain over the watch session. It does
+ * NOT change the download rate that keeps caching from competing with the live
+ * video (see the queue header comment). Items already cached, pending, or queued
+ * are skipped by `queueEmoteForCaching`, so calling this repeatedly is cheap.
+ */
+export function queueChannelEmotesForCaching(set: EmoteSet) {
+  const all = [...set.twitch, ...set.bttv, ...set['7tv'], ...set.ffz];
+  for (const e of all) {
+    queueEmoteForDisplayCaching(e.id, e.provider, e.url);
   }
 }
 
@@ -269,6 +319,23 @@ async function ensureEmoteFileCache() {
   })();
 
   return initializationPromise;
+}
+
+/**
+ * Re-pull the on-disk emote file map and merge it into memory. Unlike the
+ * one-shot `ensureEmoteFileCache` (which no-ops once populated), this always
+ * runs. Used after the AFK prefetch writes a batch of files so the picker's
+ * live disk-first lookup (`getCachedEmoteUrl`) sees them THIS session; without
+ * it the newly-cached files would only be picked up on the next launch.
+ */
+export async function refreshEmoteFileCache(): Promise<void> {
+  try {
+    const files = await invoke('get_cached_files', { cacheType: 'emote' }) as Record<string, string>;
+    Object.entries(files).forEach(([id, path]) => cachedEmoteFiles.set(id, path));
+    Logger.debug(`[EmoteService] Emote file cache refreshed (${cachedEmoteFiles.size} entries)`);
+  } catch (e) {
+    Logger.warn('[EmoteService] Failed to refresh emote file cache:', e);
+  }
 }
 
 export function preloadChannelEmotes(emotes: Emote[]) {
