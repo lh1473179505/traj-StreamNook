@@ -1,79 +1,20 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useDroppable, useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { invoke } from '@tauri-apps/api/core';
 import { usemultiNookStore } from '../../stores/multiNookStore';
 import { useTutorialStore } from '../../stores/tutorialStore';
-import { MultiNookSlot, TwitchStream } from '../../types';
-import { Plus, Maximize2, Minimize2, MessageSquare, MessageSquareOff, Loader2, Users, X, ArrowLeft, RefreshCcw, ShieldCheck, Search, Radio } from 'lucide-react';
-import { Logger } from '../../utils/logger';
+import { MultiNookSlot } from '../../types';
+import { Plus, Maximize2, Minimize2, MessageSquare, MessageSquareOff, Loader2, X, ArrowLeft, RefreshCcw, ShieldCheck, Search, Radio } from 'lucide-react';
 import { Tooltip } from '../ui/Tooltip';
 import { useAppStore } from '../../stores/AppStore';
-
-interface ChannelSearchResult {
-  id?: string;
-  user_id?: string;
-  user_login?: string;
-  broadcaster_login?: string;
-  user_name?: string;
-  display_name?: string;
-  thumbnail_url?: string;
-  is_live?: boolean;
-  game_name?: string;
-  profile_image_url?: string;
-}
+import { ChannelItem, useChannelSearch } from './channelSearch';
+import { ChannelResultRow } from './ChannelResultRow';
+import MultiNookPresets from './MultiNookPresets';
 
 interface MultiNookToolbarProps {
   isDragging?: boolean;
   dockDropId?: string;
   dockedPrefix?: string;
-}
-
-/** Normalized shape so live-follows and Twitch search results render through one row. */
-interface ChannelItem {
-  id: string;
-  login: string;
-  displayName: string;
-  avatarUrl?: string;
-  isLive: boolean;
-  gameName?: string;
-  source: 'following' | 'search';
-}
-
-const DEFAULT_AVATAR =
-  'https://static-cdn.jtvnw.net/user-default-pictures-uv/75305d54-c7cc-40d1-bb9c-91c46bf27829-profile_image-70x70.png';
-
-/** Followed-streams thumbnails are stream previews carrying {width}x{height} placeholders that
- *  won't load as-is, so prefer a real profile image and only fall back to a sized preview. */
-function resolveAvatar(profileImageUrl?: string, thumbnailUrl?: string): string | undefined {
-  if (profileImageUrl) return profileImageUrl;
-  if (thumbnailUrl) return thumbnailUrl.replace('{width}', '150').replace('{height}', '150');
-  return undefined;
-}
-
-function streamToItem(s: TwitchStream): ChannelItem {
-  return {
-    id: s.user_id,
-    login: s.user_login,
-    displayName: s.user_name || s.user_login,
-    avatarUrl: resolveAvatar(s.profile_image_url, s.thumbnail_url),
-    isLive: true, // followed-streams endpoint only returns live channels
-    gameName: s.game_name,
-    source: 'following',
-  };
-}
-
-function resultToItem(r: ChannelSearchResult): ChannelItem {
-  const login = r.user_login || r.broadcaster_login || '';
-  return {
-    id: r.user_id || r.id || login,
-    login,
-    displayName: r.user_name || r.display_name || login,
-    avatarUrl: resolveAvatar(r.profile_image_url, r.thumbnail_url),
-    isLive: !!r.is_live,
-    gameName: r.game_name,
-    source: 'search',
-  };
 }
 
 const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
@@ -85,10 +26,6 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
   const minimizedSlots = slots.filter(s => s.isMinimized);
   const { isDocked: isTutorialDocked, setIsDocked: setTutorialDocked } = useTutorialStore();
 
-  // Online following powers the "smart list" — the followed-streams cache holds only live channels.
-  const followedStreams = useAppStore((s) => s.followedStreams);
-  const loadFollowedStreams = useAppStore((s) => s.loadFollowedStreams);
-
   // Mod-view (Moderator Logs pane) visibility — the global, now-persisted setting.
   const showModLogs = useAppStore((s) => s.settings.show_mod_logs ?? false);
   const toggleModLogs = useCallback(() => {
@@ -98,133 +35,72 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
 
   const { setNodeRef: setDockRef, isOver } = useDroppable({ id: dockDropId });
 
-  // --- Add Channel Search State ---
+  // --- Add Channel Search (collapsible panel) ---
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [searchInput, setSearchInput] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchResults, setSearchResults] = useState<ChannelSearchResult[]>([]);
   const [isAdding, setIsAdding] = useState(false);
-  const [highlightIndex, setHighlightIndex] = useState(0);
-
   const inputRef = useRef<HTMLInputElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Focus input when search opens, and refresh the live-following list so it's current the
-  // moment the panel appears.
+  // Channels already in the grid, excluded from every list so you can't add a
+  // duplicate. Left unmemoized: the React Compiler auto-memoizes it, and a manual
+  // useMemo here can't be preserved once it's passed into the search hook.
+  const existingLogins = new Set(slots.map((s) => s.channelLogin.toLowerCase()));
+
+  // Shared finder: live following + debounced Twitch search + keyboard navigation.
+  const {
+    searchInput,
+    setSearchInput,
+    query,
+    isSearching,
+    followingItems,
+    searchItems,
+    visibleItems,
+    followedCount,
+    highlightIndex,
+    setHighlightIndex,
+    listRef,
+    refreshFollowing,
+    reset: resetSearch,
+  } = useChannelSearch(existingLogins);
+
+  // Focus input when the panel opens, and refresh the live-following list so it's
+  // current the moment the panel appears.
   useEffect(() => {
     if (isSearchOpen) {
-      loadFollowedStreams();
+      refreshFollowing();
       // Small delay for the expand animation to start
       const t = setTimeout(() => inputRef.current?.focus({ preventScroll: true }), 80);
       return () => clearTimeout(t);
     }
-  }, [isSearchOpen, loadFollowedStreams]);
+  }, [isSearchOpen, refreshFollowing]);
 
-  const closeSearch = useCallback(() => {
+  const closeSearch = () => {
     setIsSearchOpen(false);
-    setSearchInput('');
-    setSearchResults([]);
-    setIsSearching(false);
-    setHighlightIndex(0);
-  }, []);
+    resetSearch();
+  };
 
-  // Click outside to close
+  // Click outside to close. Inlines the close behaviour (rather than depending on
+  // the unmemoized closeSearch) so the listener only re-binds when the panel
+  // opens/closes; resetSearch is stable from the hook.
   useEffect(() => {
     if (!isSearchOpen) return;
     function handleClickOutside(e: MouseEvent) {
       if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
-        closeSearch();
+        setIsSearchOpen(false);
+        resetSearch();
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isSearchOpen, closeSearch]);
+  }, [isSearchOpen, resetSearch]);
 
-  const query = searchInput.trim().toLowerCase();
-
-  // Channels already in the grid — excluded from every list so you can't add a duplicate.
-  const existingLogins = useMemo(
-    () => new Set(slots.map(s => s.channelLogin.toLowerCase())),
-    [slots]
-  );
-
-  // Online following, instantly filtered against the typed query (no network round-trip).
-  const followingItems = useMemo(() => {
-    const items = followedStreams
-      .map(streamToItem)
-      .filter(it => !existingLogins.has(it.login.toLowerCase()));
-    if (!query) return items;
-    return items.filter(it =>
-      it.login.toLowerCase().includes(query) ||
-      it.displayName.toLowerCase().includes(query) ||
-      (it.gameName || '').toLowerCase().includes(query)
-    );
-  }, [followedStreams, existingLogins, query]);
-
-  // Twitch search results, minus anything already in the grid or already shown as a live follow.
-  const searchItems = useMemo(() => {
-    const followingLogins = new Set(followingItems.map(it => it.login.toLowerCase()));
-    return searchResults
-      .map(resultToItem)
-      .filter(it =>
-        it.login &&
-        !existingLogins.has(it.login.toLowerCase()) &&
-        !followingLogins.has(it.login.toLowerCase())
-      );
-  }, [searchResults, followingItems, existingLogins]);
-
-  // Flat list backing keyboard navigation (following first, then search).
-  const visibleItems = useMemo(() => [...followingItems, ...searchItems], [followingItems, searchItems]);
-
-  // Reset the highlight whenever the result set changes shape.
-  useEffect(() => {
-    setHighlightIndex(0);
-  }, [query, followingItems.length, searchItems.length]);
-
-  // Keep the highlighted row scrolled into view during keyboard navigation.
-  useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-idx="${highlightIndex}"]`);
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [highlightIndex]);
-
-  // Debounced Twitch search — only fires while there's a query; the live list above stays instant.
-  useEffect(() => {
-    if (!query) {
-      setSearchResults([]);
-      setIsSearching(false);
-      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-      return;
-    }
-
-    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-
-    setIsSearching(true);
-    searchTimeoutRef.current = setTimeout(async () => {
-      try {
-        const results = await invoke('search_channels', { query: searchInput.trim() }) as ChannelSearchResult[];
-        setSearchResults(results.slice(0, 8));
-      } catch (err) {
-        Logger.error('multi-nook channel search failed:', err);
-        setSearchResults([]);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 300);
-
-    return () => {
-      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-    };
-  }, [searchInput, query]);
-
-  const handleSelectItem = useCallback(async (item: ChannelItem) => {
+  const handleSelectItem = async (item: ChannelItem) => {
     if (!item.login) return;
     setIsAdding(true);
     await addSlot(item.login);
     closeSearch();
     setIsAdding(false);
-  }, [addSlot, closeSearch]);
+  };
 
   const handleKeyDown = async (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -465,7 +341,7 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
                               item={item}
                               index={i}
                               highlighted={highlightIndex === i}
-                              isAdding={isAdding}
+                              disabled={isAdding}
                               onSelect={handleSelectItem}
                               onHover={setHighlightIndex}
                             />
@@ -493,7 +369,7 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
                                 item={item}
                                 index={idx}
                                 highlighted={highlightIndex === idx}
-                                isAdding={isAdding}
+                                disabled={isAdding}
                                 onSelect={handleSelectItem}
                                 onHover={setHighlightIndex}
                               />
@@ -519,7 +395,7 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
                       ) : (
                         <div className="px-4 py-5 text-center">
                           <span className="text-xs text-textMuted">
-                            {followedStreams.length === 0
+                            {followedCount === 0
                               ? 'No followed channels are live. Type to search.'
                               : 'Start typing to search any channel'}
                           </span>
@@ -533,6 +409,9 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 ml-2 border-l border-white/10 pl-2">
+            {/* Presets. Saved, named channel sets openable in one click */}
+            <MultiNookPresets />
+
             {/* Resync Toggle */}
             <Tooltip content="Resynchronize Playback (Force Reload All)" delay={200} side="bottom">
               <button
@@ -579,80 +458,6 @@ const MultiNookToolbar: React.FC<MultiNookToolbarProps> = ({
         </div>
       </div>
     </div>
-  );
-};
-
-/** One row in the add-stream smart list. Renders both live follows and Twitch search hits. */
-const ChannelResultRow: React.FC<{
-  item: ChannelItem;
-  index: number;
-  highlighted: boolean;
-  isAdding: boolean;
-  onSelect: (item: ChannelItem) => void;
-  onHover: (index: number) => void;
-}> = ({ item, index, highlighted, isAdding, onSelect, onHover }) => {
-  return (
-    <button
-      data-idx={index}
-      onClick={() => onSelect(item)}
-      onMouseEnter={() => onHover(index)}
-      disabled={isAdding}
-      className={`w-full px-2.5 py-2 text-left rounded-lg transition-all duration-150 flex items-center gap-3 group disabled:opacity-40 ${
-        highlighted ? 'bg-white/[0.06]' : 'hover:bg-white/[0.06]'
-      }`}
-    >
-      {/* Avatar with accent ring when active */}
-      <div className="relative shrink-0">
-        {item.avatarUrl ? (
-          <img
-            src={item.avatarUrl}
-            alt={item.displayName}
-            onError={(e) => {
-              const img = e.currentTarget as HTMLImageElement;
-              if (img.src !== DEFAULT_AVATAR) img.src = DEFAULT_AVATAR;
-            }}
-            className={`w-8 h-8 rounded-full object-cover ring-2 transition-all duration-200 shadow-sm ${
-              highlighted ? 'ring-accent/30' : 'ring-transparent group-hover:ring-accent/30'
-            }`}
-          />
-        ) : (
-          <div
-            className={`w-8 h-8 rounded-full bg-white/[0.04] ring-2 flex items-center justify-center transition-all duration-200 ${
-              highlighted ? 'ring-accent/30' : 'ring-transparent group-hover:ring-accent/30'
-            }`}
-          >
-            <Users size={13} className="text-textSecondary" />
-          </div>
-        )}
-        {/* Live dot on avatar */}
-        {item.isLive && (
-          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-500 border-2 border-surface/80"></span>
-        )}
-      </div>
-
-      {/* Info */}
-      <div className="flex-1 min-w-0">
-        <span
-          className={`block text-[13px] font-semibold truncate leading-tight transition-colors ${
-            highlighted ? 'text-accent' : 'text-textPrimary group-hover:text-accent'
-          }`}
-        >
-          {item.displayName}
-        </span>
-        <span className="block text-[11px] text-textMuted truncate mt-0.5 leading-tight">
-          {item.isLive && item.gameName ? item.gameName : item.isLive ? 'Live' : item.login}
-        </span>
-      </div>
-
-      {/* Add indicator */}
-      <div
-        className={`w-6 h-6 rounded-full flex items-center justify-center transition-all duration-200 shrink-0 ${
-          highlighted ? 'bg-accent/15' : 'bg-transparent group-hover:bg-accent/15'
-        }`}
-      >
-        <Plus size={13} className={`transition-colors ${highlighted ? 'text-accent' : 'text-textMuted group-hover:text-accent'}`} />
-      </div>
-    </button>
   );
 };
 
