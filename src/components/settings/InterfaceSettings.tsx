@@ -10,19 +10,22 @@ export type SidebarMode = 'expanded' | 'compact' | 'hidden' | 'disabled';
 export const getSidebarSettings = () => {
     const mode = localStorage.getItem('sidebar-mode') as SidebarMode | null;
     const expandOnHover = localStorage.getItem('sidebar-expand-on-hover');
+    const showRecommended = localStorage.getItem('sidebar-show-recommended');
 
     return {
         mode: mode || 'compact',
-        expandOnHover: expandOnHover ? JSON.parse(expandOnHover) : true
+        expandOnHover: expandOnHover ? JSON.parse(expandOnHover) : true,
+        showRecommended: showRecommended ? JSON.parse(showRecommended) : true
     };
 };
 
-export const saveSidebarSettings = (mode: SidebarMode, expandOnHover: boolean) => {
+export const saveSidebarSettings = (mode: SidebarMode, expandOnHover: boolean, showRecommended: boolean) => {
     localStorage.setItem('sidebar-mode', mode);
     localStorage.setItem('sidebar-expand-on-hover', JSON.stringify(expandOnHover));
+    localStorage.setItem('sidebar-show-recommended', JSON.stringify(showRecommended));
 
     window.dispatchEvent(new CustomEvent('sidebar-settings-changed', {
-        detail: { mode, expandOnHover }
+        detail: { mode, expandOnHover, showRecommended }
     }));
 };
 
@@ -56,6 +59,7 @@ const InterfaceSettings = () => {
     const { settings, updateSettings } = useAppStore();
     const [sidebarMode, setSidebarMode] = useState<SidebarMode>('compact');
     const [expandOnHover, setExpandOnHover] = useState(true);
+    const [showRecommended, setShowRecommended] = useState(true);
 
     // Compact (centered window) is the default; turning it off grows Settings
     // to a full-page layout that fills the entire app.
@@ -86,17 +90,23 @@ const InterfaceSettings = () => {
         queueMicrotask(() => {
             setSidebarMode(settings.mode);
             setExpandOnHover(settings.expandOnHover);
+            setShowRecommended(settings.showRecommended);
         });
     }, []);
 
     const handleModeChange = (mode: SidebarMode) => {
         setSidebarMode(mode);
-        saveSidebarSettings(mode, expandOnHover);
+        saveSidebarSettings(mode, expandOnHover, showRecommended);
     };
 
     const handleExpandOnHoverChange = (enabled: boolean) => {
         setExpandOnHover(enabled);
-        saveSidebarSettings(sidebarMode, enabled);
+        saveSidebarSettings(sidebarMode, enabled, showRecommended);
+    };
+
+    const handleShowRecommendedChange = (enabled: boolean) => {
+        setShowRecommended(enabled);
+        saveSidebarSettings(sidebarMode, expandOnHover, enabled);
     };
 
     const modeDescription = (() => {
@@ -153,6 +163,17 @@ const InterfaceSettings = () => {
                         }
                     />
                 )}
+
+                <SettingsRow
+                    title="Show recommended streams"
+                    description="Show the Recommended section in the sidebar. Turn this off to keep only your followed channels and favorites."
+                    control={
+                        <Toggle
+                            enabled={showRecommended}
+                            onChange={() => handleShowRecommendedChange(!showRecommended)}
+                        />
+                    }
+                />
             </SettingsSection>
 
             <SettingsSection id="settings-section-motion" label="Motion">

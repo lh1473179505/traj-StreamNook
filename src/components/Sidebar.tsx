@@ -125,7 +125,7 @@ const StreamItem = memo(({
                 className={`group
                     flex items-center px-2 py-1.5 cursor-pointer rounded transition-all duration-200
                     ${isCurrentStream
-                        ? 'bg-surface-active border-l-2 border-accent'
+                        ? 'border-l-2 border-accent hover:bg-surface-hover'
                         : 'hover:bg-surface-hover border-l-2 border-transparent'
                     }
                     ${showExpanded ? 'gap-2 justify-start' : 'gap-0 justify-center'}
@@ -271,6 +271,10 @@ const Sidebar = () => {
         const settings = getSidebarSettings();
         return settings.expandOnHover;
     });
+    const [showRecommended, setShowRecommended] = useState(() => {
+        const settings = getSidebarSettings();
+        return settings.showRecommended;
+    });
 
     // Hover and manual expand states
     const [isHovered, setIsHovered] = useState(false);
@@ -350,9 +354,10 @@ const Sidebar = () => {
 
     // Listen for settings changes from InterfaceSettings
     useEffect(() => {
-        const handleSettingsChange = (event: CustomEvent<{ mode: SidebarMode; expandOnHover: boolean }>) => {
+        const handleSettingsChange = (event: CustomEvent<{ mode: SidebarMode; expandOnHover: boolean; showRecommended: boolean }>) => {
             setSidebarMode(event.detail.mode);
             setExpandOnHover(event.detail.expandOnHover);
+            setShowRecommended(event.detail.showRecommended);
         };
 
         window.addEventListener('sidebar-settings-changed', handleSettingsChange as EventListener);
@@ -483,14 +488,14 @@ const Sidebar = () => {
 
         const handleScroll = () => {
             const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-            if (scrollHeight - scrollTop - clientHeight < 100 && hasMoreRecommended && !isLoadingMore) {
+            if (showRecommended && scrollHeight - scrollTop - clientHeight < 100 && hasMoreRecommended && !isLoadingMore) {
                 loadMoreRecommendedStreams();
             }
         };
 
         scrollContainer.addEventListener('scroll', handleScroll);
         return () => scrollContainer.removeEventListener('scroll', handleScroll);
-    }, [hasMoreRecommended, isLoadingMore, loadMoreRecommendedStreams]);
+    }, [showRecommended, hasMoreRecommended, isLoadingMore, loadMoreRecommendedStreams]);
 
     // Fetch profile images from Twitch Helix API
     useEffect(() => {
@@ -706,14 +711,36 @@ const Sidebar = () => {
         return null;
     }
 
-    // Sort followed streams by favorites first
-    const sortedFollowedStreams = [...followedStreams].sort((a, b) => {
-        const aIsFavorite = isFavoriteStreamer(a.user_id);
-        const bIsFavorite = isFavoriteStreamer(b.user_id);
-        if (aIsFavorite && !bIsFavorite) return -1;
-        if (!aIsFavorite && bIsFavorite) return 1;
-        return 0;
-    });
+    // Split followed (live) channels into Favorites and the rest, so each gets
+    // its own labeled section — mirroring how Followed is separated from
+    // Recommended. The sidebar only ever lists live channels, so these are the
+    // live favorites vs. the live non-favorite follows.
+    const favoriteStreams = followedStreams.filter(s => isFavoriteStreamer(s.user_id));
+    const followedNonFavoriteStreams = followedStreams.filter(s => !isFavoriteStreamer(s.user_id));
+
+    // Section-presence flags drive both the headers and the dividers between them.
+    const hasFavorites = isAuthenticated && favoriteStreams.length > 0;
+    const hasFollowed = isAuthenticated && followedNonFavoriteStreams.length > 0;
+    const hasRecommended = showRecommended && recommendedStreams.length > 0;
+
+    // Shared row renderer so Favorites / Followed / Recommended stay identical.
+    const renderStreamItem = (stream: TwitchStream, showFavorite: boolean) => (
+        <StreamItem
+            key={stream.id}
+            stream={stream}
+            showFavorite={showFavorite}
+            showExpanded={showExpanded}
+            isCurrentStream={currentStream?.user_login === stream.user_login}
+            isFavorite={isFavoriteStreamer(stream.user_id)}
+            hasDrops={stream.game_name ? dropsGameNames.has(stream.game_name.toLowerCase()) : false}
+            hypeTrainStatus={activeHypeTrainChannels.get(stream.user_id)}
+            watchStreak={watchStreaks[stream.user_id] ?? 0}
+            isHeartAnimating={animatingHearts.has(stream.user_id)}
+            profileImage={getProfileImage(stream)}
+            onStreamClick={handleStreamClick}
+            onFavoriteClick={handleFavoriteClick}
+        />
+    );
 
     return (
         <>
@@ -753,9 +780,18 @@ const Sidebar = () => {
             <div
                 ref={sidebarRef}
                 className={`
-                    h-full border-r border-borderSubtle flex flex-col flex-shrink-0
+                    border-r border-borderSubtle flex flex-col flex-shrink-0
                     transition-[width,min-width,opacity,transform] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]
-                    ${isOverlay ? 'fixed left-0 top-0 z-50 mt-8' : 'relative'}
+                    ${isOverlay
+                        // Overlay panels are position:fixed, so a percentage height
+                        // resolves against the viewport. Anchoring top (below the
+                        // 32px title bar) AND bottom makes the panel exactly as tall
+                        // as the content area — the old `top-0 mt-8 h-full` resolved
+                        // to a full 100vh shoved down 32px, hiding the bottom 32px of
+                        // the scroll list off-screen at every non-fullscreen height.
+                        ? 'fixed left-0 top-8 bottom-0 z-50'
+                        : 'relative h-full'
+                    }
                 `}
                 style={{
                     width: width,
@@ -813,9 +849,18 @@ const Sidebar = () => {
                     className="absolute inset-0 z-0 transition-opacity duration-200 ease-out pointer-events-none"
                     style={{
                         opacity: blurReady ? 1 : 0,
-                        backgroundColor: 'rgba(26, 26, 27, 0.75)',
-                        backdropFilter: blurReady ? 'blur(24px)' : undefined,
-                        WebkitBackdropFilter: blurReady ? 'blur(24px)' : undefined,
+                        // Glassiness-aware frosted backing — tracks the global
+                        // Glassiness slider in lockstep with every other glass
+                        // surface. Same two-part recipe as .glass-panel: an opaque
+                        // tertiary base fades IN as --glass-strength drops toward 0
+                        // (so the panel goes fully solid at 0%), with the signature
+                        // dark tint always layered on top via background-image.
+                        backgroundColor: 'color-mix(in srgb, var(--color-background-tertiary) calc((1 - var(--glass-strength)) * 100%), transparent)',
+                        backgroundImage: 'linear-gradient(rgba(26, 26, 27, 0.75), rgba(26, 26, 27, 0.75))',
+                        // Frost scales with the slider; the html[data-glass="off"]
+                        // floor hard-strips any remaining blur at 0%.
+                        backdropFilter: blurReady ? 'blur(calc(24px * var(--glass-strength)))' : undefined,
+                        WebkitBackdropFilter: blurReady ? 'blur(calc(24px * var(--glass-strength)))' : undefined,
                     }}
                 />
 
@@ -857,66 +902,50 @@ const Sidebar = () => {
                 {/* Scrollable stream list */}
                 <div
                     ref={scrollContainerRef}
-                    className={`relative z-10 flex-1 overflow-x-hidden py-1 ${
+                    className={`relative z-10 flex-1 min-h-0 overflow-x-hidden py-1 ${
                         // Hide scrollbar in compact mode with expand-on-hover when not expanded
                         sidebarMode === 'compact' && expandOnHover && !showExpanded
                             ? 'overflow-y-hidden'
                             : 'overflow-y-auto scrollbar-thin'
                         }`}
                 >
-                    {/* Followed Streams Section */}
-                    {isAuthenticated && sortedFollowedStreams.length > 0 && (
+                    {/* Favorites Section — favorited live channels, pulled out of
+                        Followed into their own labeled group. */}
+                    {hasFavorites && (
                         <div className="mb-2">
-                            <SectionHeader icon={Users} label="Followed" count={sortedFollowedStreams.length} showExpanded={showExpanded} />
+                            <SectionHeader icon={Heart} label="Favorites" count={favoriteStreams.length} showExpanded={showExpanded} />
                             <div className="space-y-0.5">
-                                {sortedFollowedStreams.map(stream => (
-                                    <div key={stream.id} className="group">
-                                        <StreamItem
-                                            stream={stream}
-                                            showFavorite={true}
-                                            showExpanded={showExpanded}
-                                            isCurrentStream={currentStream?.user_login === stream.user_login}
-                                            isFavorite={isFavoriteStreamer(stream.user_id)}
-                                            hasDrops={stream.game_name ? dropsGameNames.has(stream.game_name.toLowerCase()) : false}
-                                            hypeTrainStatus={activeHypeTrainChannels.get(stream.user_id)}
-                                            watchStreak={watchStreaks[stream.user_id] ?? 0}
-                                            isHeartAnimating={animatingHearts.has(stream.user_id)}
-                                            profileImage={getProfileImage(stream)}
-                                            onStreamClick={handleStreamClick}
-                                            onFavoriteClick={handleFavoriteClick}
-                                        />
-                                    </div>
-                                ))}
+                                {favoriteStreams.map(stream => renderStreamItem(stream, true))}
                             </div>
                         </div>
                     )}
 
-                    {/* Divider */}
-                    {isAuthenticated && sortedFollowedStreams.length > 0 && recommendedStreams.length > 0 && (
+                    {/* Divider between Favorites and Followed */}
+                    {hasFavorites && hasFollowed && (
+                        <div className="mx-2 my-2 border-t border-borderSubtle" />
+                    )}
+
+                    {/* Followed Streams Section — live follows that aren't favorited. */}
+                    {hasFollowed && (
+                        <div className="mb-2">
+                            <SectionHeader icon={Users} label="Followed" count={followedNonFavoriteStreams.length} showExpanded={showExpanded} />
+                            <div className="space-y-0.5">
+                                {followedNonFavoriteStreams.map(stream => renderStreamItem(stream, true))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Divider before Recommended */}
+                    {hasRecommended && (hasFavorites || hasFollowed) && (
                         <div className="mx-2 my-2 border-t border-borderSubtle" />
                     )}
 
                     {/* Recommended Streams Section */}
-                    {recommendedStreams.length > 0 && (
+                    {hasRecommended && (
                         <div>
                             <SectionHeader icon={Sparkles} label="Recommended" count={recommendedStreams.length} showExpanded={showExpanded} />
                             <div className="space-y-0.5">
-                                {recommendedStreams.map(stream => (
-                                    <StreamItem
-                                        key={stream.id}
-                                        stream={stream}
-                                        showExpanded={showExpanded}
-                                        isCurrentStream={currentStream?.user_login === stream.user_login}
-                                        isFavorite={isFavoriteStreamer(stream.user_id)}
-                                        hasDrops={stream.game_name ? dropsGameNames.has(stream.game_name.toLowerCase()) : false}
-                                        hypeTrainStatus={activeHypeTrainChannels.get(stream.user_id)}
-                                        watchStreak={watchStreaks[stream.user_id] ?? 0}
-                                        isHeartAnimating={animatingHearts.has(stream.user_id)}
-                                        profileImage={getProfileImage(stream)}
-                                        onStreamClick={handleStreamClick}
-                                        onFavoriteClick={handleFavoriteClick}
-                                    />
-                                ))}
+                                {recommendedStreams.map(stream => renderStreamItem(stream, false))}
                             </div>
 
                             {/* Loading more indicator */}
@@ -929,7 +958,7 @@ const Sidebar = () => {
                     )}
 
                     {/* Empty state */}
-                    {!isAuthenticated && recommendedStreams.length === 0 && (
+                    {!isAuthenticated && !hasRecommended && (
                         <div className={`
                             flex items-center justify-center text-center p-4
                             ${showExpanded ? '' : 'flex-col'}
