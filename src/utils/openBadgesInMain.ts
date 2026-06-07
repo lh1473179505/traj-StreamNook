@@ -1,4 +1,5 @@
-// Route badge-overlay opens to the main window.
+// Route profile-card surface opens (badge overlays + the public profile viewer)
+// to the main window.
 //
 // Every Tauri WebView has its own JS context and its own AppStore instance,
 // so calling `useAppStore.getState().openBadgesWithBadge(...)` inside a
@@ -77,4 +78,31 @@ export function openBadgesWithTargetInMain(target: { tab: string; query?: string
     return;
   }
   useAppStore.getState().openBadgesWithTarget(target);
+}
+
+// Open a member's public StreamNook profile in the draggable viewer overlay.
+// PublicProfileOverlay is mounted ONLY in the full App, not in the profile-card
+// popout window (`#/profile` renders ProfileCardPage alone) — so calling the
+// store directly from a popout flips state nothing renders. From a popout we
+// emit to main instead, then close THIS profile card: it's alwaysOnTop, so
+// leaving it open would occlude the viewer that just opened in main. MultiChat
+// popouts are persistent surfaces, so those stay open.
+export function openProfileViewerInMain(userId: string): void {
+  const popout = isPopoutWindow();
+  Logger.debug(`[openBadgesInMain] openProfileViewer popout=${popout} userId=${userId}`);
+  if (popout) {
+    void (async () => {
+      await emitToMain('open-profile-viewer', { userId });
+      if (window.location.hash.startsWith('#/profile')) {
+        try {
+          const { getCurrentWindow } = await import('@tauri-apps/api/window');
+          await getCurrentWindow().close();
+        } catch (err) {
+          Logger.warn('[openBadgesInMain] close profile popout failed:', err);
+        }
+      }
+    })();
+    return;
+  }
+  useAppStore.getState().openProfileViewer(userId);
 }

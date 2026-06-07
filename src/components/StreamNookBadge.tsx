@@ -11,7 +11,7 @@ import {
   subscribeAtmospheresVersion,
 } from '../services/supabaseService';
 import { COSMETIC_ASSET_BY_SLUG } from './cosmeticAssets';
-import { useAppStore } from '../stores/AppStore';
+import { openProfileViewerInMain } from '../utils/openBadgesInMain';
 import { useChatUserStore } from '../stores/chatUserStore';
 import { AtmosphereBackground } from './AtmosphereBackground';
 import { getAtmosphere } from '../services/atmospheres';
@@ -386,13 +386,14 @@ export const StreamNookBadge = memo(function StreamNookBadge({
   userNumber,
   side = 'top',
 }: StreamNookBadgeProps) {
-  const openProfileViewer = useAppStore((s) => s.openProfileViewer);
-  // Click opens this member's public StreamNook profile in the draggable
-  // viewer overlay. stopPropagation so the chat row's own click handler
-  // (which opens the Twitch UserProfileCard) doesn't also fire.
+  // Click opens this member's public StreamNook profile in the draggable viewer
+  // overlay. Routed via openProfileViewerInMain so it also works from the
+  // profile-card / MultiChat popout windows (their own store doesn't mount the
+  // viewer). stopPropagation so the chat row's own click handler (which opens
+  // the Twitch UserProfileCard) doesn't also fire.
   const handleClick = (e: MouseEvent) => {
     e.stopPropagation();
-    if (userId) openProfileViewer(userId);
+    if (userId) openProfileViewerInMain(userId);
   };
 
   const cosmeticAsset = useActiveCosmeticAsset(userId);

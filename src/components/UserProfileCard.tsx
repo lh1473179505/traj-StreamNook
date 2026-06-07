@@ -4,7 +4,7 @@ import { motion, AnimatePresence, useScroll, useTransform, useReducedMotion, use
 import { setUserNickname, setUserColor } from '../utils/userChatOverrides';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/AppStore';
-import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain, openBadgesWithBadgeInMain, openBadgesWithTargetInMain } from '../utils/openBadgesInMain';
+import { openBadgesWithPaintInMain, openBadgesOnStreamNookInMain, openBadgesWithBadgeInMain, openBadgesWithTargetInMain, openProfileViewerInMain } from '../utils/openBadgesInMain';
 import { computePaintStyle, getBadgeImageUrls, getBadgeFallbackUrls, queueCosmeticForCaching } from '../services/seventvService';
 import { FallbackImage } from './FallbackImage';
 import { formatIVRDate, formatSubTenure } from '../services/ivrService';
@@ -213,6 +213,12 @@ interface NicknameEditorProps {
 // Normalize whatever shape the IRC color comes in as into a valid #RRGGBB
 // hex string that <input type="color"> will accept. Empty / malformed input
 // falls back to Twitch's default purple.
+// The free, universal StreamNook badge (is_default in the cosmetics catalog).
+// StreamNookBadge renders this as its fallback when a member has no cosmetic
+// explicitly equipped, so the inactive-thumbnail list must exclude it to avoid
+// rendering the same Member badge twice.
+const DEFAULT_COSMETIC_SLUG = 'streamnook-default';
+
 const TWITCH_DEFAULT_COLOR = '#9147FF';
 function normalizeHex(input: string | null | undefined): string {
   if (!input) return TWITCH_DEFAULT_COLOR;
@@ -455,14 +461,26 @@ const UserProfileCard = ({
     [userId, isStreamNookMember, getCosmeticsVersion()],
   );
   const activeStreamNookSlug = isStreamNookMember && userId ? getActiveCosmeticSlug(userId) : null;
+  // The <StreamNookBadge> slot below always renders the member's PRIMARY mark:
+  // their active cosmetic when it has a bundled asset, otherwise the default
+  // "StreamNook Member" badge as a fallback (StreamNookBadge falls back to the
+  // same streamnook-logo asset that the 'streamnook-default' slug uses). Whatever
+  // that slot shows must be excluded from the inactive thumbnails, or it renders
+  // twice — the double-Member-badge bug for members who never explicitly equipped
+  // a cosmetic (active slug null -> primary shows the default, and the default was
+  // ALSO being listed here as an "inactive owned" thumbnail).
+  const shownPrimarySlug =
+    activeStreamNookSlug && COSMETIC_ASSET_BY_SLUG[activeStreamNookSlug]
+      ? activeStreamNookSlug
+      : DEFAULT_COSMETIC_SLUG;
   // Non-active owned badges, sorted by catalog sort_order so the UI order stays stable.
   const inactiveOwnedSlugs = useMemo(() => {
     return ownedStreamNookSlugs
-      .filter((s) => s !== activeStreamNookSlug && COSMETIC_ASSET_BY_SLUG[s])
+      .filter((s) => s !== shownPrimarySlug && COSMETIC_ASSET_BY_SLUG[s])
       .map((s) => ({ slug: s, cosmetic: getCosmeticBySlug(s) }))
       .filter((entry): entry is { slug: string; cosmetic: NonNullable<ReturnType<typeof getCosmeticBySlug>> } => entry.cosmetic !== null)
       .sort((a, b) => a.cosmetic.sort_order - b.cosmetic.sort_order);
-  }, [ownedStreamNookSlugs, activeStreamNookSlug]);
+  }, [ownedStreamNookSlugs, shownPrimarySlug]);
   const streamNookBadgeCount = isStreamNookMember ? 1 + inactiveOwnedSlugs.length : 0;
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     (window as any).__snProfileDebug = { userId, username, displayName, streamNookUserNumber };
@@ -982,11 +1000,22 @@ const UserProfileCard = ({
         </Tooltip>
       )}
       {streamNookUserNumber !== null && (
-        <Tooltip content="StreamNook user" side="top">
-          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/5 border border-white/10">
+        <Tooltip content="View StreamNook profile" side="top">
+          <button
+            onClick={(e) => {
+              // Open this member's public StreamNook profile in the viewer
+              // overlay, mirroring the StreamNook chat badge. Routed to main
+              // because this card is usually an alwaysOnTop popout window whose
+              // own store doesn't mount the viewer. stopPropagation so the
+              // card's own drag/close handlers don't also fire.
+              e.stopPropagation();
+              if (userId) openProfileViewerInMain(userId);
+            }}
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/5 border border-white/10 cursor-pointer hover:ring-1 hover:ring-accent/50 transition-all"
+          >
             <img src={streamNookLogo} alt="StreamNook" className="w-3.5 h-3.5 object-contain" draggable={false} />
             <span className="text-[11px] font-semibold text-textPrimary tabular-nums">#{streamNookUserNumber}</span>
-          </div>
+          </button>
         </Tooltip>
       )}
     </>
