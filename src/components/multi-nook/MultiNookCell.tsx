@@ -8,7 +8,7 @@ import { usemultiNookStore } from '../../stores/multiNookStore';
 import { useChannelSocial } from '../../hooks/useChannelSocial';
 import StreamTitleWithEmojis from '../StreamTitleWithEmojis';
 import { Tooltip } from '../ui/Tooltip';
-import { GripHorizontal, Undo2, Loader2 } from 'lucide-react';
+import { GripHorizontal, Undo2, Loader2, RefreshCcw, EyeOff, WifiOff } from 'lucide-react';
 import { Heart, HeartBreak, X as XIcon } from 'phosphor-react';
 import { Logger } from '../../utils/logger';
 
@@ -20,10 +20,11 @@ interface MultiNookCellProps {
 }
 
 export const MultiNookCell: React.FC<MultiNookCellProps> = ({ slot, cssOrder, gridSpanClass = '', customStyle = {} }) => {
-  const { id, channelLogin, channelName, channelId, volume, muted, isFocused, streamUrl, isMinimized = false } = slot;
-  const { toggleFocusSlot, dockSlot, removeSlot, changeSlotQuality } = usemultiNookStore();
+  const { id, channelLogin, channelName, channelId, volume, muted, isFocused, streamUrl, isMinimized = false, loadError, profileImageUrl } = slot;
+  const { toggleFocusSlot, dockSlot, removeSlot, changeSlotQuality, retrySlot } = usemultiNookStore();
 
-  const isLoading = !streamUrl;
+  // Offline tiles show the offline overlay instead of an endless loading spinner.
+  const isLoading = !streamUrl && !loadError;
 
   const { videoRef, playerRef, isPlaying, isBuffering, error } = useMultiNookPlayer({
     streamUrl,
@@ -239,9 +240,52 @@ export const MultiNookCell: React.FC<MultiNookCellProps> = ({ slot, cssOrder, gr
       />
 
       {/* Loading & Error States */}
-      {(isLoading || isBuffering) && !error && (
+      {(isLoading || isBuffering) && !error && !loadError && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10 pointer-events-none">
           <i className="ri-loader-4-line text-4xl text-white animate-spin"></i>
+        </div>
+      )}
+
+      {/* Offline / unreachable: the proxy could not start (e.g. the streamer is
+          offline). Lets the user retry or hide the tile so it stops eating grid
+          space while the others play. */}
+      {loadError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/85 backdrop-blur-sm z-30 px-4 text-center">
+          {profileImageUrl ? (
+            <img
+              src={profileImageUrl}
+              alt=""
+              className="w-12 h-12 rounded-full object-cover ring-2 ring-white/10 grayscale opacity-80"
+            />
+          ) : (
+            <div className="w-12 h-12 rounded-full bg-white/[0.06] flex items-center justify-center">
+              <WifiOff className="w-5 h-5 text-textMuted" />
+            </div>
+          )}
+          <div>
+            <p className="text-sm font-semibold text-white/90 truncate max-w-[220px]">
+              {channelName || channelLogin}
+            </p>
+            <p className="text-xs text-textMuted mt-0.5">Offline or unreachable</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Tooltip content="Try loading this stream again" delay={300} side="bottom">
+              <button
+                onClick={() => retrySlot(id)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-button text-textSecondary hover:text-accent text-xs font-semibold"
+              >
+                <RefreshCcw className="w-3.5 h-3.5" /> Retry
+              </button>
+            </Tooltip>
+            <Tooltip content="Hide this stream (tuck it into the dock tray)" delay={300} side="bottom">
+              <button
+                onClick={() => dockSlot(id)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-button text-textSecondary hover:text-white text-xs font-semibold"
+              >
+                <EyeOff className="w-3.5 h-3.5" /> Hide
+              </button>
+            </Tooltip>
+          </div>
         </div>
       )}
 

@@ -94,9 +94,10 @@ export const MultiNookView: React.FC = () => {
     }
   }, [slots.length]);
 
-  // Batch loader for concurrent synchronous instantiation
+  // Batch loader for concurrent instantiation. Tiles flagged offline (loadError)
+  // are skipped so a failed/unreachable stream doesn't keep the loader re-firing.
   useEffect(() => {
-    if (slots.some(s => !s.streamUrl)) {
+    if (slots.some(s => !s.streamUrl && !s.loadError)) {
       batchLoadMissingStreams();
     }
   }, [slots, batchLoadMissingStreams]);

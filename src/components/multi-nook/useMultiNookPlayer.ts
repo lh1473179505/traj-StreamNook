@@ -323,18 +323,42 @@ export const useMultiNookPlayer = ({
       });
       
       let playStarted = false;
+      let fragsBuffered = 0;
 
-      hls.on(Hls.Events.FRAG_BUFFERED, () => {
+      const startPlayback = () => {
         if (playStarted) return;
-        
         playStarted = true;
-        Logger.debug(`[MultiNook-${streamId}] First fragment buffered, starting playback immediately (Gate removed)`);
-        video.play().catch(e => {
+        video.play().catch((e) => {
           Logger.debug(`[MultiNook-${streamId}] Autoplay failed:`, e);
           video.muted = true;
           video.play().catch(() => {});
         });
         setIsBuffering(false);
+      };
+
+      // Build a small startup cushion before playing instead of starting on the
+      // very first fragment. Playing on one ~2s fragment means the buffer drains
+      // ~2s later if the next segment isn't ready yet, which is exactly what
+      // happens when a preset cold-starts many proxies at once (they compete for
+      // bandwidth and the relay is cold), producing a buffer stall right after the
+      // stream "loads". Waiting for ~a couple seconds of buffer rides over that
+      // cold-start gap. The cushion is measured in seconds so it adapts to the
+      // stream's segment length, and the frag-count cap keeps the wait bounded so
+      // it never hangs on the loading spinner.
+      const START_CUSHION_SECONDS = 3.5;
+      const MAX_STARTUP_FRAGS = 4;
+
+      hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        if (playStarted) return;
+        fragsBuffered += 1;
+        const b = video.buffered;
+        const bufferedDur = b.length > 0 ? b.end(b.length - 1) - b.start(0) : 0;
+        if (bufferedDur >= START_CUSHION_SECONDS || fragsBuffered >= MAX_STARTUP_FRAGS) {
+          Logger.debug(
+            `[MultiNook-${streamId}] Startup cushion ready (${bufferedDur.toFixed(1)}s over ${fragsBuffered} frags), starting playback`,
+          );
+          startPlayback();
+        }
       });
 
       const onPlaying = () => {

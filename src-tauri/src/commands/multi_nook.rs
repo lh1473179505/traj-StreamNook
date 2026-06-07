@@ -41,12 +41,11 @@ pub async fn start_multi_nook(
         ));
     }
 
-    let (use_proxy, proxy_playlist, retry_streams, stream_timeout) = {
+    let (use_proxy, proxy_playlist, stream_timeout) = {
         let settings = state.settings.lock().unwrap();
         (
             settings.streamlink.use_proxy,
             settings.streamlink.proxy_playlist.clone(),
-            settings.streamlink.retry_streams,
             settings.streamlink.stream_timeout,
         )
     };
@@ -56,13 +55,22 @@ pub async fn start_multi_nook(
     let oauth = state.twitch_auth.get_token().await.ok();
     let bases = auth_proxy::parse_proxy_bases(&proxy_playlist);
 
+    // MultiNook resolves each tile with a SINGLE attempt (retry_delay = 0). Unlike
+    // the solo player, a grid tile is expected to be live, so the solo path's
+    // retry-until-live loop is wrong here: it would keep an offline channel
+    // hammering usher / GQL / the proxy pool every `retry_streams` seconds for the
+    // full `stream_timeout` budget (60s by default), saturating the network and the
+    // shared proxy pool and stalling the OTHER tiles' playback. Failing fast lets an
+    // offline tile show its overlay right away; the per-tile Retry button (frontend)
+    // covers the rare "channel just went live" case. `stream_timeout` is still passed
+    // as the budget but is moot at retry_delay = 0 (single attempt).
     let r = tr::resolve_live_resilient(
         &channel,
         oauth.as_deref(),
         &bases,
         use_proxy,
         &quality,
-        retry_streams,
+        0,
         stream_timeout,
     )
     .await

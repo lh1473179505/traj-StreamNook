@@ -209,14 +209,28 @@ impl MultiNookServer {
                     );
                 }
             }
+
+            // Build the served playlist exactly like the solo relay (stream_server):
+            // ad-filtered base, then lower Twitch's over-declared
+            // #EXT-X-TARGETDURATION (it declares 6s for ~2s segments) to the real
+            // segment size. hls.js derives its live-playlist RELOAD cadence from
+            // targetduration, so the inflated 6 makes it re-poll too slowly to keep a
+            // small per-tile buffer fed: the tile plays through its buffer and stalls
+            // shortly after starting. The solo player only avoids this because its
+            // relay already does this rewrite; without it here, MultiNook tiles stall
+            // right after load. (Prefetch promotion stays off, matching the solo relay.)
             let (filtered, dropped, _real) = ad_detect::filter_ad_segments(text);
             if dropped > 0 {
                 debug!(
                     "[MultiNook] '{}' stripped {} ad segment(s)",
                     stream_id, dropped
                 );
-                bytes = filtered.into_bytes();
             }
+            let mut work: String = if dropped > 0 { filtered } else { text.to_string() };
+            if let Some(rt) = ad_detect::retarget_playlist(&work) {
+                work = rt;
+            }
+            bytes = work.into_bytes();
         }
 
         Ok(warp::http::Response::builder()
