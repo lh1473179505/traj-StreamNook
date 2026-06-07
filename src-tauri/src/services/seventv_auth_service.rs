@@ -287,11 +287,18 @@ impl SevenTVAuthService {
     }
 
     /// Get the 7TV OAuth login URL
-    /// User needs to visit this URL to authenticate, then we capture the token
+    /// User needs to visit this URL to authenticate, then we capture the token.
+    ///
+    /// 7TV's current (SvelteKit) website no longer auto-logs-in via the old
+    /// `7tv.app/?login=true` page (that URL now just serves the homepage and
+    /// never mints a token). Login is a real OAuth round-trip: this endpoint
+    /// 303-redirects into Twitch OAuth, Twitch returns to `7tv.app/login/callback`,
+    /// the callback finalizes the session and writes the JWT to
+    /// `localStorage['7tv-token']` before redirecting to a normal 7tv.app page.
+    /// The capture script (which polls that localStorage key on every page in the
+    /// login window) then picks it up from the final authenticated page.
     pub fn get_login_url() -> String {
-        // 7TV uses Twitch OAuth - the user logs into 7TV via Twitch
-        // After login, they can get their token from the browser's localStorage or cookies
-        "https://7tv.app/?login=true".to_string()
+        "https://api.7tv.app/v4/auth/login?platform=twitch".to_string()
     }
 
     // ── Per-account 7TV tokens (for linked secondary accounts) ───────────────
