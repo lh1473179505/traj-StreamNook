@@ -1,8 +1,14 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from './AppStore';
-import { MultiNookSlot } from '../types';
+import { MultiNookSlot, MultiNookPresetChannel } from '../types';
 import { Logger } from '../utils/logger';
+
+/** Slot ids whose proxy start is currently in flight. The loader effect re-fires
+ *  on every slots change, so this guards against re-invoking start_multi_nook for
+ *  a tile that's already starting (which would otherwise re-attempt a slow/offline
+ *  stream on each sibling that resolves). */
+const inFlightStarts = new Set<string>();
 
 /** True if `activeId` still matches one of the current slots (by channel id or
  *  login — the chat switcher stores either form). */
@@ -94,6 +100,9 @@ interface MultiNookState {
   isMultiNookActive: boolean;
   isChatHidden: boolean;
   activeChatChannelId: string | null;
+  /** Id of the preset the current grid was loaded from, or null. Drives the
+   *  toolbar's "equipped preset" icon and the Stop action. Persisted with slots. */
+  activePresetId: string | null;
   slots: MultiNookSlot[];
   flyingAnimation: { x: number; y: number; id: number } | null;
   suckUpLogin: string | null;
@@ -109,6 +118,7 @@ interface MultiNookState {
   removeSlotByLogin: (channelLogin: string) => Promise<void>;
   updateSlot: (id: string, updates: Partial<MultiNookSlot>) => void;
   changeSlotQuality: (id: string, quality: string) => Promise<void>;
+  retrySlot: (id: string) => void;
   reorderSlots: (newSlots: MultiNookSlot[]) => void;
   toggleFocusSlot: (id: string) => void;
   dockSlot: (id: string) => void;
@@ -117,6 +127,11 @@ interface MultiNookState {
   setActiveChatChannelId: (id: string | null) => void;
   toggleChatHidden: () => void;
   batchLoadMissingStreams: () => Promise<void>;
+  loadPresetChannels: (channels: MultiNookPresetChannel[], mode: 'replace' | 'append', presetId?: string) => Promise<void>;
+  /** Tag the current grid with the preset it was loaded from (null = no equipped preset). Persisted. */
+  setActivePresetId: (id: string | null) => Promise<void>;
+  /** Stop and tear down every tile, leaving an empty grid (used by "Stop preset"). Stays in MultiNook. */
+  clearAllSlots: () => Promise<void>;
   
   // Synchronization
   resyncAllSlots: () => void;
@@ -130,6 +145,7 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
   isMultiNookActive: false,
   isChatHidden: false,
   activeChatChannelId: null,
+  activePresetId: null,
   slots: [],
   flyingAnimation: null,
   suckUpLogin: null,
@@ -138,39 +154,149 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
 
   batchLoadMissingStreams: async () => {
     const slots = get().slots;
-    const missing = slots.filter(s => !s.streamUrl);
+    // Skip tiles already loaded, already flagged offline, or with a start in flight.
+    const missing = slots.filter((s) => !s.streamUrl && !s.loadError && !inFlightStarts.has(s.id));
     if (missing.length === 0) return;
 
-    // Concurrently fetch all missing stream URLs
-    const fetchPromises = missing.map(async (slot) => {
-      try {
-        const url = await invoke<string>('start_multi_nook', {
-          streamId: slot.id,
-          url: `https://twitch.tv/${slot.channelLogin}`,
-          quality: slot.quality || 'best', // Per-tile quality (set via the focused tile's gear menu)
-        });
-        return { id: slot.id, url };
-      } catch (err) {
-        Logger.error(`Failed to start multi-nook proxy for ${slot.channelLogin}:`, err);
-        return { id: slot.id, url: null };
-      }
-    });
+    missing.forEach((s) => inFlightStarts.add(s.id));
 
-    const results = await Promise.all(fetchPromises);
-
-    // Batch update the state so all streams get their URLs in the exact same React render frame
-    set((state) => {
-      let changed = false;
-      const newSlots = state.slots.map(s => {
-        const resolved = results.find(r => r.id === s.id);
-        if (resolved && resolved.url) {
-          changed = true;
-          return { ...s, streamUrl: resolved.url };
+    // Start each proxy independently and apply its result the moment it lands, so a
+    // single offline/unreachable stream can't hold up the rest of the grid. The
+    // post-load buffer stall this used to cause was NOT a contention problem (no
+    // stagger needed): the MultiNook relay wasn't rewriting Twitch's over-declared
+    // playlist targetduration, so hls.js under-polled and the buffer drained. That
+    // is fixed in the relay (multi_nook_server retarget_playlist), so tiles can
+    // cold-start together again.
+    await Promise.all(
+      missing.map(async (slot) => {
+        try {
+          const url = await invoke<string>('start_multi_nook', {
+            streamId: slot.id,
+            url: `https://twitch.tv/${slot.channelLogin}`,
+            quality: slot.quality || 'best', // Per-tile quality (set via the focused tile's gear menu)
+          });
+          set((state) => ({
+            slots: state.slots.map((s) => (s.id === slot.id ? { ...s, streamUrl: url, loadError: false } : s)),
+          }));
+        } catch (err) {
+          Logger.error(`Failed to start multi-nook proxy for ${slot.channelLogin}:`, err);
+          // Flag the tile offline so it shows the friendly overlay and the loader
+          // stops re-attempting it (retry is user-driven via retrySlot / resync).
+          set((state) => ({
+            slots: state.slots.map((s) => (s.id === slot.id ? { ...s, loadError: true } : s)),
+          }));
+        } finally {
+          inFlightStarts.delete(slot.id);
         }
-        return s;
-      });
-      return changed ? { slots: newSlots } : state;
+      }),
+    );
+  },
+
+  loadPresetChannels: async (channels, mode, presetId) => {
+    // Drop duplicate logins inside the preset itself, preserving order.
+    const seen = new Set<string>();
+    const unique = channels.filter((ch) => {
+      const key = ch.channelLogin.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
+
+    if (mode === 'append') {
+      // Reuse the single-add path so dedup-against-grid, the 25 cap, proxy start,
+      // and fresh Twitch metadata enrichment all behave exactly like a manual add.
+      for (const ch of unique) {
+        await get().addSlot(ch.channelLogin);
+      }
+      return;
+    }
+
+    // --- replace mode ---
+    // Tear down every live proxy/HLS for the outgoing grid BEFORE swapping slots so
+    // nothing is left running (no orphaned proxies = no leak from loading presets).
+    const outgoing = get().slots;
+    try {
+      await invoke('stop_all_multi_nooks');
+    } catch (e) {
+      Logger.error('[MultiNook] Failed to stop proxies before loading preset', e);
+    }
+    for (const slot of outgoing) {
+      if (slot.channelId) {
+        invoke('unregister_active_channel', { channelId: slot.channelId }).catch(() => {});
+      }
+    }
+
+    const MAX_SLOTS = 25;
+    const capped = unique.slice(0, MAX_SLOTS);
+    if (unique.length > MAX_SLOTS) {
+      useAppStore.getState().addToast(
+        `Preset has ${unique.length} channels; loaded the first ${MAX_SLOTS}`,
+        'info',
+      );
+    }
+
+    // Build fresh slots from the preset's cached metadata, with no per-channel Twitch
+    // round-trip, so a preset opens instantly. First tile is focused/unmuted; the
+    // rest start muted, matching how a normal grid fills in.
+    const base = Date.now();
+    const newSlots: MultiNookSlot[] = capped.map((ch, i) => ({
+      id: `cell-${base}-${i}`,
+      channelLogin: ch.channelLogin,
+      channelId: ch.channelId || undefined,
+      channelName: ch.channelName || ch.channelLogin,
+      profileImageUrl: ch.profileImageUrl || undefined,
+      quality: ch.quality || undefined,
+      volume: 0.5,
+      muted: i > 0,
+      isFocused: i === 0,
+    }));
+
+    // streamUrl is intentionally left undefined: MultiNookView's missing-stream
+    // loader picks these up and concurrently starts the proxies on the next frame.
+    // Tag the grid with the preset it came from (replace mode = the grid IS this preset).
+    set({ slots: newSlots, activeChatChannelId: pickActiveChatChannel(newSlots), activePresetId: presetId ?? null });
+
+    for (const slot of newSlots) {
+      if (slot.channelId) {
+        invoke('register_active_channel', { channelId: slot.channelId }).catch(() => {});
+      }
+    }
+
+    if (newSlots.length > 0) {
+      broadcastMultiNookPresence(newSlots);
+    }
+    await get().saveSlots();
+  },
+
+  setActivePresetId: async (id: string | null) => {
+    if (get().activePresetId === id) return;
+    set({ activePresetId: id });
+    await get().saveSlots();
+  },
+
+  clearAllSlots: async () => {
+    // Stop every live proxy/HLS and drop the grid, but stay in MultiNook (empty
+    // grid). Used by "Stop preset": closes out everything the preset opened
+    // without deleting the preset, and clears the equipped-preset tag.
+    const current = get().slots;
+    try {
+      await invoke('stop_all_multi_nooks');
+    } catch (e) {
+      Logger.error('[MultiNook] Failed to stop proxies on clearAllSlots', e);
+    }
+    for (const slot of current) {
+      if (slot.channelId) {
+        invoke('unregister_active_channel', { channelId: slot.channelId }).catch(() => {});
+      }
+    }
+    set({ slots: [], activeChatChannelId: null, activePresetId: null });
+
+    // Revert presence to idle since nothing is playing.
+    const settings = useAppStore.getState().settings;
+    if (settings?.discord_rpc_enabled) {
+      invoke('set_idle_discord_presence').catch(() => {});
+    }
+    await get().saveSlots();
   },
 
   triggerAddAnimation: (x: number, y: number, channelLogin: string) => {
@@ -234,8 +360,16 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     set(state => ({
       slots: state.slots.map(slot => ({
         ...slot,
-        streamUrl: undefined // Clearing streamUrl forces MultiNookCell to natively remount and concurrently invoke start_multi_nook
+        streamUrl: undefined, // Clearing streamUrl forces MultiNookCell to natively remount and concurrently invoke start_multi_nook
+        loadError: false,     // Give previously-offline tiles another chance
       }))
+    }));
+  },
+
+  retrySlot: (id: string) => {
+    // Clear the offline flag and URL so the loader effect re-attempts this proxy.
+    set((state) => ({
+      slots: state.slots.map((s) => (s.id === id ? { ...s, streamUrl: undefined, loadError: false } : s)),
     }));
   },
 
@@ -432,8 +566,9 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
       });
     }
     
-    set({ slots: newSlots });
-    
+    // Removing the last tile also un-equips the preset (the grid is now empty).
+    set(newSlots.length === 0 ? { slots: newSlots, activePresetId: null } : { slots: newSlots });
+
     // Always keep a valid selection: if the active chat is now gone (or was
     // never set), fall back to the focused/first remaining slot so chat keeps
     // loading. Resolves to null only when no slots remain.
@@ -483,7 +618,7 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     // loader re-invokes start_multi_nook at slot.quality and the cell remounts
     // on the new URL — same path resyncAllSlots uses.
     set(state => ({
-      slots: state.slots.map(s => (s.id === id ? { ...s, quality, streamUrl: undefined } : s)),
+      slots: state.slots.map(s => (s.id === id ? { ...s, quality, streamUrl: undefined, loadError: false } : s)),
     }));
     await get().saveSlots();
   },
@@ -641,11 +776,16 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
         const cleanedSlots = appSettings.multi_nook_slots.map(s => {
           const cleaned = { ...s };
           delete cleaned.streamUrl;
+          delete cleaned.loadError;
           return cleaned as MultiNookSlot;
         });
         // Seed the chat selection so a restored grid opens with chat loading,
-        // not blank.
-        set({ slots: cleanedSlots, activeChatChannelId: pickActiveChatChannel(cleanedSlots) });
+        // not blank. Restore the equipped-preset tag so the toolbar icon matches.
+        set({
+          slots: cleanedSlots,
+          activeChatChannelId: pickActiveChatChannel(cleanedSlots),
+          activePresetId: appSettings.multi_nook_active_preset_id ?? null,
+        });
       }
       if (appSettings.multi_nook_chat_hidden !== undefined) {
         set({ isChatHidden: appSettings.multi_nook_chat_hidden });
@@ -662,14 +802,16 @@ export const usemultiNookStore = create<MultiNookState>((set, get) => ({
     const cleanSlots = get().slots.map(s => {
       const cleaned = { ...s };
       delete cleaned.streamUrl;
+      delete cleaned.loadError;
       return cleaned as MultiNookSlot;
     });
     
     const newSettings = {
       ...currentSettings,
       multi_nook_slots: cleanSlots,
+      multi_nook_active_preset_id: get().activePresetId ?? undefined,
     };
-    
+
     try {
       await invoke('save_settings', { settings: newSettings });
       useAppStore.setState({ settings: newSettings }); // Update local app store reference

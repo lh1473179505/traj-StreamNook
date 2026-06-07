@@ -514,6 +514,39 @@ export interface MultiNookSlot {
   profileImageUrl?: string; // Cache of the channel's profile avatar
   gameName?: string;         // Current stream category (for rich presence majority game)
   quality?: string;          // Preferred Streamlink quality for this tile (defaults to 'best')
+  loadError?: boolean;       // Ephemeral: the proxy failed to start (offline/unreachable). Not persisted.
+}
+
+/** A single channel stored inside a MultiNook preset. Deliberately a lean subset
+ *  of MultiNookSlot. A preset records *which* channels to open, not transient
+ *  view state (volume/mute/focus/minimize), which is re-derived on load. */
+export interface MultiNookPresetChannel {
+  channelLogin: string;      // The Twitch channel login name (canonical key)
+  channelId?: string;        // Twitch user ID, cached for instant chat mapping on load
+  channelName?: string;      // Capitalization-correct display name for the preset UI
+  profileImageUrl?: string;  // Cached avatar so preset rows render without a network hit
+  quality?: string;          // Preferred Streamlink quality carried into the loaded tile
+}
+
+/** Visual icon for a MultiNook preset: either a Twitch game category's box art or
+ *  one of the preset's channel avatars. Absent means fall back to the default
+ *  overlapping avatar stack built from the preset's channels. */
+export interface MultiNookPresetIcon {
+  type: 'game' | 'channel';
+  imageUrl: string;  // Ready-to-render image (box art at a fixed size, or an avatar)
+  label?: string;    // Game name or channel display name, used for alt text
+}
+
+/** A named, reusable set of channels the user can open into the MultiNook grid in
+ *  one click (e.g. "FNCS", "ALGS"). Presets are pure data: they hold no live
+ *  proxies or players, so unloaded presets consume nothing at runtime. */
+export interface MultiNookPreset {
+  id: string;                       // Stable unique id (e.g. preset-<timestamp>)
+  name: string;                     // User-facing label
+  channels: MultiNookPresetChannel[];
+  icon?: MultiNookPresetIcon;       // Optional custom icon; default is the avatar stack
+  createdAt: number;                // Epoch ms, for stable default ordering
+  updatedAt: number;                // Epoch ms, bumped on every edit
 }
 
 /** Customizable keyboard shortcut overrides. Maps a bindable-command id to its
@@ -558,6 +591,8 @@ export interface Settings {
   oled_accent?: string; // Accent hex (#rrggbb) for the OLED theme, which lets you pick any accent. Default DEFAULT_OLED_ACCENT.
   multi_nook_slots?: MultiNookSlot[]; // Persisted multi-nook grid configurations
   multi_nook_chat_hidden?: boolean; // Whether the chat panel is globally hidden in MultiNook
+  multi_nook_presets?: MultiNookPreset[]; // Saved, named channel sets openable into the grid in one click
+  multi_nook_active_preset_id?: string; // Id of the preset currently loaded into the grid (the "equipped" preset), if any
   show_mod_logs?: boolean; // Whether to display the Mod Logs pane
   moderation?: ModerationSettings;
   keybindings?: KeybindingOverrides; // Customizable keyboard shortcut overrides (id -> chords)

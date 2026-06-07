@@ -436,6 +436,11 @@ pub struct MultiNookSlot {
     pub profile_image_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub game_name: Option<String>,
+    /// Preferred Streamlink quality for this tile (set via the focused tile's gear
+    /// menu). Without this field serde dropped the frontend's `quality` on the
+    /// save round-trip, so per-tile quality reset to 'best' after every restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -597,5 +602,48 @@ mod backup_persistence_tests {
         let parsed: Settings = serde_json::from_str(&json).expect("deserialize");
         assert!(parsed.extra.is_empty());
         assert_eq!(parsed.theme, original.theme);
+    }
+
+    /// MultiNook presets are a frontend-managed key the struct does not model
+    /// field-by-field; they must round-trip through `extra` so they persist across
+    /// restarts AND ride along in exported settings backups (export_settings
+    /// serializes this exact shape, minus the non-portable session keys). Every
+    /// nested field (per-channel quality, the icon) must survive verbatim.
+    #[test]
+    fn multi_nook_presets_round_trip_through_extra() {
+        let mut value = serde_json::to_value(Settings::default()).expect("serialize defaults");
+        let obj = value.as_object_mut().expect("settings is an object");
+        obj.insert(
+            "multi_nook_presets".into(),
+            serde_json::json!([
+                {
+                    "id": "preset-1",
+                    "name": "FNCS",
+                    "channels": [
+                        { "channelLogin": "mande", "channelName": "Mande", "quality": "720p60" }
+                    ],
+                    "icon": { "type": "game", "imageUrl": "https://example/boxart.jpg", "label": "Fortnite" },
+                    "createdAt": 1,
+                    "updatedAt": 2
+                }
+            ]),
+        );
+
+        let parsed: Settings = serde_json::from_value(value).expect("deserialize with presets");
+        assert!(parsed.extra.contains_key("multi_nook_presets"));
+
+        let reserialized = serde_json::to_value(&parsed).expect("serialize back");
+        let out = reserialized.as_object().expect("object");
+        // Re-emitted at the top level (so export_settings carries it), not nested under "extra".
+        assert!(!out.contains_key("extra"));
+        let presets = out
+            .get("multi_nook_presets")
+            .and_then(|v| v.as_array())
+            .expect("presets array survived");
+        let first = presets[0].as_object().expect("preset object");
+        assert_eq!(first.get("name").and_then(|v| v.as_str()), Some("FNCS"));
+        assert!(first.get("icon").is_some());
+        let chan = first["channels"][0].as_object().expect("channel object");
+        assert_eq!(chan.get("quality").and_then(|v| v.as_str()), Some("720p60"));
     }
 }
