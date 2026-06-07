@@ -386,8 +386,6 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
           $bundleName = "${{ steps.bundle.outputs.BUNDLE_NAME }}"
-          $streamlinkVersion = "${{ steps.streamlink.outputs.STREAMLINK_VERSION }}"
-          $ttvlolVersion = "${{ steps.ttvlol.outputs.TTVLOL_VERSION }}"
           $releaseUrl = "https://github.com/winters27/StreamNook/releases/tag/v$version"
 
           # --- Custom server emote substitution ---
@@ -401,8 +399,6 @@ jobs:
             feature     = '<a:alert:1380653449305391104>'    # animated red exclamation
             bugfix      = '<a:check:1380653692000407572>'    # animated checkmark
             maintenance = '<:invoice:1384683220901167104>'   # document
-            streamlink  = ''                                 # no matching emote yet
-            ttvlol      = ''                                 # no matching emote yet
             logo        = ''                                 # thumbnail already shows the Penrose logo
             rocket      = '<:bu_tg:1380653917452632064>'     # paper airplane ("shipped")
           }
@@ -441,10 +437,6 @@ jobs:
             $body = $body.Substring(0, $maxLen).TrimEnd() + "`n`n[Read the full changelog on GitHub]($releaseUrl)"
           }
 
-          # Field-name prefixes for the inline bundle-component fields
-          $streamlinkLabel = if ($emoteMap.streamlink) { "$($emoteMap.streamlink) Streamlink" } else { 'Streamlink' }
-          $ttvlolLabel     = if ($emoteMap.ttvlol)     { "$($emoteMap.ttvlol) TTV LOL"       } else { 'TTV LOL' }
-
           # Optional content line above the embed — this is the one place custom emotes
           # render alongside large bold text. Stays empty (and the field is omitted) until
           # at least one of the logo/rocket emotes is configured.
@@ -462,10 +454,6 @@ jobs:
               description = $body
               color = 9941177  # #97B1B9 StreamNook accent
               thumbnail = @{ url = "https://raw.githubusercontent.com/winters27/StreamNook/main/src-tauri/icons/icon.png" }
-              fields = @(
-                @{ name = $streamlinkLabel; value = $streamlinkVersion; inline = $true }
-                @{ name = $ttvlolLabel;     value = $ttvlolVersion;     inline = $true }
-              )
               footer = @{ text = "Download $bundleName from the release page" }
               timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             })
