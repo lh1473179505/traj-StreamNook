@@ -140,6 +140,20 @@ fn read_clipboard_text_native(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 fn main() {
+    // Apply WebView2 browser arguments uniformly to every webview in the process.
+    // Setting them via this env var (inherited by the msedgewebview2.exe child)
+    // instead of on a single window in tauri.conf.json avoids HRESULT 0x8007139F
+    // ("group or resource is not in the correct state"): WebView2 rejects any window
+    // that requests different browser args than an existing window sharing the same
+    // user-data folder. Pinning the args on only the main window broke every
+    // Rust-created window on the default profile (7TV login/refresh, automation,
+    // chat-identity). One uniform set keeps the main-window tweaks (audio in-process,
+    // SmartScreen off) while letting those popups open again.
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AudioServiceOutOfProcess",
+    );
+
     // Initialize the logging system FIRST so all debug!/error! macros work
     services::diagnostic_logger::init_logging();
 
