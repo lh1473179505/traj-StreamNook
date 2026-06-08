@@ -281,7 +281,7 @@ async fn run_plan(
     let mut discovered: HashMap<String, String> = HashMap::new();
 
     let mut iter = channels.into_iter();
-    let mut join_set: JoinSet<(String, anyhow::Result<EmoteSet>)> = JoinSet::new();
+    let mut join_set: JoinSet<(String, String, anyhow::Result<EmoteSet>)> = JoinSet::new();
 
     // Prime the scan pool.
     for _ in 0..SCAN_CONCURRENCY {
@@ -293,9 +293,17 @@ async fn run_plan(
     }
 
     while let Some(joined) = join_set.join_next().await {
-        if let Ok((login, result)) = joined {
+        if let Ok((login, id, result)) = joined {
             match result {
                 Ok(set) => {
+                    // Persist this channel's dictionary disk-first so chat can
+                    // recognize its emotes with no live fetch on join. Skip when
+                    // 7TV's circuit is open (the set is likely globals-only and
+                    // would be a deficient canonical copy); save()'s don't-shrink
+                    // guard is the backstop for everything else.
+                    if !seventv_circuit_open() {
+                        crate::services::emote_set_cache::save(&id, &set);
+                    }
                     for emote in set_emotes(&set) {
                         let (key, url) = emote_cache_target(emote, &tier);
                         discovered.entry(key).or_insert(url);
@@ -379,7 +387,7 @@ async fn run_plan(
 }
 
 fn spawn_scan(
-    join_set: &mut JoinSet<(String, anyhow::Result<EmoteSet>)>,
+    join_set: &mut JoinSet<(String, String, anyhow::Result<EmoteSet>)>,
     emote_service: &Arc<RwLock<EmoteService>>,
     login: String,
     id: String,
@@ -389,9 +397,9 @@ fn spawn_scan(
     join_set.spawn(async move {
         let guard = es.read().await;
         let result = guard
-            .fetch_channel_emotes(Some(login.clone()), Some(id), token)
+            .fetch_channel_emotes(Some(login.clone()), Some(id.clone()), token)
             .await;
-        (login, result)
+        (login, id, result)
     });
 }
 

@@ -1250,30 +1250,65 @@ impl IrcService {
         // Get broadcaster ID from channel name
         match TwitchService::get_user_by_login(channel_name).await {
             Ok(user) => {
+                let key = channel_name.to_lowercase();
+
+                // Disk-first: seed the chat parse map from the saved per-channel
+                // dictionary so chat recognizes this channel's emotes instantly,
+                // with no network round-trip, even when 7TV is slow or down. The
+                // prefetch and earlier good fetches populate this on disk. Only
+                // seed when the saved set is more complete (by 7TV count) than
+                // whatever is already in memory, so a second window joining the
+                // same channel can't downgrade a good live set.
+                if let Some(disk_set) = crate::services::emote_set_cache::load(&user.id) {
+                    let mut map = get_channel_emotes().lock().await;
+                    let current = map.get(&key).map(|s| s.seven_tv.len()).unwrap_or(0);
+                    if disk_set.seven_tv.len() > current {
+                        debug!(
+                            "[IRC Chat] Seeded {} from disk dictionary (7TV: {})",
+                            channel_name,
+                            disk_set.seven_tv.len()
+                        );
+                        map.insert(key.clone(), disk_set);
+                    }
+                }
+
+                // Live refresh. Replace the parse map only when 7TV's channel
+                // fetch definitively succeeded (seven_tv_ok); a deficient fetch
+                // (globals-only from a tripped circuit breaker, or a timed-out
+                // channel set) keeps the disk-seeded set instead of poisoning
+                // chat. An authoritative result is written through to disk too, so
+                // the next join is disk-first and legit removals persist.
                 {
                     let emote_svc = emote_service.read().await;
                     match emote_svc
-                        .fetch_channel_emotes(
+                        .fetch_channel_emotes_checked(
                             Some(channel_name.to_string()),
                             Some(user.id.clone()),
                             access_token,
                         )
                         .await
                     {
-                        Ok(emote_set) => {
+                        Ok((emote_set, seven_tv_ok)) => {
                             debug!(
-                                "[IRC Chat] Fetched {} total emotes for {} (Twitch: {}, BTTV: {}, 7TV: {}, FFZ: {})",
+                                "[IRC Chat] Fetched {} total emotes for {} (Twitch: {}, BTTV: {}, 7TV: {}, FFZ: {}); 7TV channel ok: {}",
                                 emote_set.total_count(),
                                 channel_name,
                                 emote_set.twitch.len(),
                                 emote_set.bttv.len(),
                                 emote_set.seven_tv.len(),
-                                emote_set.ffz.len()
+                                emote_set.ffz.len(),
+                                seven_tv_ok
                             );
-                            get_channel_emotes()
-                                .lock()
-                                .await
-                                .insert(channel_name.to_lowercase(), emote_set);
+                            if seven_tv_ok {
+                                crate::services::emote_set_cache::save_force(&user.id, &emote_set);
+                                get_channel_emotes().lock().await.insert(key, emote_set);
+                            } else {
+                                debug!(
+                                    "[IRC Chat] Keeping disk-seeded set for {}; 7TV channel fetch was deficient (7TV {})",
+                                    channel_name,
+                                    emote_set.seven_tv.len()
+                                );
+                            }
                         }
                         Err(e) => {
                             error!("[IRC Chat] Failed to fetch channel emotes: {}", e);

@@ -94,6 +94,11 @@ impl EmoteSet {
 struct CachedEmoteSet {
     set: EmoteSet,
     timestamp: SystemTime,
+    /// Whether the 7TV CHANNEL-specific fetch definitively succeeded for this
+    /// set. Carried through the cache so a cache hit reports the same authority
+    /// as the original fetch (a globals-only set from a failed channel fetch must
+    /// not later look authoritative just because it was cached).
+    seven_tv_ok: bool,
 }
 
 pub struct EmoteService {
@@ -121,13 +126,34 @@ impl EmoteService {
         }
     }
 
-    /// Fetch all emotes for a channel (or global) with concurrent requests
+    /// Fetch all emotes for a channel (or global) with concurrent requests.
+    /// Thin wrapper over [`fetch_channel_emotes_checked`] for callers that don't
+    /// need to know whether the 7TV channel set specifically came back.
     pub async fn fetch_channel_emotes(
         &self,
         channel_name: Option<String>,
         channel_id: Option<String>,
         access_token: Option<String>,
     ) -> Result<EmoteSet> {
+        Ok(self
+            .fetch_channel_emotes_checked(channel_name, channel_id, access_token)
+            .await?
+            .0)
+    }
+
+    /// Like [`fetch_channel_emotes`] but also reports whether the 7TV
+    /// channel-specific fetch definitively succeeded. The chat layer uses this to
+    /// decide whether a result is authoritative: `false` means 7TV's channel
+    /// endpoint failed (timeout / tripped circuit breaker), so the 7TV array is
+    /// globals-only and must NOT overwrite a healthy stored set. `true` includes
+    /// the legitimate "channel isn't on 7TV" case (a clean 404), where a
+    /// globals-only result is the correct answer for that channel.
+    pub async fn fetch_channel_emotes_checked(
+        &self,
+        channel_name: Option<String>,
+        channel_id: Option<String>,
+        access_token: Option<String>,
+    ) -> Result<(EmoteSet, bool)> {
         let cache_key = channel_id.clone().unwrap_or_else(|| "global".to_string());
 
         // Check memory cache first
@@ -137,7 +163,7 @@ impl EmoteService {
                 if let Ok(elapsed) = cached.timestamp.elapsed() {
                     if elapsed < self.cache_duration {
                         debug!("[EmoteService] Memory cache hit for {}", cache_key);
-                        return Ok(cached.set.clone());
+                        return Ok((cached.set.clone(), cached.seven_tv_ok));
                     }
                 }
             }
@@ -166,11 +192,11 @@ impl EmoteService {
             }
         };
 
-        let seven_tv_emotes = match seven_tv_result {
-            Ok(emotes) => emotes,
+        let (seven_tv_emotes, seven_tv_ok) = match seven_tv_result {
+            Ok((emotes, channel_ok)) => (emotes, channel_ok),
             Err(e) => {
                 error!("[EmoteService] 7TV fetch error: {}", e);
-                Vec::new()
+                (Vec::new(), false)
             }
         };
 
@@ -212,13 +238,16 @@ impl EmoteService {
         {
             let mut cache = self.cache.write().await;
             // Back-date the timestamp so a DEGRADED fetch expires fast (~10s)
-            // instead of being pinned for the full 5 min: Twitch failing, OR 7TV
-            // returning nothing. 7TV's trending+global sets are always present
-            // when its API is healthy, so an empty result means 7TV was down — we
-            // don't want to cache that "7TV = nothing" set for the whole session
-            // (the bug that needed a manual /refresh). A short TTL lets it
-            // re-fetch and self-heal once the provider recovers.
-            let degraded = has_twitch_error || emote_set.seven_tv.is_empty();
+            // instead of being pinned for the full 5 min. Degraded means: Twitch
+            // failing, OR 7TV returning nothing, OR the 7TV CHANNEL fetch failing
+            // (seven_tv_ok == false) so the set is globals-only. That last case is
+            // the key one: a globals-only set is not empty (44 globals), so without
+            // this it would look healthy and pin for 5 min, serving a channel its
+            // own emotes as plain text until the TTL expired. A short TTL lets it
+            // re-fetch and self-heal once 7TV recovers, on both the chat and picker
+            // paths. A channel genuinely not on 7TV has seven_tv_ok == true (clean
+            // 404), so it is correctly NOT treated as degraded.
+            let degraded = has_twitch_error || emote_set.seven_tv.is_empty() || !seven_tv_ok;
             let timestamp = if degraded {
                 SystemTime::now()
                     .checked_sub(Duration::from_secs(290))
@@ -232,11 +261,12 @@ impl EmoteService {
                 CachedEmoteSet {
                     set: emote_set.clone(),
                     timestamp,
+                    seven_tv_ok,
                 },
             );
         }
 
-        Ok(emote_set)
+        Ok((emote_set, seven_tv_ok))
     }
 
     /// Drop a channel's cached emote set so the next fetch re-pulls fresh from
@@ -636,8 +666,14 @@ impl EmoteService {
         &self,
         _channel_name: Option<String>,
         channel_id: Option<String>,
-    ) -> Result<Vec<Emote>> {
+    ) -> Result<(Vec<Emote>, bool)> {
         let mut emotes = Vec::new();
+        // True once we have a definitive answer for the channel's 7TV set: a 200
+        // (parsed below), a clean 404 (channel simply isn't on 7TV), or no channel
+        // requested at all. Stays false only when the channel fetch failed
+        // (timeout / 5xx / tripped circuit), meaning `emotes` is globals-only and
+        // the caller must not treat it as this channel's real set.
+        let mut channel_ok = channel_id.is_none();
 
         // Fetch trending 7TV emotes using GraphQL (v4 API)
         // Note: v4 API uses `defaultName` instead of `name`, and `flags` is now an object
@@ -796,6 +832,10 @@ impl EmoteService {
                 .await
             {
                 Some(response) => {
+                    // A 200 is a definitive answer for this channel, even if the
+                    // set turns out empty. The 7TV array is now this channel's
+                    // real set, so the caller may treat it as authoritative.
+                    channel_ok = true;
                     if let Ok(json) = response.json::<serde_json::Value>().await {
                         if let Some(emote_set_emotes) =
                             json.pointer("/emote_set/emotes").and_then(|v| v.as_array())
@@ -840,7 +880,14 @@ impl EmoteService {
                         }
                     }
                 }
-                None => {} // 404 (not on 7TV) or unavailable after retries — not critical
+                None => {
+                    // None is either a clean 404 (channel not on 7TV, so a
+                    // globals-only result is correct) or a failure (timeout / 5xx).
+                    // The circuit breaker only opens on failure, so an open circuit
+                    // here means the channel fetch genuinely failed and this 7TV
+                    // set is deficient; a closed circuit means a real 404.
+                    channel_ok = !seventv_circuit_open();
+                }
             }
         }
 
@@ -848,7 +895,7 @@ impl EmoteService {
         let mut seen = std::collections::HashSet::new();
         emotes.retain(|emote| seen.insert(emote.id.clone()));
 
-        Ok(emotes)
+        Ok((emotes, channel_ok))
     }
 
     /// Pick the best CDN URL for an FFZ emoticon.

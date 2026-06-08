@@ -1,0 +1,140 @@
+//! On-disk per-channel emote dictionary cache.
+//!
+//! The emote IMAGE bytes are cached elsewhere (universal_cache_service), keyed by
+//! emote id. That cache cannot tell chat "this word is an emote": it has no names
+//! and no per-channel grouping. This module persists the per-channel name->emote
+//! dictionary (the whole EmoteSet) so the chat tokenizer can load disk-first. The
+//! payoff: chat recognizes a channel's emotes instantly on join with no network
+//! round-trip, keeps working while 7TV is slow or down, and survives restarts.
+//! It is the dictionary counterpart to the prefetch's image cache, and mirrors
+//! Chatterino7's readProviderEmotesCache / writeProviderEmotesCache.
+//!
+//! Files live at <cache_dir>/emote_sets/<channel_id>.json, one per channel.
+
+use anyhow::{Context, Result};
+use log::{debug, warn};
+use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::services::cache_service::get_cache_dir;
+use crate::services::emote_service::EmoteSet;
+
+/// Wrapper persisted to disk: the set plus when it was written (for future
+/// staleness policies). `set` round-trips through EmoteSet's own serde, so the
+/// 7TV array stays under the "7tv" key exactly like the live API shape.
+#[derive(Deserialize)]
+struct StoredEmoteSet {
+    #[allow(dead_code)]
+    saved_at: u64,
+    set: EmoteSet,
+}
+
+fn store_dir() -> Result<PathBuf> {
+    let dir = get_cache_dir()?.join("emote_sets");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).context("Failed to create emote_sets cache directory")?;
+    }
+    Ok(dir)
+}
+
+/// Path for a channel's dictionary file. channel_id is a Twitch numeric user id,
+/// but sanitize defensively so a malformed id can never escape the directory.
+fn path_for(channel_id: &str) -> Result<PathBuf> {
+    let safe: String = channel_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if safe.is_empty() {
+        anyhow::bail!("empty/invalid channel id");
+    }
+    Ok(store_dir()?.join(format!("{}.json", safe)))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Load a channel's stored emote set, if present. Returns it regardless of age:
+/// a stale dictionary is far better than none for chat recognition, and callers
+/// refresh in the background. Returns None when there is no file or it can't be
+/// parsed (a corrupt file is treated as absent and gets overwritten on next save).
+pub fn load(channel_id: &str) -> Option<EmoteSet> {
+    let path = path_for(channel_id).ok()?;
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return None, // no file yet — normal cold path
+    };
+    match serde_json::from_slice::<StoredEmoteSet>(&bytes) {
+        Ok(stored) => Some(stored.set),
+        Err(e) => {
+            warn!(
+                "[EmoteSetCache] failed to parse {} (treating as absent): {}",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Persist a channel's emote set, but NEVER let a deficient fetch shrink a good
+/// stored set. If a file already exists with MORE 7TV emotes than `set`, keep the
+/// existing one. A failed or partial live fetch (globals-only from a tripped
+/// circuit breaker, or a timed-out channel set) therefore cannot overwrite a
+/// healthy dictionary. Growth (a streamer added emotes) and first writes always
+/// go through. Use this when the set's completeness is uncertain (e.g. the AFK
+/// prefetch). For a fetch known to be authoritative, use [`save_force`].
+pub fn save(channel_id: &str, set: &EmoteSet) {
+    if let Some(existing) = load(channel_id) {
+        if set.seven_tv.len() < existing.seven_tv.len() {
+            debug!(
+                "[EmoteSetCache] keeping stored set for {} (7TV {} >= incoming {}), not shrinking",
+                channel_id,
+                existing.seven_tv.len(),
+                set.seven_tv.len()
+            );
+            return;
+        }
+    }
+    write_set(channel_id, set);
+}
+
+/// Persist a channel's emote set unconditionally, even if it is smaller than what
+/// is on disk. Use ONLY when the caller knows the fetch was authoritative (the
+/// 7TV channel endpoint definitively answered), so a legitimate emote removal is
+/// written through instead of being blocked by the don't-shrink guard.
+pub fn save_force(channel_id: &str, set: &EmoteSet) {
+    write_set(channel_id, set);
+}
+
+fn write_set(channel_id: &str, set: &EmoteSet) {
+    let path = match path_for(channel_id) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("[EmoteSetCache] skip save, bad channel id {}: {}", channel_id, e);
+            return;
+        }
+    };
+    // Serialize by reference (no clone of the set) via a transient JSON value.
+    let value = serde_json::json!({ "saved_at": now_secs(), "set": set });
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => {
+            if let Err(e) = fs::write(&path, &bytes) {
+                warn!("[EmoteSetCache] failed to write {}: {}", path.display(), e);
+            } else {
+                debug!(
+                    "[EmoteSetCache] saved {} ({} 7TV emotes, {} bytes)",
+                    channel_id,
+                    set.seven_tv.len(),
+                    bytes.len()
+                );
+            }
+        }
+        Err(e) => warn!("[EmoteSetCache] failed to serialize {}: {}", channel_id, e),
+    }
+}
