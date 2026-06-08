@@ -1,3 +1,11 @@
+## [7.8.5] - 2026-06-07
+### ✨ Features
+- **Spotlight a stream in Multi-Nook**: Double-click any tile (or use the new spotlight button) to fill the whole grid with that one stream, then double-click again or press Esc to drop back to the grid. Spotlighting also moves audio and chat to that stream, so it behaves just like the solo player, and the other streams keep running in the background for an instant switch back.
+
+### 🐛 Bug Fixes
+- **Channel emotes no longer drop to plain text**: The emote prefetch added in 7.8.3 could leave a channel's emotes showing as plain words when 7TV was slow or down. Each channel's emote list is now saved locally and loaded the instant you open chat, a failed or partial 7TV fetch can no longer overwrite a good saved list, and your emotes survive restarts.
+- **No more freezes in low-latency mode**: The player was riding too close to the live edge, so a normal gap in Twitch's segment delivery could drain the buffer and stall playback. It now keeps a bit more cushion, and Multi-Nook tiles use a steadier buffer, so streams play smoothly without stalling.
+
 ## [7.8.4] - 2026-06-06
 ## 🎉 New: Save and reload your multi-stream layouts with Grid Presets
 > Build the perfect multi-stream grid once, then save it as a named preset and bring it back any time with a single click. Swap between your favorite lineups, drop a preset on top of what you are already watching, and give each one a custom icon from game art or a channel avatar. Searching for channels to add now works right inside the preset editor too.
