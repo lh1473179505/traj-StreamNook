@@ -70,7 +70,7 @@ export const MultiNookCell: React.FC<MultiNookCellProps> = ({ slot, cssOrder, gr
     enabled: socialEnabled,
   });
 
-  // Available Streamlink qualities for the focused tile's gear menu
+  // Available stream qualities for the focused tile's gear menu
   const [availableQualities, setAvailableQualities] = useState<string[]>([]);
   useEffect(() => {
     if (!socialEnabled) return;

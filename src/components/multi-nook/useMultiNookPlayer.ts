@@ -6,6 +6,7 @@ import { usemultiNookStore } from '../../stores/multiNookStore';
 import { useAppStore } from '../../stores/AppStore';
 import { Logger } from '../../utils/logger';
 import { syncTauriWindowFullscreen } from '../../utils/windowFullscreen';
+import { startLatencyGovernor } from '../../utils/liveLatencyGovernor';
 import { multiNookHlsRegistry } from './useMultiNookSync';
 
 interface UseMultiNookPlayerProps {
@@ -27,6 +28,8 @@ export const useMultiNookPlayer = ({
   const hlsRef = useRef<Hls | null>(null);
   const playerRef = useRef<Plyr | null>(null);
   const userInitiatedPauseRef = useRef<boolean>(false);
+  // Stops the live-latency governor for the current tile's hls instance.
+  const latencyGovernorStopRef = useRef<(() => void) | null>(null);
   const currentSettings = useAppStore(state => state.settings.video_player);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -161,11 +164,17 @@ export const useMultiNookPlayer = ({
         video.addEventListener('error', onNativeError);
     }
 
+    // The tile's relay tags its proxy URL with `ll=1` when the per-tile LL-HLS
+    // origin activated (low-latency broadcast). The mode must be chosen at hls.js
+    // construction, and the flag rides the URL this effect already keys on, so a
+    // refreshed URL always carries the matching mode with no extra round trip.
+    const isLowLatencyChannel = streamUrl.includes('&ll=1');
+
     if (Hls.isSupported()) {
       const hls = new Hls({
         debug: false,
         enableWorker: true,
-        lowLatencyMode: false, // Force false: LL-HLS chunk parsing causes cyclic starvation with proxies
+        lowLatencyMode: isLowLatencyChannel, // True only when the tile's relay serves the LL-HLS origin (blocking reload + parts); hls.js's native LL engine owns pacing there. Otherwise false: native LL parsing against a plain proxied playlist causes cyclic starvation.
         startFragPrefetch: false, // Off for tiles: prefetch double-buffers TS chunks in the V8 heap, multiplied across every tile.
         // Per-tile buffers are bounded well below the solo player's. A MultiNook
         // grid runs many hls.js instances at once, and each full 60 MB / 120s
@@ -183,9 +192,9 @@ export const useMultiNookPlayer = ({
         nudgeOffset: 0.2, 
         nudgeMaxRetry: 3, 
         maxFragLookUpTolerance: 0.5, 
-        liveSyncDuration: 8, // Fixed at 8s for tiles, independent of low_latency_mode. Grid tiles run deliberately tiny per-tile buffers (maxBufferLength 15) for RAM, so they can't absorb a normal ~3s Twitch segment-delivery gap at a tight cushion — 6 stalled in the wild. Per-tile latency isn't perceptually important in a grid, so favor a solid 8s cushion over riding the live edge. (Real low latency would need the relay-side targetduration rewrite + PREFETCH promotion, parked.)
+        liveSyncDuration: isLowLatencyChannel ? 3 : 8, // LL origin: parts are consumed progressively, so tiles can ride near the edge; 3 keeps one segment of headroom over the solo player's 2 because per-tile buffers are tiny. Non-LL: conservative 8s BY POLICY. Grid tiles run deliberately tiny per-tile buffers (maxBufferLength 15) for RAM, so they can't absorb a normal ~3s Twitch segment-delivery gap at a tight cushion on the whole-segment path — 6 stalled in the wild.
         liveMaxLatencyDuration: 600, // Massive drift ceiling so manual scrobbling backwards into the DVR buffer isn't violently snapped to live edge.
-        maxLiveSyncPlaybackRate: 1.15,
+        maxLiveSyncPlaybackRate: isLowLatencyChannel ? 1.1 : 1.15, // LL origin: hls.js's native LL controller owns catch-up (gentle 1.1). Non-LL: inert (the controller only runs in lowLatencyMode); the latency governor below owns catch-up there instead.
         liveDurationInfinity: true, 
         manifestLoadingTimeOut: 10000, 
         manifestLoadingMaxRetry: 3, 
@@ -205,6 +214,38 @@ export const useMultiNookPlayer = ({
       });
 
       hlsRef.current = hls;
+
+      // Continuous live-latency maintenance, same forward-buffer governor as the solo
+      // player with a slightly wider band for tiles (tiny per-tile buffers, and grid
+      // latency isn't perceptually important). It only consumes excess buffer, so it
+      // can't starve a tile. Target is read from hls.config.liveSyncDuration (8s).
+      // Skipped on the LL path: lowLatencyMode activates hls.js's own playback-rate
+      // controller, and the two would fight over the rate.
+      if (latencyGovernorStopRef.current) {
+        latencyGovernorStopRef.current();
+        latencyGovernorStopRef.current = null;
+      }
+      if (!isLowLatencyChannel) {
+        latencyGovernorStopRef.current = startLatencyGovernor(hls, video, {
+          label: `tile ${streamId}`,
+          band: 2.0,
+          log: Logger.debug,
+        });
+      }
+
+      let playStarted = false;
+      let fragsBuffered = 0;
+
+      const startPlayback = () => {
+        if (playStarted) return;
+        playStarted = true;
+        video.play().catch((e) => {
+          Logger.debug(`[MultiNook-${streamId}] Autoplay failed:`, e);
+          video.muted = true;
+          video.play().catch(() => {});
+        });
+        setIsBuffering(false);
+      };
 
       hls.loadSource(streamUrl);
       hls.attachMedia(video);
@@ -279,7 +320,13 @@ export const useMultiNookPlayer = ({
           setShowControls(true);
         }
 
-        // Do not force play() here to prevent cold-start stall.
+        if (isLowLatencyChannel) {
+          // LL path: hls.js owns the start position (liveSyncDuration back from the
+          // part edge) and FRAG_BUFFERED doesn't fire per part, so the cushion gate
+          // below would only time out and start late. Same rule as the solo player.
+          startPlayback();
+        }
+        // Non-LL: do not force play() here to prevent cold-start stall.
         // Wait for FRAG_BUFFERED gate.
       });
 
@@ -322,20 +369,6 @@ export const useMultiNookPlayer = ({
         }
       });
       
-      let playStarted = false;
-      let fragsBuffered = 0;
-
-      const startPlayback = () => {
-        if (playStarted) return;
-        playStarted = true;
-        video.play().catch((e) => {
-          Logger.debug(`[MultiNook-${streamId}] Autoplay failed:`, e);
-          video.muted = true;
-          video.play().catch(() => {});
-        });
-        setIsBuffering(false);
-      };
-
       // Build a small startup cushion before playing instead of starting on the
       // very first fragment. Playing on one ~2s fragment means the buffer drains
       // ~2s later if the next segment isn't ready yet, which is exactly what
@@ -344,22 +377,25 @@ export const useMultiNookPlayer = ({
       // stream "loads". Waiting for ~a couple seconds of buffer rides over that
       // cold-start gap. The cushion is measured in seconds so it adapts to the
       // stream's segment length, and the frag-count cap keeps the wait bounded so
-      // it never hangs on the loading spinner.
+      // it never hangs on the loading spinner. Non-LL only: the LL path starts in
+      // MANIFEST_PARSED above.
       const START_CUSHION_SECONDS = 3.5;
       const MAX_STARTUP_FRAGS = 4;
 
-      hls.on(Hls.Events.FRAG_BUFFERED, () => {
-        if (playStarted) return;
-        fragsBuffered += 1;
-        const b = video.buffered;
-        const bufferedDur = b.length > 0 ? b.end(b.length - 1) - b.start(0) : 0;
-        if (bufferedDur >= START_CUSHION_SECONDS || fragsBuffered >= MAX_STARTUP_FRAGS) {
-          Logger.debug(
-            `[MultiNook-${streamId}] Startup cushion ready (${bufferedDur.toFixed(1)}s over ${fragsBuffered} frags), starting playback`,
-          );
-          startPlayback();
-        }
-      });
+      if (!isLowLatencyChannel) {
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (playStarted) return;
+          fragsBuffered += 1;
+          const b = video.buffered;
+          const bufferedDur = b.length > 0 ? b.end(b.length - 1) - b.start(0) : 0;
+          if (bufferedDur >= START_CUSHION_SECONDS || fragsBuffered >= MAX_STARTUP_FRAGS) {
+            Logger.debug(
+              `[MultiNook-${streamId}] Startup cushion ready (${bufferedDur.toFixed(1)}s over ${fragsBuffered} frags), starting playback`,
+            );
+            startPlayback();
+          }
+        });
+      }
 
       const onPlaying = () => {
         setIsPlaying(true);
@@ -442,6 +478,10 @@ export const useMultiNookPlayer = ({
         if (onNativeLoadedMetadataRef.current) video.removeEventListener('loadedmetadata', onNativeLoadedMetadataRef.current);
       }
       multiNookHlsRegistry.delete(streamId);
+      if (latencyGovernorStopRef.current) {
+        latencyGovernorStopRef.current();
+        latencyGovernorStopRef.current = null;
+      }
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;

@@ -1,4 +1,8 @@
 use crate::services::ad_detect;
+use crate::services::ll_origin::{
+    self, empty_cors, media_response, opt_raw_query, parse_directive, parse_part_path,
+    playlist_response, LlOrigin,
+};
 use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
@@ -17,6 +21,10 @@ struct StreamInstance {
     proxy_url: Arc<Mutex<Option<String>>>,
     /// Per-tile ad-detection state (shared marker logic via `ad_detect`).
     ad_state: Arc<std::sync::Mutex<ad_detect::AdDetectionState>>,
+    /// Per-tile LL-HLS origin, same engine as the solo relay. Active only when the
+    /// tile's channel is a low-latency broadcast; inactive tiles use the plain
+    /// playlist proxy below.
+    ll_origin: Arc<LlOrigin>,
 }
 
 pub struct MultiNookServer;
@@ -38,56 +46,79 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
 impl MultiNookServer {
     /// Start a new proxy server for a specific stream, or update the URL if one already exists
     pub async fn start_proxy(stream_id: &str, stream_url: String) -> Result<u16> {
-        let mut registry = STREAM_REGISTRY.lock().await;
+        // Get-or-create under the registry lock, but probe the LL origin AFTER
+        // releasing it: the probe fetches the upstream playlist plus backfill
+        // segments, and holding the registry across that would serialize every
+        // tile's startup when a preset cold-starts a whole grid.
+        let (port, origin) = {
+            let mut registry = STREAM_REGISTRY.lock().await;
 
-        // If this stream_id already has a running server, just update the URL
-        if let Some(instance) = registry.get(stream_id) {
-            debug!(
-                "[MultiNook] Updating proxy URL for stream '{}' on port {}",
-                stream_id, instance.port
-            );
-            *instance.proxy_url.lock().await = Some(stream_url);
-            // New stream on this tile: clear stale ad-detection state.
-            *instance.ad_state.lock().unwrap() = ad_detect::AdDetectionState::default();
-            return Ok(instance.port);
-        }
+            if let Some(instance) = registry.get(stream_id) {
+                debug!(
+                    "[MultiNook] Updating proxy URL for stream '{}' on port {}",
+                    stream_id, instance.port
+                );
+                *instance.proxy_url.lock().await = Some(stream_url.clone());
+                // New stream on this tile: clear stale ad-detection state.
+                *instance.ad_state.lock().unwrap() = ad_detect::AdDetectionState::default();
+                (instance.port, instance.ll_origin.clone())
+            } else {
+                // Start a new server on a random port
+                let port = rand::rng().random_range(10000..20000);
+                let proxy_url: Arc<Mutex<Option<String>>> =
+                    Arc::new(Mutex::new(Some(stream_url.clone())));
+                let ad_state: Arc<std::sync::Mutex<ad_detect::AdDetectionState>> =
+                    Arc::new(std::sync::Mutex::new(ad_detect::AdDetectionState::default()));
+                let origin = LlOrigin::new(ll_origin::TILE_MAX_SEGMENTS);
 
-        // Start a new server on a random port
-        let port = rand::rng().random_range(10000..20000);
-        let proxy_url: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(Some(stream_url)));
-        let ad_state: Arc<std::sync::Mutex<ad_detect::AdDetectionState>> =
-            Arc::new(std::sync::Mutex::new(ad_detect::AdDetectionState::default()));
+                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                let proxy_url_clone = proxy_url.clone();
+                let ad_state_clone = ad_state.clone();
+                let origin_clone = origin.clone();
+                let sid = stream_id.to_string();
 
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let proxy_url_clone = proxy_url.clone();
-        let ad_state_clone = ad_state.clone();
-        let sid = stream_id.to_string();
+                // Wildcard route like the solo relay: when the LL origin is active the
+                // playlist references relative `part/...` and `seg/...` URIs that must
+                // resolve against this same port.
+                let proxy = warp::path::full()
+                    .and(warp::method())
+                    .and(opt_raw_query())
+                    .and(warp::any().map(move || proxy_url_clone.clone()))
+                    .and(warp::any().map(move || ad_state_clone.clone()))
+                    .and(warp::any().map(move || sid.clone()))
+                    .and(warp::any().map(move || origin_clone.clone()))
+                    .and_then(Self::proxy_handler)
+                    .boxed();
 
-        let proxy = warp::path("stream.m3u8")
-            .and(warp::any().map(move || proxy_url_clone.clone()))
-            .and(warp::any().map(move || ad_state_clone.clone()))
-            .and(warp::any().map(move || sid.clone()))
-            .and_then(Self::proxy_handler)
-            .boxed();
+                let handle = tokio::spawn(async move {
+                    warp::serve(proxy).run(addr).await;
+                });
 
-        let handle = tokio::spawn(async move {
-            warp::serve(proxy).run(addr).await;
-        });
+                debug!(
+                    "[MultiNook] Started proxy for stream '{}' on port {}",
+                    stream_id, port
+                );
 
-        debug!(
-            "[MultiNook] Started proxy for stream '{}' on port {}",
-            stream_id, port
-        );
+                registry.insert(
+                    stream_id.to_string(),
+                    StreamInstance {
+                        handle,
+                        port,
+                        proxy_url,
+                        ad_state,
+                        ll_origin: origin.clone(),
+                    },
+                );
+                (port, origin)
+            }
+        };
 
-        registry.insert(
-            stream_id.to_string(),
-            StreamInstance {
-                handle,
-                port,
-                proxy_url,
-                ad_state,
-            },
-        );
+        // Probe the upstream: on a low-latency broadcast this builds the live edge and
+        // spawns the per-tile reader BEFORE we return, so `is_low_latency` reads a
+        // settled answer when `start_multi_nook` tags the proxy URL. On a
+        // normal-latency channel the origin stays inactive and the plain playlist
+        // proxy serves the tile.
+        origin.start(stream_url).await;
 
         Ok(port)
     }
@@ -101,6 +132,7 @@ impl MultiNookServer {
                 "[MultiNook] Stopping proxy for stream '{}' on port {}",
                 stream_id, instance.port
             );
+            instance.ll_origin.stop();
             instance.handle.abort();
             *instance.proxy_url.lock().await = None;
         } else {
@@ -123,6 +155,7 @@ impl MultiNookServer {
                 "[MultiNook] Stopping proxy for stream '{}' on port {}",
                 id, instance.port
             );
+            instance.ll_origin.stop();
             instance.handle.abort();
             *instance.proxy_url.lock().await = None;
         }
@@ -135,6 +168,17 @@ impl MultiNookServer {
     pub async fn get_port(stream_id: &str) -> Option<u16> {
         let registry = STREAM_REGISTRY.lock().await;
         registry.get(stream_id).map(|i| i.port)
+    }
+
+    /// Whether the tile's LL-HLS origin is active (low-latency broadcast). Read by
+    /// `start_multi_nook` after `start_proxy` settles the probe, to tag the proxy
+    /// URL the player picks its hls.js mode from.
+    pub async fn is_low_latency(stream_id: &str) -> bool {
+        let registry = STREAM_REGISTRY.lock().await;
+        registry
+            .get(stream_id)
+            .map(|i| i.ll_origin.is_active())
+            .unwrap_or(false)
     }
 
     /// Get a list of all active stream IDs
@@ -160,10 +204,65 @@ impl MultiNookServer {
     }
 
     async fn proxy_handler(
+        path: warp::path::FullPath,
+        method: warp::http::Method,
+        raw_query: String,
         proxy_url: Arc<Mutex<Option<String>>>,
         ad_state: Arc<std::sync::Mutex<ad_detect::AdDetectionState>>,
         stream_id: String,
+        origin: Arc<LlOrigin>,
     ) -> Result<warp::http::Response<Vec<u8>>, warp::Rejection> {
+        // Handle CORS preflight instantly without touching upstream.
+        if method == warp::http::Method::OPTIONS {
+            return Ok(warp::http::Response::builder()
+                .status(200)
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                .header("Access-Control-Allow-Headers", "*")
+                .header("Access-Control-Max-Age", "86400")
+                .body(vec![])
+                .unwrap());
+        }
+
+        let request_path = path.as_str().trim_start_matches('/');
+
+        // ── LL-HLS origin path: identical routing to the solo relay ──
+        // When the tile's origin is live it owns the media playlist, parts, and
+        // complete segments (served from memory); the upstream proxy below only
+        // handles the non-LL case.
+        if origin.is_active() {
+            if let Some(rest) = request_path.strip_prefix("part/") {
+                if let Some((sn, k)) = parse_part_path(rest) {
+                    if let Some(bytes) = origin.get_part(sn, k) {
+                        return Ok(media_response(bytes.as_ref().clone()));
+                    }
+                }
+                return Ok(empty_cors(404));
+            }
+            if let Some(rest) = request_path.strip_prefix("seg/") {
+                if let Some(sn) = rest.strip_suffix(".ts").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(bytes) = origin.get_segment(sn) {
+                        return Ok(media_response(bytes));
+                    }
+                }
+                return Ok(empty_cors(404));
+            }
+            if request_path == "stream.m3u8" || request_path.is_empty() {
+                let msn = parse_directive(&raw_query, "_HLS_msn");
+                let part = parse_directive(&raw_query, "_HLS_part");
+                if let Some(pl) = origin.serve_playlist(msn, part).await {
+                    return Ok(playlist_response(pl.into_bytes()));
+                }
+                // Origin went inactive between the check and now: fall through.
+            }
+        }
+
+        // Tiles only relay the media playlist on the non-LL path; segment URLs in it
+        // are absolute CDN URLs the player fetches directly.
+        if request_path != "stream.m3u8" && !request_path.is_empty() {
+            return Ok(empty_cors(404));
+        }
+
         let url = proxy_url
             .lock()
             .await
@@ -200,7 +299,7 @@ impl MultiNookServer {
         // server only relays the media playlist (not .ts), so every body is a
         // playlist worth scanning/filtering; free, no extra requests.
         if let Ok(text) = std::str::from_utf8(&bytes) {
-            {
+            let ads_now = {
                 let mut st = ad_state.lock().unwrap();
                 if let Some(n) = ad_detect::update(&mut st, text) {
                     info!(
@@ -208,7 +307,8 @@ impl MultiNookServer {
                         stream_id, n, st.matched_markers
                     );
                 }
-            }
+                st.ads_present
+            };
 
             // Build the served playlist exactly like the solo relay (stream_server):
             // ad-filtered base, then lower Twitch's over-declared
@@ -218,7 +318,9 @@ impl MultiNookServer {
             // small per-tile buffer fed: the tile plays through its buffer and stalls
             // shortly after starting. The solo player only avoids this because its
             // relay already does this rewrite; without it here, MultiNook tiles stall
-            // right after load. (Prefetch promotion stays off, matching the solo relay.)
+            // right after load. Finally promote low-latency PREFETCH hints (ad-gated,
+            // refresh-stable) so tiles on a low-latency channel ride near the live edge
+            // like the solo player; normal-latency channels have no hints (no-op).
             let (filtered, dropped, _real) = ad_detect::filter_ad_segments(text);
             if dropped > 0 {
                 debug!(
@@ -229,6 +331,20 @@ impl MultiNookServer {
             let mut work: String = if dropped > 0 { filtered } else { text.to_string() };
             if let Some(rt) = ad_detect::retarget_playlist(&work) {
                 work = rt;
+            }
+            // Prefetch promotion stays DISABLED on this fallback path. Low-latency
+            // channels are normally served by the per-tile LL origin above and never
+            // reach here; a playlist reaches this point with prefetch hints only when
+            // the origin probe failed (network hiccup, kill switch). Promoting without
+            // a stable-URL scheme freezes hls.js on its cross-refresh URL check
+            // ("media sequence mismatch": Twitch re-signs PREFETCH URLs when the
+            // segment finalizes), and this relay has no SEGMENT_MAP, so the safe
+            // fallback is retarget-only.
+            let enable_prefetch_promotion = false;
+            if enable_prefetch_promotion && !ads_now {
+                if let Some(pp) = ad_detect::promote_prefetch(&work) {
+                    work = pp;
+                }
             }
             bytes = work.into_bytes();
         }

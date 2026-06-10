@@ -80,10 +80,16 @@ pub async fn start_multi_nook(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Tag the proxy URL when the tile's relay activated its LL-HLS origin (settled
+    // inside start_proxy, before this point). The player must choose its hls.js mode
+    // at construction, and riding the flag on the URL it already consumes keeps the
+    // two atomic: a refreshed URL always carries the matching mode.
+    let low_latency = MultiNookServer::is_low_latency(&stream_id).await;
     let proxy_url = format!(
-        "http://localhost:{}/stream.m3u8?t={}",
+        "http://localhost:{}/stream.m3u8?t={}{}",
         port,
-        chrono::Utc::now().timestamp_millis()
+        chrono::Utc::now().timestamp_millis(),
+        if low_latency { "&ll=1" } else { "" }
     );
 
     debug!(
