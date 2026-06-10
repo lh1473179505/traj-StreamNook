@@ -37,7 +37,7 @@ function adSourceFrom(result: StreamStartResult): AdSource | null {
 }
 
 /**
- * Log when Streamlink fell back to a different quality because the saved
+ * Log when the resolver fell back to a different quality because the saved
  * preference wasn't offered for this stream. No longer toasts: that fired on
  * nearly every stream and was overbearing. The player surfaces the fallback as
  * part of its unobtrusive top-left stream note instead. Silent when the two are
@@ -149,7 +149,7 @@ interface AppState {
   hasMoreRecommended: boolean;
   isLoadingMore: boolean;
   streamUrl: string | null;
-  // The quality Streamlink is actually serving right now (canonical name from
+  // The quality the resolver is actually serving right now (canonical name from
   // the playlist). May differ from `settings.quality` if the saved preference
   // wasn't offered for this stream and we fell back to the closest match.
   activeQuality: string | null;
@@ -252,6 +252,11 @@ interface AppState {
   // a cross-channel "add to a set" picker. Set by clicking an emote in chat.
   emoteSpotlight: { id: string; name: string } | null;
   showWhispersOverlay: boolean;
+  // Lists panel: floating user-curated reference lists (ban evaders,
+  // reusable commands, stream titles). Non-modal so chat stays usable.
+  showListsPanel: boolean;
+  // When set, the panel switches to this list on open (palette per-list rows).
+  listsPanelInitialListId: string | null;
   showDashboardOverlay: boolean;
   whisperTargetUser: { id: string; login: string; display_name: string; profile_image_url?: string } | null;
   // Whisper import state (persistent across wizard open/close)
@@ -325,6 +330,7 @@ interface AppState {
   playMedia: (type: 'clip' | 'video', url: string, info: MediaInfo) => Promise<void>;
   stopStream: (options?: { preserveBackend?: boolean }) => Promise<void>;
   restartStream: () => Promise<void>;  // Restart current stream (stops and starts again)
+  isRestartingStream: boolean;  // True from restart begin until the new stream URL lands; the player freezes its loader on this so it doesn't poll a dead backend
   reloadStreamAndChat: () => Promise<void>;  // Hard refresh: restart the stream AND reconnect/reload chat
   getAvailableQualities: () => Promise<string[]>;
   changeStreamQuality: (quality: string) => Promise<void>;
@@ -362,6 +368,8 @@ interface AppState {
   openEmoteSpotlight: (emoteId: string, name: string) => void;
   setEmoteSpotlight: (e: { id: string; name: string } | null) => void;
   setShowWhispersOverlay: (show: boolean) => void;
+  setShowListsPanel: (show: boolean) => void;
+  openListsPanel: (listId?: string) => void;
   setShowDashboardOverlay: (show: boolean) => void;
   openWhisperWithUser: (user: { id: string; login: string; display_name: string; profile_image_url?: string }) => void;
   clearWhisperTargetUser: () => void;
@@ -438,6 +446,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   hasMoreRecommended: true,
   isLoadingMore: false,
   streamUrl: null,
+  isRestartingStream: false,
   activeQuality: null,
   availableQualities: [],
   adSource: null,
@@ -471,6 +480,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   emoteSetsOverlayInitialTab: null,
   emoteSpotlight: null,
   showWhispersOverlay: false,
+  showListsPanel: false,
+  listsPanelInitialListId: null,
   showDashboardOverlay: false,
   whisperTargetUser: null,
   isHomeActive: true,
@@ -1378,9 +1389,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     
     try {
+      // Freeze the running player's loader BEFORE the backend goes down: the relay
+      // and its LL origin stop here, but the old hls.js instance lives until the
+      // new streamUrl lands (~1-2s of resolve), and polling a dead origin in that
+      // window churns non-fatal errors (fragGap "GAP tag found", empty loads).
+      set({ isRestartingStream: true });
+
       // Stop the current stream (but don't clean up everything)
       await invoke('stop_stream');
-      
+
       // Small delay to ensure clean stop
       await new Promise(resolve => setTimeout(resolve, 300));
       
@@ -1392,20 +1409,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       Logger.debug('[Stream] Restarted successfully:', result.url);
       logQualityFallback(quality, result.quality);
 
-      set({ streamUrl: result.url, activeQuality: result.quality, adSource: adSourceFrom(result), availableQualities: result.available ?? [], currentStream: streamInfo });
+      set({ streamUrl: result.url, activeQuality: result.quality, adSource: adSourceFrom(result), availableQualities: result.available ?? [], currentStream: streamInfo, isRestartingStream: false });
 
       // Show toast notification
       get().addToast('Stream restarted with new settings', 'success');
     } catch (e) {
       Logger.error('[Stream] Failed to restart:', e);
       get().addToast('Failed to restart stream', 'error');
-      
+
       // Try to recover by starting fresh
       try {
         await get().startStream(channel, streamInfo);
       } catch (retryError) {
         Logger.error('[Stream] Retry also failed:', retryError);
       }
+    } finally {
+      // Always release the freeze; on the recovery path startStream set a fresh
+      // streamUrl and the remounted player must be allowed to load.
+      if (get().isRestartingStream) set({ isRestartingStream: false });
     }
   },
 
@@ -1482,7 +1503,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     trackActivity(`Changed quality to: ${quality}`);
     try {
       Logger.debug(`[Quality] Changing to: ${quality}`);
-      set({ isLoading: true });
+      // Same freeze as restartStream: the backend relay restarts inside
+      // change_stream_quality, so the old player must stop polling it.
+      set({ isLoading: true, isRestartingStream: true });
 
       const { currentMediaType, originalMediaUrl } = get();
       const targetUrl = (currentMediaType !== 'live' && originalMediaUrl) ? originalMediaUrl : `https://twitch.tv/${currentStream.user_login}`;
@@ -1499,7 +1522,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       await invoke('save_settings', { settings: newSettings });
       void emitSettingsUpdated();
 
-      set({ streamUrl: result.url, activeQuality: result.quality, adSource: adSourceFrom(result), availableQualities: result.available ?? [], settings: newSettings, isLoading: false });
+      set({ streamUrl: result.url, activeQuality: result.quality, adSource: adSourceFrom(result), availableQualities: result.available ?? [], settings: newSettings, isLoading: false, isRestartingStream: false });
       if (qualitiesEquivalent(quality, result.quality)) {
         get().addToast(`Quality changed to ${result.quality}`, 'success');
       } else {
@@ -1511,7 +1534,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e) {
       Logger.error('Failed to change quality:', e);
       get().addToast(`Failed to change quality: ${e}`, 'error');
-      set({ isLoading: false });
+      set({ isLoading: false, isRestartingStream: false });
     }
   },
   startStream: async (channel, providedStreamInfo?, skipChatRefresh = false) => {
@@ -1995,7 +2018,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               viewer_count: latestVod.view_count
             };
 
-            // Resolve the actual playback URL using Streamlink
+            // Resolve the actual playback URL through the native resolver
             try {
               const requestedQuality = get().settings.quality;
               const result = await invoke<StreamStartResult>('start_stream', { url: latestVideoUrl, quality: requestedQuality });
@@ -2160,6 +2183,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showWhispersOverlay: show });
     // Clear target user when closing
     if (!show) set({ whisperTargetUser: null });
+  },
+  setShowListsPanel: (show: boolean) => {
+    if (show) trackActivity('Opened Lists');
+    set({ showListsPanel: show });
+    if (!show) set({ listsPanelInitialListId: null });
+  },
+  openListsPanel: (listId?: string) => {
+    trackActivity('Opened Lists');
+    set({ showListsPanel: true, listsPanelInitialListId: listId ?? null });
   },
   setShowDashboardOverlay: (show: boolean) => {
     if (show) trackActivity('Opened Dashboard');
