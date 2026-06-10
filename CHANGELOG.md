@@ -1,3 +1,22 @@
+## [7.8.6] - 2026-06-10
+## 🎉 New: Low latency playback, rebuilt to ride seconds behind live
+> StreamNook now picks up video in small pieces as the broadcaster encodes them, instead of waiting for whole segments to finish. On channels with low latency enabled, that puts you roughly two to three seconds behind the broadcaster, in the solo player and in every Multi-Nook tile. Channels without low latency keep playing exactly as before.
+
+---
+
+### ✨ Features
+- **Lists, a home for your go-to text**: Create as many lists as you like for usernames, commands, links, or anything else you keep reaching for. Click an entry to copy it, hover to send it into chat, and paste a whole batch at once (one per line, comma separated, or straight from a spreadsheet). The panel floats over the app without blocking chat, pops out into its own pinnable window, and can dock right into the mod logs view. Open it from the title bar, the command palette, or Ctrl+Shift+L.
+- **A latency readout you can trust**: The stream stats overlay now shows your true delay to the broadcaster (the same number Twitch reports) plus your configured buffer target, so you can tell at a glance whether you are actually behind.
+
+### 🐛 Bug Fixes
+- **Low latency no longer freezes on refresh**: Upcoming segments promoted into the playlist could change identity between updates, which could crash playback mid-stream. Their numbering and addresses now stay stable from one update to the next.
+- **Go Live lands where it should**: The button now jumps only to video that is actually ready to play, and if the stream has genuinely stalled it restarts playback instead of seeking somewhere unplayable.
+- **Quieter quality switches**: Changing quality or restarting a stream no longer lets the outgoing player surface errors while the new one spins up.
+
+### ⚡ Performance
+- **Stays close to live on every channel**: On channels without low latency, playback now speeds up almost imperceptibly whenever you drift past your buffer target, so delay no longer creeps up over a long session.
+- **Faster grid cold starts**: Multi-Nook tiles now start up in parallel when you load a full preset, instead of waiting on each other.
+
 ## [7.8.5] - 2026-06-07
 ### ✨ Features
 - **Spotlight a stream in Multi-Nook**: Double-click any tile (or use the new spotlight button) to fill the whole grid with that one stream, then double-click again or press Esc to drop back to the grid. Spotlighting also moves audio and chat to that stream, so it behaves just like the solo player, and the other streams keep running in the background for an instant switch back.
