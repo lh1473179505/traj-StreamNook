@@ -1,3 +1,7 @@
+use crate::services::ll_origin::{
+    empty_cors, media_response, opt_raw_query, parse_directive, parse_part_path,
+    playlist_response,
+};
 use crate::services::twitch_auth_service::TwitchAuthService;
 use anyhow::Result;
 use log::{debug, error, info};
@@ -50,6 +54,11 @@ fn reset_ad_state() {
     // start, hot-swap, and stop). Low-latency is unknown until the new stream's
     // first playlist is scanned.
     LOW_LATENCY.store(false, Ordering::Relaxed);
+    // The stable-URL segment map and its sticky flag belong to the previous stream.
+    SEGMENT_MAP.lock().unwrap().clear();
+    STABILIZING.store(false, Ordering::Relaxed);
+    // Tear down the LL-HLS origin (background reader + live edge) for the old stream.
+    crate::services::ll_origin::stop();
 }
 
 /// Fold a relayed media playlist into the solo stream's ad-detection state. We
@@ -102,9 +111,122 @@ static PIVOT_EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
 /// instead of re-downloading the manifest itself just to look.
 static LOW_LATENCY: AtomicBool = AtomicBool::new(false);
 
-/// True when the live stream being relayed carries low-latency PREFETCH hints.
+/// True when the live stream being relayed is low-latency. The LL-HLS origin is the
+/// authority when active (it owns the playlist, so the pull-through scan that sets
+/// LOW_LATENCY never runs for those channels); fall back to the scan flag otherwise.
 pub fn is_low_latency() -> bool {
-    LOW_LATENCY.load(Ordering::Relaxed)
+    crate::services::ll_origin::is_active() || LOW_LATENCY.load(Ordering::Relaxed)
+}
+
+// ──── Stable-URL relay scheme ────
+// The load-bearing piece that makes PREFETCH promotion refresh-stable. hls.js with
+// lowLatencyMode:false requires a given media-sequence number to keep the SAME URL
+// path across playlist refreshes (it rejects a change with a fatal
+// "media sequence mismatch" / levelParsingError). But Twitch re-signs segment URLs
+// poll-to-poll — especially PREFETCH hints, whose URL differs from the same
+// segment's URL once finalized — so promoting them with their raw URL freezes the
+// player. Fix: give every media segment a STABLE synthetic URL `seg/<sn>.ts` in the
+// served playlist and 302-redirect it to the freshest real CDN URL via this map. The
+// player's cross-refresh URL identity never changes; bytes still come straight from
+// the CDN (the relay only serves a tiny redirect, never the segment body).
+
+/// sn -> freshest real (absolute) segment URL, for the `seg/<sn>.ts` redirect.
+static SEGMENT_MAP: Lazy<std::sync::Mutex<std::collections::BTreeMap<u64, String>>> =
+    Lazy::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+/// Sticky: set once we've promoted prefetch on a stream, so EVERY subsequent media
+/// playlist for that stream is stabilized too — including ad-break polls that carry
+/// no prefetch. Without this, a poll that skipped stabilization would serve a
+/// previously-synthetic sn under its raw URL, which is the exact cross-refresh
+/// mismatch we're preventing. Reset on stream (re)start via `reset_ad_state`.
+static STABILIZING: AtomicBool = AtomicBool::new(false);
+
+/// Media-sequence numbers to retain in SEGMENT_MAP behind the live edge. The live
+/// window is ~12-15 segments and the player sits a few behind; 120 is a generous
+/// margin so a just-rolled-off segment the player still wants resolves, while the
+/// map stays tiny.
+const SEGMENT_MAP_RETAIN: u64 = 120;
+
+/// Resolve a (possibly relative) segment URI against the upstream manifest base.
+/// Twitch segments are absolute cloudfront URLs (returned as-is); the join covers
+/// proxied playlists that use relative chunk paths.
+fn resolve_segment_url(uri: &str, base_url: &str) -> String {
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        uri.to_string()
+    } else {
+        format!("{base_url}{uri}")
+    }
+}
+
+/// Rewrite every media-segment URI in an already filtered/retargeted/promoted media
+/// playlist to a stable synthetic `seg/<sn>.ts`, recording sn -> real absolute URL in
+/// SEGMENT_MAP for the redirect handler. `#EXT-X-MAP` (the init segment) and all tags
+/// pass through untouched (the init segment is fetched direct from the CDN; hls.js's
+/// refresh check never compares it). Returns the rewritten playlist text.
+fn stabilize_segment_urls(playlist: &str, base_url: &str) -> String {
+    let mut sn: u64 = 0;
+    let mut max_sn: Option<u64> = None;
+    let mut expect_uri = false;
+    let mut out = String::with_capacity(playlist.len());
+    let mut map = SEGMENT_MAP.lock().unwrap();
+    for line in playlist.lines() {
+        let trimmed = line.trim();
+        if let Some(v) = trimmed.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+            sn = v.trim().parse().unwrap_or(0);
+            out.push_str(line);
+            out.push('\n');
+        } else if trimmed.starts_with("#EXTINF:") {
+            expect_uri = true;
+            out.push_str(line);
+            out.push('\n');
+        } else if expect_uri && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            // The segment URI for the preceding #EXTINF.
+            expect_uri = false;
+            map.insert(sn, resolve_segment_url(trimmed, base_url));
+            max_sn = Some(sn);
+            out.push_str(&format!("seg/{sn}.ts\n"));
+            sn += 1;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // Prune sns well behind the edge so the map can't grow without bound.
+    if let Some(edge) = max_sn {
+        let keep_from = edge.saturating_sub(SEGMENT_MAP_RETAIN);
+        let stale: Vec<u64> = map.range(..keep_from).map(|(k, _)| *k).collect();
+        for k in stale {
+            map.remove(&k);
+        }
+    }
+    out
+}
+
+/// Handle a synthetic `seg/<sn>.ts` request: 302-redirect to the freshest real CDN
+/// URL recorded in SEGMENT_MAP. Returns `None` if the path isn't a segment request
+/// (so the caller falls through to normal proxy handling).
+fn segment_redirect(request_path: &str) -> Option<warp::http::Response<Vec<u8>>> {
+    let rest = request_path.strip_prefix("seg/")?;
+    let sn_str = rest.strip_suffix(".ts").unwrap_or(rest);
+    let sn: u64 = sn_str.parse().ok()?;
+    let real = SEGMENT_MAP.lock().unwrap().get(&sn).cloned();
+    let resp = match real {
+        Some(url) => warp::http::Response::builder()
+            .status(302)
+            .header("Location", url)
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            .header("Access-Control-Allow-Headers", "*")
+            .header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+            .body(vec![])
+            .unwrap(),
+        None => warp::http::Response::builder()
+            .status(404)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(vec![])
+            .unwrap(),
+    };
+    Some(resp)
 }
 
 /// Store the app handle so the pivot task can emit the `ad-pivot` reload event.
@@ -270,6 +392,12 @@ async fn do_pivot() {
 
 impl StreamServer {
     pub async fn start_proxy_server(stream_url: String) -> Result<u16> {
+        // The upstream media-playlist URL the LL-HLS origin will poll. `reset_ad_state`
+        // (below) stops any prior origin; `ll_origin::start` probes this URL and, if it's
+        // a low-latency broadcast, builds the live edge before we return — so the player
+        // can read `get_stream_low_latency` and pick the right hls.js mode.
+        let upstream = stream_url.clone();
+
         // Check if server is already running
         let server_exists = SERVER_HANDLE.lock().await.is_some();
 
@@ -278,6 +406,7 @@ impl StreamServer {
             *PROXY_URL.lock().await = Some(stream_url);
             // New stream on the existing server: clear stale ad-detection state.
             reset_ad_state();
+            crate::services::ll_origin::start(upstream).await;
             // Return the existing port by parsing it from a static variable
             return Self::get_current_port().await;
         }
@@ -287,6 +416,7 @@ impl StreamServer {
 
         *PROXY_URL.lock().await = Some(stream_url);
         reset_ad_state();
+        crate::services::ll_origin::start(upstream).await;
 
         // Store the port
         *CURRENT_PORT.lock().await = Some(port);
@@ -294,9 +424,12 @@ impl StreamServer {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let proxy_url_clone = PROXY_URL.clone();
 
-        // Use a wildcard proxy that catches ALL paths so relative chunks are automatically mapped
+        // Use a wildcard proxy that catches ALL paths so relative chunks are automatically mapped.
+        // The raw query string is captured too, for the LL-HLS blocking-reload directives
+        // (`_HLS_msn`/`_HLS_part`).
         let proxy = warp::path::full()
             .and(warp::method())
+            .and(opt_raw_query())
             .and(warp::any().map(move || proxy_url_clone.clone()))
             .and_then(Self::dynamic_proxy_handler)
             .boxed();
@@ -313,6 +446,7 @@ impl StreamServer {
     async fn dynamic_proxy_handler(
         path: warp::path::FullPath,
         method: warp::http::Method,
+        raw_query: String,
         proxy_url: Arc<Mutex<Option<String>>>,
     ) -> Result<warp::http::Response<Vec<u8>>, warp::Rejection> {
         let manifest_url = proxy_url
@@ -334,6 +468,43 @@ impl StreamServer {
         }
 
         let request_path = path.as_str().trim_start_matches('/');
+
+        // ── LL-HLS origin path (active only on low-latency channels) ──
+        // When the origin is live it owns the media playlist, parts, and complete
+        // segments (served from memory). This must come before the non-LL stable-URL
+        // redirect, which shares the `seg/` prefix.
+        if crate::services::ll_origin::is_active() {
+            if let Some(rest) = request_path.strip_prefix("part/") {
+                if let Some((sn, k)) = parse_part_path(rest) {
+                    if let Some(bytes) = crate::services::ll_origin::get_part(sn, k) {
+                        return Ok(media_response(bytes.as_ref().clone()));
+                    }
+                }
+                return Ok(empty_cors(404));
+            }
+            if let Some(rest) = request_path.strip_prefix("seg/") {
+                if let Some(sn) = rest.strip_suffix(".ts").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(bytes) = crate::services::ll_origin::get_segment(sn) {
+                        return Ok(media_response(bytes));
+                    }
+                }
+                return Ok(empty_cors(404));
+            }
+            if request_path == "stream.m3u8" || request_path.is_empty() {
+                let msn = parse_directive(&raw_query, "_HLS_msn");
+                let part = parse_directive(&raw_query, "_HLS_part");
+                if let Some(pl) = crate::services::ll_origin::serve_playlist(msn, part).await {
+                    return Ok(playlist_response(pl.into_bytes()));
+                }
+                // Origin went inactive between the check and now: fall through.
+            }
+        }
+
+        // Stable-URL scheme: a synthetic `seg/<sn>.ts` is 302-redirected to the
+        // freshest real CDN URL (see SEGMENT_MAP). Handled before any upstream fetch.
+        if let Some(resp) = segment_redirect(request_path) {
+            return Ok(resp);
+        }
 
         // Map the local path to the upstream Twitch CDN
         let fetch_url = if request_path == "stream.m3u8" || request_path.is_empty() {
@@ -432,16 +603,37 @@ impl StreamServer {
                 //    fast-pathed past the filter; entitled streams (no ads) always
                 //    promote, normal-latency streams have no hints so this is a no-op.
                 //
-                // TEMPORARILY DISABLED while chasing the low-latency `levelParsingError`
-                // freeze: a promoted prefetch is an in-progress edge segment presented to
-                // hls.js as a finalized one, which can desync its live-refresh consistency
-                // check across polls. Flip `ENABLE_PREFETCH_PROMOTION` back to true to
-                // restore. retarget_playlist (above) keeps its own edge-tightening.
-                let enable_prefetch_promotion = false;
+                // Promote PREFETCH hints into real segments (the only way to ride ~2s
+                // on a low-latency channel), made refresh-stable by two cooperating
+                // fixes: (a) `promote_prefetch` translates Twitch's
+                // `#EXT-X-PREFETCH-DISCONTINUITY` into a real `#EXT-X-DISCONTINUITY` so
+                // the discontinuity counter `cc` stays consistent across refreshes; and
+                // (b) `stabilize_segment_urls` rewrites every segment to a stable
+                // synthetic `seg/<sn>.ts` so its URL never changes across refreshes even
+                // as Twitch re-signs the real URLs. Both are required: the live repro
+                // that froze the player showed a "media sequence mismatch" (URL change),
+                // not a "discontinuity sequence mismatch", so the `cc` fix alone was not
+                // enough. Promotion is ad-gated (never fast-path an in-progress ad).
+                // `enable_prefetch_promotion` is the one-line kill switch.
+                let enable_prefetch_promotion = true;
                 if enable_prefetch_promotion && !ads_now {
                     if let Some(pp) = crate::services::ad_detect::promote_prefetch(&work) {
                         work = pp;
+                        STABILIZING.store(true, Ordering::Relaxed);
                     }
+                }
+                // Stabilize segment URLs once we've started promoting on this stream.
+                // Sticky across polls (even ad-break polls with no prefetch): a segment
+                // served as `seg/<sn>.ts` in one poll must never revert to its raw,
+                // re-signed URL in the next, which would be the very cross-refresh
+                // mismatch this prevents.
+                if enable_prefetch_promotion && STABILIZING.load(Ordering::Relaxed) {
+                    let uwq = manifest_url.split('?').next().unwrap_or(&manifest_url);
+                    let base_url = match uwq.rfind('/') {
+                        Some(i) => uwq[..=i].to_string(),
+                        None => uwq.to_string(),
+                    };
+                    work = stabilize_segment_urls(&work, &base_url);
                 }
 
                 // 3) Record whether this is a low-latency broadcast so the player
@@ -589,5 +781,66 @@ impl StreamServer {
             .lock()
             .await
             .ok_or_else(|| anyhow::anyhow!("No server running"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stabilize_gives_each_sequence_a_stable_synthetic_url() {
+        SEGMENT_MAP.lock().unwrap().clear();
+
+        // Poll N: media-sequence 100, two segments (absolute CDN URLs, signed ?dna=AAA).
+        let poll_n = "#EXTM3U\n\
+#EXT-X-TARGETDURATION:2\n\
+#EXT-X-MEDIA-SEQUENCE:100\n\
+#EXT-X-MAP:URI=\"https://cdn/init.mp4\"\n\
+#EXTINF:2.000,live\nhttps://cdn/a100.mp4?dna=AAA\n\
+#EXTINF:2.000,live\nhttps://cdn/a101.mp4?dna=AAA\n";
+        let out_n = stabilize_segment_urls(poll_n, "https://cdn/");
+        // Segments become stable synthetic URLs keyed by media-sequence number.
+        assert!(out_n.contains("seg/100.ts"));
+        assert!(out_n.contains("seg/101.ts"));
+        // The init segment (MAP) is left untouched (fetched direct from the CDN).
+        assert!(out_n.contains("#EXT-X-MAP:URI=\"https://cdn/init.mp4\""));
+        // Raw segment URLs no longer appear in the served playlist.
+        assert!(!out_n.contains("a100.mp4"));
+        // The map resolves the synthetic URL to the real one.
+        assert_eq!(
+            SEGMENT_MAP.lock().unwrap().get(&100).map(String::as_str),
+            Some("https://cdn/a100.mp4?dna=AAA"),
+        );
+
+        // Poll N+1: window advanced by one; sn 101 is re-signed (?dna=BBB). hls.js
+        // requires sn 101 to keep the SAME URL across refreshes — the synthetic URL
+        // must be identical to poll N, while the redirect target updates to the fresh
+        // signed URL. This is exactly what prevents the "media sequence mismatch" freeze.
+        let poll_n1 = "#EXTM3U\n\
+#EXT-X-TARGETDURATION:2\n\
+#EXT-X-MEDIA-SEQUENCE:101\n\
+#EXT-X-MAP:URI=\"https://cdn/init.mp4\"\n\
+#EXTINF:2.000,live\nhttps://cdn/a101.mp4?dna=BBB\n\
+#EXTINF:2.000,live\nhttps://cdn/a102.mp4?dna=BBB\n";
+        let out_n1 = stabilize_segment_urls(poll_n1, "https://cdn/");
+        assert!(out_n1.contains("seg/101.ts"));
+        assert!(out_n1.contains("seg/102.ts"));
+        // Same synthetic identity for sn 101 across both polls.
+        assert!(out_n.contains("seg/101.ts") && out_n1.contains("seg/101.ts"));
+        // Redirect target for sn 101 updated to the freshest signed URL.
+        assert_eq!(
+            SEGMENT_MAP.lock().unwrap().get(&101).map(String::as_str),
+            Some("https://cdn/a101.mp4?dna=BBB"),
+        );
+
+        SEGMENT_MAP.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn segment_redirect_only_matches_seg_paths() {
+        // Non-segment paths fall through (None) so normal proxying still runs.
+        assert!(segment_redirect("stream.m3u8").is_none());
+        assert!(segment_redirect("video/something.ts").is_none());
     }
 }

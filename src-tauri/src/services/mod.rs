@@ -26,6 +26,7 @@ pub mod http;
 pub mod irc_service;
 pub mod layout_service;
 pub mod live_notification_service;
+pub mod ll_origin;
 pub mod log_service;
 pub mod mining_service;
 pub mod mod_log_storage_service;
