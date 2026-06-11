@@ -7,11 +7,12 @@ use crate::services::emote_service::{Emote, EmoteService, EmoteSet};
 use crate::services::layout_service::LayoutService;
 use crate::services::twitch_service::TwitchService;
 use crate::services::user_message_history_service::UserMessageHistoryService;
+use crate::plugin_host::PluginHost;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error};
 use rand::Rng;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -53,6 +54,12 @@ static CHANNEL_EMOTES: OnceLock<Mutex<HashMap<String, EmoteSet>>> = OnceLock::ne
 // doesn't lose the channel — whichever IPC arrives first, the channel stays
 // JOINed as long as any window still wants it.
 static CHANNEL_REFCOUNT: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+// Handle to the plugin host so parsed chat lines can be forwarded to plugins
+// subscribed to on_chat_message. Set once, on the first chat start.
+static PLUGIN_HOST: OnceLock<Arc<PluginHost>> = OnceLock::new();
+// The logged-in user's (login, user id), for attributing locally sent
+// messages: Twitch IRC does not echo your own PRIVMSG back.
+static OWN_IDENTITY: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 const IRC_SERVER: &str = "irc.chat.twitch.tv";
 const IRC_PORT: u16 = 6667;
@@ -105,6 +112,44 @@ fn get_channel_refcount() -> &'static Mutex<HashMap<String, u32>> {
     CHANNEL_REFCOUNT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn get_own_identity() -> &'static Mutex<Option<(String, String)>> {
+    OWN_IDENTITY.get_or_init(|| Mutex::new(None))
+}
+
+/// The lean wire shape of the on_chat_message plugin event (PROTOCOL.md):
+/// identity, text, and event metadata only. Render data (segments, layout,
+/// emote URLs) stays out so the payload is small and stable.
+fn chat_event_params(msg: &ChatMessage) -> Value {
+    let ts = msg
+        .timestamp
+        .parse::<i64>()
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    json!({
+        "channel": msg.channel,
+        "message": {
+            "id": msg.id,
+            "user_id": msg.user_id,
+            "login": msg.username,
+            "display_name": msg.display_name,
+            "color": msg.color,
+            "badges": msg
+                .badges
+                .iter()
+                .map(|b| json!({ "name": b.name, "version": b.version }))
+                .collect::<Vec<_>>(),
+            "text": msg.content,
+            "is_action": msg.metadata.is_action,
+            "msg_type": msg.metadata.msg_type,
+            "system_message": msg.metadata.system_message,
+            "bits": msg.metadata.bits_amount,
+            "ts": ts,
+        }
+    })
+}
+
 // Extract the channel name (lowercase, no leading #) from a raw IRC line.
 // Used by ROOMSTATE/USERSTATE/CLEARMSG/CLEARCHAT parsing to key per-channel
 // caches and tag synthetic WS messages.
@@ -124,6 +169,7 @@ impl IrcService {
     pub async fn start(channel: &str, state: &AppState) -> Result<u16> {
         let layout_service = state.layout_service.clone();
         let emote_service = state.emote_service.clone();
+        let _ = PLUGIN_HOST.set(state.plugin_host.clone());
 
         // Idempotency: if the IRC service is already running, don't tear it
         // down. Instead, JOIN the requested channel onto the existing
@@ -201,6 +247,9 @@ impl IrcService {
         let user_info = TwitchService::get_user_info().await?;
 
         debug!("[IRC Chat] User: {} ({})", user_info.login, user_info.id);
+
+        *get_own_identity().lock().await =
+            Some((user_info.login.clone(), user_info.id.clone()));
 
         // Create broadcast channel for messages with larger buffer
         let (tx, _rx) = broadcast::channel::<String>(1000);
@@ -546,6 +595,12 @@ impl IrcService {
                         .await;
                 }
 
+                if let Some(host) = PLUGIN_HOST.get() {
+                    if host.wants_chat_messages().await {
+                        host.emit_chat_message(chat_event_params(&chat_msg)).await;
+                    }
+                }
+
                 if let Ok(json_msg) = serde_json::to_string(&chat_msg) {
                     if tx.send(json_msg).is_err() {
                         // debug!("[IRC Chat] No active receivers, queueing message");
@@ -606,6 +661,12 @@ impl IrcService {
                     chat_msg.metadata.msg_type,
                     chat_msg.content.len()
                 );
+
+                if let Some(host) = PLUGIN_HOST.get() {
+                    if host.wants_chat_messages().await {
+                        host.emit_chat_message(chat_event_params(&chat_msg)).await;
+                    }
+                }
 
                 if let Ok(json_msg) = serde_json::to_string(&chat_msg) {
                     if tx.send(json_msg).is_err() {
@@ -1081,6 +1142,42 @@ impl IrcService {
         debug!("[IRC Chat] Sending message: {}", message);
         w.write_all(formatted_message.as_bytes()).await?;
         w.flush().await?;
+        drop(w);
+
+        // Twitch IRC does not echo your own PRIVMSG back, so forward locally
+        // sent messages to plugins here, mirroring the chat UI's local echo.
+        // Delivered with empty id (no server-assigned message id exists).
+        if let Some(host) = PLUGIN_HOST.get() {
+            if host.wants_chat_messages().await {
+                let (login, user_id) = get_own_identity()
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap_or_default();
+                let (text, is_action) = match message.strip_prefix("/me ") {
+                    Some(rest) => (rest, true),
+                    None => (message, false),
+                };
+                host.emit_chat_message(json!({
+                    "channel": channel,
+                    "message": {
+                        "id": "",
+                        "user_id": user_id,
+                        "login": login,
+                        "display_name": login,
+                        "color": Value::Null,
+                        "badges": [],
+                        "text": text,
+                        "is_action": is_action,
+                        "msg_type": Value::Null,
+                        "system_message": Value::Null,
+                        "bits": Value::Null,
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                    }
+                }))
+                .await;
+            }
+        }
 
         Ok(())
     }

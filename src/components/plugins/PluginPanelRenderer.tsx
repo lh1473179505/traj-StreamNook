@@ -92,6 +92,55 @@ const ChipList = ({
   );
 };
 
+// A directory path with a native browse dialog. Empty string means "plugin
+// default"; the field's placeholder describes what that default is.
+const FolderPicker = ({
+  value,
+  placeholder,
+  onChange,
+}: {
+  value: string;
+  placeholder?: string;
+  onChange: (next: string) => void;
+}) => {
+  const browse = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({ directory: true, multiple: false });
+      if (typeof picked === 'string' && picked) onChange(picked);
+    } catch (err) {
+      Logger.error('[Plugins] folder pick failed:', err);
+    }
+  };
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <div className="glass-input min-w-0 flex-1 truncate rounded-md px-3 py-1.5 text-[13px]">
+        {value ? (
+          <span className="text-textPrimary">{value}</span>
+        ) : (
+          <span className="italic text-textSecondary">{placeholder ?? 'Default'}</span>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={browse}
+        className="flex-shrink-0 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[13px] text-textSecondary transition-colors hover:bg-white/10 hover:text-textPrimary"
+      >
+        Browse
+      </button>
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="flex-shrink-0 rounded-md px-2 py-1.5 text-[13px] text-textMuted transition-colors hover:bg-white/5 hover:text-textPrimary"
+        >
+          Reset
+        </button>
+      )}
+    </div>
+  );
+};
+
 const Slider = ({ field, value, onChange }: { field: PanelField; value: number; onChange: (n: number) => void }) => {
   const divisor = field.display_divisor ?? 1;
   const shown = divisor > 1 ? Math.round(value / divisor) : value;
@@ -168,7 +217,7 @@ const PluginPanelRenderer = ({ pluginId }: Props) => {
   }
 
   const valueOf = (field: PanelField) => values[field.key] ?? field.default;
-  const blockTypes = ['string_list', 'channel_list', 'slider'];
+  const blockTypes = ['string_list', 'channel_list', 'slider', 'folder'];
 
   const inlineControl = (field: PanelField) => {
     switch (field.type) {
@@ -234,6 +283,14 @@ const PluginPanelRenderer = ({ pluginId }: Props) => {
       case 'slider':
         return (
           <Slider field={field} value={Number(valueOf(field) ?? field.min ?? 0)} onChange={(n) => commit(field.key, n)} />
+        );
+      case 'folder':
+        return (
+          <FolderPicker
+            value={typeof valueOf(field) === 'string' ? (valueOf(field) as string) : ''}
+            placeholder={field.placeholder}
+            onChange={(next) => commit(field.key, next)}
+          />
         );
       default:
         return null;

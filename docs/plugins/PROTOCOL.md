@@ -95,9 +95,31 @@ Shared shape, the channel object:
 | `on_channel_change` | `{ "channel_id": "12345", "login": "somechannel" }` | The active on-screen channel changed (channel switch, or focus change in the multi-stream grid) |
 | `on_watch_tick` | `{ "active_channel_id": "12345", "ts": "<RFC 3339>" }` | Periodic tick, nominally every 60 seconds while the app runs. `active_channel_id` is null when nothing is playing. Plugins must not assume exact cadence |
 | `on_followed_live` | `{ "channels": [<channel>...] }` | The set of live followed channels, sent after startup and whenever the host refreshes it |
+| `on_chat_message` | `{ "channel": "somechannel", "message": <chat message> }` | A chat line arrived in a channel the app has open, or was sent from the app. One event per message; delivery starts once the plugin is running and a chat connection exists, with no history replay |
 | `on_ad_window` | `{ "stream_id": "solo", "active": true, "ts": "<RFC 3339>" }` | Read-only ad detection state changed for a relay session (`stream_id` is a relay session id, see `set_upstream`). Emitted on every transition: `active: true` when ad markers appear in the served playlist, `active: false` when they clear |
 | `on_settings_change` | `{ "keys": ["..."] }` | Reserved. Host settings keys the host chooses to expose changed. No keys are guaranteed in v1 |
 | `on_panel_change` | `{ "values": { "<key>": <value> } }` | The user changed values in the plugin's settings panel (requires `ui: panel`) |
+
+The chat message object carried by `on_chat_message`:
+
+```json
+{
+  "id": "885196de-cb67-427a-baa8-58f001aa3fe4",
+  "user_id": "12345",
+  "login": "somechatter",
+  "display_name": "SomeChatter",
+  "color": "#FF7F50",
+  "badges": [ { "name": "subscriber", "version": "12" } ],
+  "text": "hello",
+  "is_action": false,
+  "msg_type": null,
+  "system_message": null,
+  "bits": null,
+  "ts": "2026-06-10T17:00:00Z"
+}
+```
+
+`color`, `msg_type`, `system_message`, and `bits` are nullable. `is_action` marks a `/me` line. Event-style lines (subscriptions, gifts, raids, announcements) carry Twitch's notice id in `msg_type` (for example `sub`, `raid`, `announcement`) and a readable `system_message`; `text` then holds the user's attached message and may be empty. A message the user sends from the app is delivered with an empty `id`, since no server-assigned id exists for it. The shape is deliberately lean: identity, text, and event metadata only, no render data.
 
 ## 4. Host methods (plugin to host)
 
@@ -171,7 +193,7 @@ Registers (or replaces) the plugin's settings panel. The host renders it; the pl
 }
 ```
 
-Field types in v1: `toggle` (boolean), `number`, `select` (one of `options`), `text`, `string_list` (rendered as add-and-remove chip rows, value is a string array), `channel_list` (a Twitch channel search-and-pick control, value is an array of `{ channel_id, channel_login, display_name }`), and `slider` (a range with `min`/`max`/`step`, plus optional `unit` and `display_divisor` for the readout). The host renders each type with a rich native control and persists values per plugin, delivering changes via `on_panel_change`. These are generic: any plugin composes them, and the host renders them without knowing which plugin or feature it serves.
+Field types in v1: `toggle` (boolean), `number`, `select` (one of `options`), `text`, `string_list` (rendered as add-and-remove chip rows, value is a string array), `channel_list` (a Twitch channel search-and-pick control, value is an array of `{ channel_id, channel_login, display_name }`), `slider` (a range with `min`/`max`/`step`, plus optional `unit` and `display_divisor` for the readout), and `folder` (a directory path chosen through the native folder dialog, value is a string; the empty string means the plugin's default, and `placeholder` is what shows in that case). The host renders each type with a rich native control and persists values per plugin, delivering changes via `on_panel_change`. These are generic: any plugin composes them, and the host renders them without knowing which plugin or feature it serves.
 
 ### get_panel_values
 
