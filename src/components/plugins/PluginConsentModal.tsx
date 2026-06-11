@@ -1,13 +1,11 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldAlert, Puzzle } from 'lucide-react';
-import {
-  capabilityLines,
-  GrantedCaps,
-  PluginTier,
-  TIER_LABEL,
-} from '../../types/plugins';
+import { capabilityLines, GrantedCaps, PluginTier } from '../../types/plugins';
 import TierBadge from './TierBadge';
+
+const TILE_BEVEL =
+  'inset 1px 1px 0 0 rgba(255,255,255,0.10), inset -1px -1px 0 0 rgba(0,0,0,0.18)';
 
 export interface ConsentSubject {
   name: string;
@@ -53,26 +51,35 @@ const PluginConsentModal = ({ subject, onConfirm, onCancel }: Props) => {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 12 }}
             transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-            className="glass-panel p-6 w-[480px] max-w-[90vw] max-h-[85vh] overflow-y-auto relative"
+            className="glass-panel relative max-h-[85vh] w-[480px] max-w-[90vw] overflow-y-auto p-6"
           >
-            <div className="flex items-center gap-3 mb-1">
-              <div className={`p-2 rounded-lg ${isC ? 'bg-red-500/15' : 'bg-accent/15'}`}>
+            <div className="flex items-start gap-3.5">
+              <div
+                className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl"
+                style={{
+                  background: isC ? 'rgba(225, 130, 130, 0.16)' : 'rgba(165, 185, 150, 0.16)',
+                  boxShadow: TILE_BEVEL,
+                }}
+              >
                 {isC ? (
                   <ShieldAlert size={20} className="text-red-300" />
                 ) : (
-                  <Puzzle size={20} className="text-accent" />
+                  <Puzzle size={20} className="text-textPrimary" />
                 )}
               </div>
-              <div className="min-w-0">
-                <h2 className="text-base font-bold text-textPrimary truncate">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[15px] font-bold leading-snug text-textPrimary">
                   {isC
                     ? `${subject.name} can get your Twitch account suspended.`
                     : `${subject.action} ${subject.name}?`}
                 </h2>
-                <p className="text-[12px] text-textSecondary">
-                  by {subject.author} · v{subject.version} ·{' '}
-                  <TierBadge tier={subject.tier} /> {TIER_LABEL[subject.tier]}
-                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px] text-textSecondary">
+                  <span>by {subject.author}</span>
+                  <span className="text-textMuted">·</span>
+                  <span>v{subject.version}</span>
+                  <span className="text-textMuted">·</span>
+                  <TierBadge tier={subject.tier} />
+                </div>
               </div>
             </div>
 
@@ -100,26 +107,35 @@ const PluginConsentModal = ({ subject, onConfirm, onCancel }: Props) => {
               </p>
             )}
 
-            <div className="mt-4 settings-card px-4 py-1">
+            <div className="mt-4 rounded-lg bg-white/[0.03] py-1.5">
+              <div className="px-3.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted">
+                What it can do
+              </div>
               {lines.map((line) => (
-                <div
-                  key={line.text}
-                  className={`py-2 text-[13px] leading-relaxed ${
-                    line.warning ? 'text-red-300' : 'text-textPrimary'
-                  }`}
-                >
-                  {line.text}
+                <div key={line.text} className="flex items-baseline gap-2 px-3.5 py-1">
+                  <span
+                    className={`h-1 w-1 flex-shrink-0 translate-y-[-2px] rounded-full ${
+                      line.warning ? 'bg-red-300' : 'bg-textMuted'
+                    }`}
+                  />
+                  <span
+                    className={`text-[12.5px] leading-relaxed ${
+                      line.warning ? 'text-red-300' : 'text-textPrimary'
+                    }`}
+                  >
+                    {line.text}
+                  </span>
                 </div>
               ))}
               {lines.length === 0 && (
-                <div className="py-2 text-[13px] text-textSecondary">
+                <div className="px-3.5 py-1.5 text-[12.5px] text-textSecondary">
                   This plugin requests no capabilities.
                 </div>
               )}
             </div>
 
             {isC && (
-              <label className="mt-4 flex items-start gap-2.5 cursor-pointer select-none">
+              <label className="mt-4 flex cursor-pointer select-none items-start gap-2.5">
                 <input
                   type="checkbox"
                   checked={accepted}
@@ -140,7 +156,7 @@ const PluginConsentModal = ({ subject, onConfirm, onCancel }: Props) => {
                   setAccepted(false);
                   onCancel();
                 }}
-                className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[13px] text-textSecondary hover:text-textPrimary transition-colors"
+                className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-[13px] text-textSecondary transition-colors hover:bg-white/10 hover:text-textPrimary"
               >
                 Cancel
               </button>
@@ -151,12 +167,12 @@ const PluginConsentModal = ({ subject, onConfirm, onCancel }: Props) => {
                   setAccepted(false);
                   onConfirm();
                 }}
-                className={`px-4 py-2 rounded-lg border text-[13px] font-medium transition-colors ${
+                className={`rounded-lg border px-4 py-2 text-[13px] font-medium transition-colors ${
                   isC
                     ? accepted
-                      ? 'bg-red-500/20 hover:bg-red-500/30 border-red-400/30 text-red-200'
-                      : 'bg-white/5 border-white/10 text-textMuted cursor-not-allowed'
-                    : 'bg-accent/20 hover:bg-accent/30 border-accent/30 text-textPrimary'
+                      ? 'border-red-400/25 bg-red-500/20 text-red-200 hover:bg-red-500/30'
+                      : 'cursor-not-allowed border-white/10 bg-white/5 text-textMuted'
+                    : 'border-accent/25 bg-accent/15 text-textPrimary hover:bg-accent/25'
                 }`}
               >
                 {isC ? `${subject.action} anyway` : subject.action}

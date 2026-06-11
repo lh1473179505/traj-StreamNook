@@ -90,42 +90,52 @@ const PluginRuntimeBridge = () => {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 12 }}
             transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-            className="glass-panel p-6 w-[440px] max-w-[90vw] relative"
+            className="glass-panel relative w-[440px] max-w-[90vw] p-6"
           >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-red-500/15 rounded-lg">
+            <div className="flex items-start gap-3.5">
+              <div
+                className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl"
+                style={{
+                  background: 'rgba(225, 130, 130, 0.16)',
+                  boxShadow:
+                    'inset 1px 1px 0 0 rgba(255,255,255,0.10), inset -1px -1px 0 0 rgba(0,0,0,0.18)',
+                }}
+              >
                 <KeyRound size={20} className="text-red-300" />
               </div>
-              <h2 className="text-base font-bold text-textPrimary">
-                {request.plugin_name} is asking to use your Twitch login.
-              </h2>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[15px] font-bold leading-snug text-textPrimary">
+                  {request.plugin_name} is asking to use your Twitch login.
+                </h2>
+                <p className="mt-2 text-[13px] leading-relaxed text-textSecondary">
+                  If you allow this, the plugin receives a token that lets it act as
+                  your Twitch account: watching, claiming, and anything else that
+                  login can do. StreamNook records every time a credential is handed
+                  to a plugin.
+                </p>
+              </div>
             </div>
-            <p className="text-[13px] leading-relaxed text-textSecondary mb-5">
-              If you allow this, the plugin receives a token that lets it act as your
-              Twitch account: watching, claiming, and anything else that login can do.
-              StreamNook records every time a credential is handed to a plugin.
-            </p>
-            <div className="flex flex-col gap-2">
+            <div className="mt-5 flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => respond('allow')}
-                className="w-full px-4 py-2 rounded-lg bg-white/10 hover:bg-white/15 border border-white/10 text-[13px] font-medium text-textPrimary transition-colors"
+                onClick={() => respond('deny')}
+                className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-[13px] text-textSecondary transition-colors hover:bg-white/10 hover:text-textPrimary"
               >
-                Allow
+                Deny
               </button>
               <button
                 type="button"
                 onClick={() => respond('always')}
-                className="w-full px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[13px] text-textSecondary hover:text-textPrimary transition-colors"
+                className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-[13px] text-textSecondary transition-colors hover:bg-white/10 hover:text-textPrimary"
               >
-                Allow and don't ask again
+                Don't ask again
               </button>
               <button
                 type="button"
-                onClick={() => respond('deny')}
-                className="w-full px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[13px] text-textSecondary hover:text-textPrimary transition-colors"
+                onClick={() => respond('allow')}
+                className="rounded-lg border border-accent/25 bg-accent/15 px-4 py-2 text-[13px] font-medium text-textPrimary transition-colors hover:bg-accent/25"
               >
-                Deny
+                Allow
               </button>
             </div>
           </motion.div>

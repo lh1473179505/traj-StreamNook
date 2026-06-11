@@ -147,37 +147,37 @@ const PluginPanelRenderer = ({ pluginId }: Props) => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {schema.sections.map((section, i) => (
-        <div key={section.label ?? i}>
+        <div key={section.label ?? i} className="rounded-lg bg-white/[0.02] py-1.5">
           {section.label && (
-            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted px-1 pb-1">
+            <div className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted">
               {section.label}
             </div>
           )}
           {section.description && (
-            <p className="text-[12px] text-textSecondary px-1 pb-2">{section.description}</p>
+            <p className="px-3 pb-1 text-[12px] leading-relaxed text-textSecondary">
+              {section.description}
+            </p>
           )}
-          <div className="settings-card px-4">
-            {section.fields.map((field) => (
-              <div key={field.key} className="settings-row -mx-4 px-4 py-3">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-medium text-textPrimary">{field.label}</div>
-                    {field.description && (
-                      <p className="mt-0.5 text-[12px] leading-relaxed text-textSecondary">
-                        {field.description}
-                      </p>
-                    )}
-                    {field.type === 'string_list' && <div className="mt-2">{renderField(field)}</div>}
-                  </div>
-                  {field.type !== 'string_list' && (
-                    <div className="flex-shrink-0">{renderField(field)}</div>
+          {section.fields.map((field) => (
+            <div key={field.key} className="settings-row px-3 py-2.5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-medium text-textPrimary">{field.label}</div>
+                  {field.description && (
+                    <p className="mt-0.5 text-[12px] leading-relaxed text-textSecondary">
+                      {field.description}
+                    </p>
                   )}
+                  {field.type === 'string_list' && <div className="mt-2">{renderField(field)}</div>}
                 </div>
+                {field.type !== 'string_list' && (
+                  <div className="flex-shrink-0">{renderField(field)}</div>
+                )}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
       ))}
     </div>

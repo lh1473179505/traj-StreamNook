@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronDown,
-  ChevronRight,
   FolderOpen,
   Globe,
   KeyRound,
+  Plus,
+  Puzzle,
+  ScrollText,
+  Settings2,
   Trash2,
 } from 'lucide-react';
 import { useAppStore } from '../../stores/AppStore';
@@ -19,15 +23,25 @@ import {
   capabilityLines,
   IndexEntry,
   PluginInfo,
+  PluginTier,
   SourceInfo,
 } from '../../types/plugins';
 import { Logger } from '../../utils/logger';
+
+const TILE_BEVEL =
+  'inset 1px 1px 0 0 rgba(255,255,255,0.10), inset -1px -1px 0 0 rgba(0,0,0,0.18)';
+
+const TIER_TINT: Record<PluginTier, string> = {
+  A: 'rgba(110, 200, 160, 0.16)',
+  B: 'rgba(225, 185, 120, 0.16)',
+  C: 'rgba(225, 130, 130, 0.16)',
+};
 
 const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void }) => (
   <button
     type="button"
     onClick={onChange}
-    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${
+    className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
       enabled ? 'bg-accent' : 'bg-gray-600'
     }`}
   >
@@ -39,15 +53,95 @@ const Toggle = ({ enabled, onChange }: { enabled: boolean; onChange: () => void 
   </button>
 );
 
+/** Quiet icon button used in card action clusters. */
+const IconAction = ({
+  hint,
+  onClick,
+  danger = false,
+  active = false,
+  children,
+}: {
+  hint: string;
+  onClick: () => void;
+  danger?: boolean;
+  active?: boolean;
+  children: React.ReactNode;
+}) => (
+  <Tooltip content={hint} delay={200}>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md p-1.5 transition-colors ${
+        danger
+          ? 'text-textMuted hover:bg-red-500/10 hover:text-red-300'
+          : active
+            ? 'bg-white/[0.06] text-textPrimary'
+            : 'text-textMuted hover:bg-white/[0.06] hover:text-textPrimary'
+      }`}
+    >
+      {children}
+    </button>
+  </Tooltip>
+);
+
+const Chip = ({
+  label,
+  onClick,
+  disabled = false,
+  emphasis = false,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  emphasis?: boolean;
+}) => (
+  <button
+    type="button"
+    disabled={disabled}
+    onClick={onClick}
+    className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors border ${
+      disabled
+        ? 'border-white/5 bg-white/[0.03] text-textMuted cursor-default'
+        : emphasis
+          ? 'border-accent/25 bg-accent/15 text-textPrimary hover:bg-accent/25'
+          : 'border-white/10 bg-white/5 text-textSecondary hover:bg-white/10 hover:text-textPrimary'
+    }`}
+  >
+    {label}
+  </button>
+);
+
+/** Soft expand/collapse used for card details and source browsing. */
+const Reveal = ({ open, children }: { open: boolean; children: React.ReactNode }) => (
+  <AnimatePresence initial={false}>
+    {open && (
+      <motion.div
+        initial={{ height: 0, opacity: 0 }}
+        animate={{ height: 'auto', opacity: 1 }}
+        exit={{ height: 0, opacity: 0 }}
+        transition={{ duration: 0.18, ease: 'easeOut' }}
+        className="overflow-hidden"
+      >
+        {children}
+      </motion.div>
+    )}
+  </AnimatePresence>
+);
+
+const Hairline = () => <div className="mx-3 my-1 h-px bg-white/[0.06]" />;
+
 const PluginsSettings = () => {
   const addToast = useAppStore((s) => s.addToast);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [panelOpen, setPanelOpen] = useState<string | null>(null);
   const [browse, setBrowse] = useState<{ url: string; entries: IndexEntry[] } | null>(null);
   const [newSourceUrl, setNewSourceUrl] = useState('');
+  const [showAddSource, setShowAddSource] = useState(false);
   const [confirmSourceUrl, setConfirmSourceUrl] = useState<string | null>(null);
   const [localDir, setLocalDir] = useState('');
+  const [showDevelop, setShowDevelop] = useState(false);
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState<{
     subject: ConsentSubject;
@@ -193,6 +287,7 @@ const PluginsSettings = () => {
       const source = await invoke<SourceInfo>('plugins_add_source', { url: confirmSourceUrl });
       addToast(`Added source "${source.name}" (key ${source.fingerprint})`, 'success');
       setNewSourceUrl('');
+      setShowAddSource(false);
       await refresh();
     } catch (err) {
       fail(err);
@@ -226,202 +321,260 @@ const PluginsSettings = () => {
   };
 
   return (
-    <div className="space-y-8">
-      <SettingsSection
-        label="Installed plugins"
-        description="Plugins are separate programs StreamNook starts and talks to. The app ships with none; everything here is something you chose to add, and each one only gets the capabilities shown on its card."
-        bare
-      >
-        {plugins.length === 0 && (
-          <div className="settings-card px-4 py-6 text-center text-[13px] text-textSecondary">
-            No plugins installed.
+    <div className="space-y-9">
+      {/* Installed */}
+      {plugins.length === 0 ? (
+        <div className="flex flex-col items-center py-10 text-center">
+          <div
+            className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl"
+            style={{ background: 'rgba(165, 185, 150, 0.14)', boxShadow: TILE_BEVEL }}
+          >
+            <Puzzle className="h-6 w-6 text-textPrimary" strokeWidth={2} />
           </div>
-        )}
-        {plugins.map((plugin) => {
-          const isExpanded = expanded === plugin.id;
-          return (
-            <div key={plugin.id} className="settings-card px-4 py-3">
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setExpanded(isExpanded ? null : plugin.id)}
-                  className="text-textSecondary hover:text-textPrimary transition-colors"
-                >
-                  {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                </button>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-medium text-textPrimary truncate">
-                      {plugin.name}
-                    </span>
-                    <TierBadge tier={plugin.tier} />
-                    {plugin.source === 'local-dev' && (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-sky-500/15 text-sky-300 border border-sky-400/20">
-                        Local dev
-                      </span>
-                    )}
-                    {plugin.running && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    )}
-                  </div>
-                  <p className="text-[12px] text-textSecondary truncate">
-                    v{plugin.version} by {plugin.author} · {plugin.description}
-                  </p>
-                </div>
-                <Tooltip content="Uninstall">
-                  <button
-                    type="button"
-                    onClick={() => setConfirmUninstall(plugin.id)}
-                    className="p-1.5 rounded-md text-textSecondary hover:text-red-300 hover:bg-red-500/10 transition-colors"
+          <h2 className="text-[16px] font-semibold text-textPrimary">No plugins yet</h2>
+          <p className="mt-1.5 max-w-[400px] text-[13px] leading-relaxed text-textSecondary">
+            Plugins are separate programs StreamNook starts and supervises. The app
+            ships with none; anything that appears here is something you chose to
+            add, and it only ever gets the capabilities you grant it.
+          </p>
+          <div className="mt-5 flex gap-2">
+            <Chip label="Add a source" emphasis onClick={() => setShowAddSource(true)} />
+            <Chip label="Register a dev folder" onClick={() => setShowDevelop(true)} />
+          </div>
+        </div>
+      ) : (
+        <SettingsSection
+          label="Installed"
+          description="Each plugin runs as its own process and only gets the capabilities on its card."
+          bare
+        >
+          {plugins.map((plugin) => {
+            const isExpanded = expanded === plugin.id;
+            const isPanelOpen = panelOpen === plugin.id;
+            return (
+              <div key={plugin.id} className="glass-panel rounded-lg p-4">
+                <div className="flex items-center gap-3.5">
+                  <div
+                    className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg"
+                    style={{ background: TIER_TINT[plugin.tier], boxShadow: TILE_BEVEL }}
                   >
-                    <Trash2 size={14} />
-                  </button>
-                </Tooltip>
-                <Toggle
-                  enabled={plugin.enabled}
-                  onChange={() => setEnabled(plugin, !plugin.enabled)}
-                />
-              </div>
-
-              {confirmUninstall === plugin.id && (
-                <div className="mt-3 flex items-center justify-between gap-3 rounded-lg bg-red-500/10 border border-red-400/20 px-3 py-2">
-                  <span className="text-[12px] text-red-200">
-                    Uninstall {plugin.name} and delete its local state?
-                  </span>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setConfirmUninstall(null)}
-                      className="px-2.5 py-1 rounded text-[12px] text-textSecondary hover:text-textPrimary"
+                    <Puzzle size={18} strokeWidth={2.25} className="text-textPrimary" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-[14px] font-semibold text-textPrimary">
+                        {plugin.name}
+                      </span>
+                      <TierBadge tier={plugin.tier} />
+                      {plugin.source === 'local-dev' && (
+                        <span className="rounded border border-sky-400/20 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+                          Dev
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-textSecondary">
+                      {plugin.running && (
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      )}
+                      <span className="truncate">
+                        {plugin.running ? 'Running' : plugin.enabled ? 'Starting' : 'Off'} · v
+                        {plugin.version} by {plugin.author}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-0.5">
+                    {plugin.has_panel && plugin.enabled && (
+                      <IconAction
+                        hint="Plugin settings"
+                        active={isPanelOpen}
+                        onClick={() => {
+                          setPanelOpen(isPanelOpen ? null : plugin.id);
+                          if (!isPanelOpen) setExpanded(null);
+                        }}
+                      >
+                        <Settings2 size={15} />
+                      </IconAction>
+                    )}
+                    <IconAction
+                      hint={isExpanded ? 'Hide details' : 'Details'}
+                      active={isExpanded}
+                      onClick={() => {
+                        setExpanded(isExpanded ? null : plugin.id);
+                        if (!isExpanded) setPanelOpen(null);
+                      }}
                     >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => uninstall(plugin.id)}
-                      className="px-2.5 py-1 rounded text-[12px] font-medium bg-red-500/20 text-red-200 hover:bg-red-500/30"
+                      <motion.span
+                        animate={{ rotate: isExpanded ? 180 : 0 }}
+                        transition={{ duration: 0.15 }}
+                        className="block"
+                      >
+                        <ChevronDown size={15} />
+                      </motion.span>
+                    </IconAction>
+                    <IconAction
+                      hint="Uninstall"
+                      danger
+                      onClick={() => setConfirmUninstall(plugin.id)}
                     >
-                      Uninstall
-                    </button>
+                      <Trash2 size={14} />
+                    </IconAction>
+                    <div className="ml-2">
+                      <Toggle
+                        enabled={plugin.enabled}
+                        onChange={() => setEnabled(plugin, !plugin.enabled)}
+                      />
+                    </div>
                   </div>
                 </div>
-              )}
 
-              {isExpanded && (
-                <div className="mt-3 space-y-4">
-                  <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted pb-1">
+                <Reveal open={confirmUninstall === plugin.id}>
+                  <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-2">
+                    <span className="text-[12px] text-red-200">
+                      Uninstall {plugin.name} and delete its local state?
+                    </span>
+                    <div className="flex flex-shrink-0 gap-2">
+                      <Chip label="Cancel" onClick={() => setConfirmUninstall(null)} />
+                      <button
+                        type="button"
+                        onClick={() => uninstall(plugin.id)}
+                        className="rounded-lg border border-red-400/25 bg-red-500/20 px-3 py-1.5 text-[12px] font-medium text-red-200 transition-colors hover:bg-red-500/30"
+                      >
+                        Uninstall
+                      </button>
+                    </div>
+                  </div>
+                </Reveal>
+
+                <Reveal open={isExpanded}>
+                  <p className="mt-3 px-0.5 text-[12px] leading-relaxed text-textSecondary">
+                    {plugin.description}
+                  </p>
+                  <div className="mt-3 rounded-lg bg-white/[0.02] py-1.5">
+                    <div className="px-3 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted">
                       What it can do
                     </div>
                     {capabilityLines(plugin.granted).map((line) => (
-                      <div
-                        key={line.text}
-                        className={`py-1 text-[12px] leading-relaxed ${
-                          line.warning ? 'text-red-300' : 'text-textSecondary'
-                        }`}
-                      >
-                        {line.text}
+                      <div key={line.text} className="flex items-baseline gap-2 px-3 py-1">
+                        <span
+                          className={`h-1 w-1 flex-shrink-0 translate-y-[-2px] rounded-full ${
+                            line.warning ? 'bg-red-300' : 'bg-textMuted'
+                          }`}
+                        />
+                        <span
+                          className={`text-[12px] leading-relaxed ${
+                            line.warning ? 'text-red-300' : 'text-textSecondary'
+                          }`}
+                        >
+                          {line.text}
+                        </span>
                       </div>
                     ))}
-                  </div>
 
-                  {plugin.granted.credentials.length > 0 && (
-                    <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted pb-1">
-                        Credential access
-                      </div>
-                      {plugin.granted.credentials.map((kind) => {
-                        const state = plugin.credential_consent[kind] ?? 'ask';
-                        return (
-                          <div key={kind} className="flex items-center justify-between py-1">
-                            <span className="text-[12px] text-textSecondary flex items-center gap-1.5">
-                              <KeyRound size={12} className="text-red-300" />
-                              {kind} ·{' '}
-                              {state === 'always'
-                                ? 'allowed without asking'
-                                : state === 'revoked'
-                                  ? 'revoked'
-                                  : 'asks each session'}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  await invoke(
-                                    state === 'revoked'
-                                      ? 'plugins_reset_credential_consent'
-                                      : 'plugins_revoke_credential',
-                                    { pluginId: plugin.id, kind }
-                                  );
-                                  await refresh();
-                                } catch (err) {
-                                  fail(err);
-                                }
-                              }}
-                              className="px-2 py-0.5 rounded text-[11px] bg-white/5 hover:bg-white/10 border border-white/10 text-textSecondary hover:text-textPrimary transition-colors"
+                    {plugin.granted.credentials.length > 0 && (
+                      <>
+                        <Hairline />
+                        {plugin.granted.credentials.map((kind) => {
+                          const state = plugin.credential_consent[kind] ?? 'ask';
+                          return (
+                            <div
+                              key={kind}
+                              className="flex items-center justify-between gap-3 px-3 py-1.5"
                             >
-                              {state === 'revoked' ? 'Allow asking again' : 'Revoke'}
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                              <span className="flex items-center gap-2 text-[12px] text-textSecondary">
+                                <KeyRound size={12} className="flex-shrink-0 text-red-300" />
+                                <span>
+                                  Twitch login ·{' '}
+                                  {state === 'always'
+                                    ? 'allowed without asking'
+                                    : state === 'revoked'
+                                      ? 'revoked'
+                                      : 'asks each session'}
+                                </span>
+                              </span>
+                              <Chip
+                                label={state === 'revoked' ? 'Allow asking again' : 'Revoke'}
+                                onClick={async () => {
+                                  try {
+                                    await invoke(
+                                      state === 'revoked'
+                                        ? 'plugins_reset_credential_consent'
+                                        : 'plugins_revoke_credential',
+                                      { pluginId: plugin.id, kind }
+                                    );
+                                    await refresh();
+                                  } catch (err) {
+                                    fail(err);
+                                  }
+                                }}
+                              />
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
 
-                  {plugin.has_panel && plugin.enabled && (
-                    <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-textMuted pb-2">
-                        Plugin settings
-                      </div>
-                      <PluginPanelRenderer pluginId={plugin.id} />
+                    <Hairline />
+                    <div className="flex items-center justify-between gap-3 px-3 py-1.5">
+                      <span className="flex items-center gap-2 text-[12px] text-textSecondary">
+                        <ScrollText size={12} className="flex-shrink-0" />
+                        <span className="truncate">
+                          From {plugin.source === 'local-dev' ? 'a local folder' : plugin.source}
+                        </span>
+                      </span>
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </SettingsSection>
+                  </div>
+                </Reveal>
 
+                <Reveal open={isPanelOpen}>
+                  <div className="mt-3">
+                    <PluginPanelRenderer pluginId={plugin.id} />
+                  </div>
+                </Reveal>
+              </div>
+            );
+          })}
+        </SettingsSection>
+      )}
+
+      {/* Sources */}
       <SettingsSection
         label="Sources"
-        description="Where plugins come from. StreamNook does not review, host, or endorse plugins from community sources; each source signs its listings and the key is pinned the first time you add it."
+        description="Where plugins come from. Each source signs its listings; the key is pinned the first time you add it, and StreamNook does not review or host what community sources list."
         bare
       >
-        {sources.length === 0 && (
-          <div className="settings-card px-4 py-4 text-[13px] text-textSecondary">
-            No sources yet. The official StreamNook index is not live in this build;
-            community sources can be added below.
-          </div>
-        )}
         {sources.map((source) => (
-          <div key={source.url} className="settings-card px-4 py-3">
-            <div className="flex items-center gap-3">
-              <Globe size={14} className="text-textSecondary flex-shrink-0" />
+          <div key={source.url} className="glass-panel rounded-lg p-4">
+            <div className="flex items-center gap-3.5">
+              <div
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg"
+                style={{ background: 'rgba(150, 170, 200, 0.14)', boxShadow: TILE_BEVEL }}
+              >
+                <Globe size={18} strokeWidth={2} className="text-textPrimary" />
+              </div>
               <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-textPrimary truncate">
-                  {source.name}
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-[14px] font-semibold text-textPrimary">
+                    {source.name}
+                  </span>
                   {source.official && (
-                    <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-400/20">
+                    <span className="rounded border border-emerald-400/20 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
                       Official
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-textSecondary truncate font-mono">
+                <p className="mt-0.5 truncate font-mono text-[11px] text-textMuted">
                   {source.url} · key {source.fingerprint}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => doBrowse(source)}
-                className="px-2.5 py-1 rounded text-[12px] bg-white/5 hover:bg-white/10 border border-white/10 text-textSecondary hover:text-textPrimary transition-colors"
-              >
-                {browse?.url === source.url ? 'Hide' : 'Browse'}
-              </button>
-              {!source.official && (
-                <Tooltip content="Remove source">
-                  <button
-                    type="button"
+              <div className="flex flex-shrink-0 items-center gap-1.5">
+                <Chip
+                  label={browse?.url === source.url ? 'Hide' : 'Browse'}
+                  onClick={() => doBrowse(source)}
+                />
+                {!source.official && (
+                  <IconAction
+                    hint="Remove source"
+                    danger
                     onClick={async () => {
                       try {
                         await invoke('plugins_remove_source', { url: source.url });
@@ -431,136 +584,143 @@ const PluginsSettings = () => {
                         fail(err);
                       }
                     }}
-                    className="p-1.5 rounded-md text-textSecondary hover:text-red-300 hover:bg-red-500/10 transition-colors"
                   >
                     <Trash2 size={14} />
-                  </button>
-                </Tooltip>
-              )}
+                  </IconAction>
+                )}
+              </div>
             </div>
 
-            {browse?.url === source.url && (
-              <div className="mt-3 space-y-2">
-                {browse.entries.length === 0 && (
-                  <p className="text-[12px] text-textSecondary">This source lists no plugins.</p>
+            <Reveal open={browse?.url === source.url}>
+              <div className="mt-3 space-y-1.5">
+                {browse?.entries.length === 0 && (
+                  <p className="px-1 py-1 text-[12px] text-textSecondary">
+                    This source lists no plugins.
+                  </p>
                 )}
-                {browse.entries.map((entry) => {
+                {browse?.entries.map((entry) => {
                   const installed = plugins.some(
                     (p) => p.id === entry.id && p.version === entry.version
                   );
                   return (
                     <div
                       key={entry.id}
-                      className="flex items-center gap-3 rounded-lg bg-white/[0.03] px-3 py-2"
+                      className="flex items-center gap-3 rounded-lg bg-white/[0.03] px-3 py-2.5"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-[13px] text-textPrimary truncate">
+                          <span className="truncate text-[13px] font-medium text-textPrimary">
                             {entry.name}
                           </span>
                           <TierBadge tier={entry.tier} />
                         </div>
-                        <p className="text-[11px] text-textSecondary truncate">
+                        <p className="mt-0.5 truncate text-[11px] text-textSecondary">
                           v{entry.version} by {entry.author.name} · {entry.description}
                         </p>
                       </div>
-                      <button
-                        type="button"
+                      <Chip
+                        label={installed ? 'Installed' : 'Install'}
+                        emphasis={!installed}
                         disabled={busy || installed}
                         onClick={() => installFromSource(source, entry)}
-                        className={`px-2.5 py-1 rounded text-[12px] border transition-colors ${
-                          installed
-                            ? 'bg-white/5 border-white/10 text-textMuted cursor-default'
-                            : 'bg-accent/15 hover:bg-accent/25 border-accent/25 text-textPrimary'
-                        }`}
-                      >
-                        {installed ? 'Installed' : 'Install'}
-                      </button>
+                      />
                     </div>
                   );
                 })}
               </div>
-            )}
+            </Reveal>
           </div>
         ))}
 
-        <div className="settings-card px-4 py-3">
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={newSourceUrl}
-              onChange={(e) => setNewSourceUrl(e.target.value)}
-              placeholder="https://example.org/index.json"
-              className="glass-input flex-1 px-3 py-1.5 text-[13px] text-textPrimary"
-            />
-            <button
-              type="button"
-              disabled={busy || !newSourceUrl.trim().startsWith('https://')}
-              onClick={() => setConfirmSourceUrl(newSourceUrl.trim())}
-              className="px-3 py-1.5 rounded-lg text-[13px] bg-white/5 hover:bg-white/10 border border-white/10 text-textSecondary hover:text-textPrimary transition-colors disabled:opacity-50"
-            >
-              Add source
-            </button>
+        {!showAddSource && sources.length === 0 && (
+          <div className="glass-panel rounded-lg px-4 py-5 text-center">
+            <p className="text-[12px] leading-relaxed text-textSecondary">
+              No sources yet. The official StreamNook index is not live in this
+              build; a community source can be added by URL.
+            </p>
           </div>
-          {confirmSourceUrl && (
-            <div className="mt-3 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2.5">
-              <p className="text-[12px] leading-relaxed text-amber-200">
-                Add a community plugin source? StreamNook does not review, host, or
-                endorse plugins from this source. It may list software that violates
-                Twitch's Terms of Service. The source's signing key is verified and
-                pinned when it is added; future updates must be signed with the same
-                key.
-              </p>
-              <p className="mt-1.5 text-[11px] font-mono text-amber-200/80 truncate">
-                {confirmSourceUrl}
-              </p>
-              <div className="mt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmSourceUrl(null)}
-                  className="px-2.5 py-1 rounded text-[12px] text-textSecondary hover:text-textPrimary"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={addSource}
-                  className="px-2.5 py-1 rounded text-[12px] font-medium bg-amber-500/20 text-amber-200 hover:bg-amber-500/30"
-                >
-                  Add source
-                </button>
-              </div>
+        )}
+
+        {showAddSource || sources.length > 0 ? (
+          <div className="glass-panel rounded-lg p-4">
+            <div className="flex items-center gap-2">
+              <Plus size={14} className="flex-shrink-0 text-textMuted" />
+              <input
+                type="text"
+                value={newSourceUrl}
+                onChange={(e) => setNewSourceUrl(e.target.value)}
+                placeholder="https://example.org/index.json"
+                className="glass-input flex-1 rounded-md px-3 py-1.5 text-[13px] text-textPrimary"
+              />
+              <Chip
+                label="Add source"
+                disabled={busy || !newSourceUrl.trim().startsWith('https://')}
+                onClick={() => setConfirmSourceUrl(newSourceUrl.trim())}
+              />
             </div>
-          )}
-        </div>
+            <Reveal open={confirmSourceUrl !== null}>
+              <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-500/10 px-3.5 py-3">
+                <p className="text-[12px] leading-relaxed text-amber-200">
+                  Add a community plugin source? StreamNook does not review, host,
+                  or endorse plugins from this source. It may list software that
+                  violates Twitch's Terms of Service. The source's signing key is
+                  verified and pinned when it is added; future updates must be
+                  signed with the same key.
+                </p>
+                <p className="mt-1.5 truncate font-mono text-[11px] text-amber-200/70">
+                  {confirmSourceUrl}
+                </p>
+                <div className="mt-2.5 flex justify-end gap-2">
+                  <Chip label="Cancel" onClick={() => setConfirmSourceUrl(null)} />
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={addSource}
+                    className="rounded-lg border border-amber-400/25 bg-amber-500/20 px-3 py-1.5 text-[12px] font-medium text-amber-200 transition-colors hover:bg-amber-500/30"
+                  >
+                    Add source
+                  </button>
+                </div>
+              </div>
+            </Reveal>
+          </div>
+        ) : (
+          <div className="flex justify-center pt-1">
+            <Chip label="Add a community source" onClick={() => setShowAddSource(true)} />
+          </div>
+        )}
       </SettingsSection>
 
+      {/* Develop */}
       <SettingsSection
         label="Develop"
-        description="Register a plugin straight from a folder containing plugin.toml. No signature chain applies; the plugin is labeled local dev and gets the same capability and consent gates."
+        description="Register a plugin straight from a folder containing plugin.toml. No signature chain applies; it is labeled Dev and gets the same capability and consent gates."
         bare
       >
-        <div className="settings-card px-4 py-3">
-          <div className="flex items-center gap-2">
-            <FolderOpen size={14} className="text-textSecondary flex-shrink-0" />
-            <input
-              type="text"
-              value={localDir}
-              onChange={(e) => setLocalDir(e.target.value)}
-              placeholder="C:\path\to\my-plugin"
-              className="glass-input flex-1 px-3 py-1.5 text-[13px] text-textPrimary font-mono"
-            />
-            <button
-              type="button"
-              disabled={busy || !localDir.trim()}
-              onClick={installLocal}
-              className="px-3 py-1.5 rounded-lg text-[13px] bg-white/5 hover:bg-white/10 border border-white/10 text-textSecondary hover:text-textPrimary transition-colors disabled:opacity-50"
-            >
-              Register
-            </button>
+        {showDevelop || localDir ? (
+          <div className="glass-panel rounded-lg p-4">
+            <div className="flex items-center gap-2">
+              <FolderOpen size={14} className="flex-shrink-0 text-textMuted" />
+              <input
+                type="text"
+                value={localDir}
+                onChange={(e) => setLocalDir(e.target.value)}
+                placeholder="C:\path\to\my-plugin"
+                className="glass-input flex-1 rounded-md px-3 py-1.5 font-mono text-[13px] text-textPrimary"
+              />
+              <Chip
+                label="Register"
+                emphasis
+                disabled={busy || !localDir.trim()}
+                onClick={installLocal}
+              />
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex justify-center pt-1">
+            <Chip label="Register a plugin folder" onClick={() => setShowDevelop(true)} />
+          </div>
+        )}
       </SettingsSection>
 
       <PluginConsentModal
