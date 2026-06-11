@@ -6,9 +6,11 @@
 //! Twitch credential the host hands over only after the user consents. The
 //! core StreamNook binary contains none of this behavior.
 
+mod mining;
 mod protocol;
 mod twitch;
 
+use mining::{MiningSettings, PriorityMode, RecoveryMode};
 use protocol::{read_loop, Host, Inbound};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -18,6 +20,15 @@ use twitch::{Channel, Cred};
 const MAX_CONCURRENT_DEFAULT: usize = 2;
 const ROTATION_TICKS: u64 = 15; // re-pick the watch set every 15 minutes
 const CLAIM_EVERY_TICKS: u64 = 5; // sweep bonus chests every 5 minutes
+
+/// Parses a panel string_list value into trimmed, lowercased, non-empty entries.
+fn string_list(arr: &[Value]) -> Vec<String> {
+    arr.iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
 
 struct Settings {
     active: bool,
@@ -48,6 +59,7 @@ struct Farmer {
     cred: Option<Cred>,
     user_id: Option<String>,
     credential_denied: bool,
+    miner: mining::Miner,
 }
 
 impl Farmer {
@@ -65,6 +77,7 @@ impl Farmer {
             cred: None,
             user_id: None,
             credential_denied: false,
+            miner: mining::Miner::new(),
         }
     }
 
@@ -72,15 +85,44 @@ impl Farmer {
     fn panel_schema() -> Value {
         json!({
             "title": "Drops and Points Farmer",
-            "sections": [{
-                "label": "Channel points",
-                "description": "Farms channel points on your followed live channels in the background. The channel you are actively watching already earns on its own.",
-                "fields": [
-                    { "key": "active", "type": "toggle", "label": "Farming active", "description": "Pause without uninstalling.", "default": true },
-                    { "key": "max_concurrent", "type": "number", "label": "Channels at once", "description": "Twitch credits points on up to two channels at a time.", "min": 1, "max": 2, "default": 2 },
-                    { "key": "priority_channels", "type": "string_list", "label": "Priority channels", "description": "Logins to farm first, one per line. Others fill the remaining slots." }
-                ]
-            }]
+            "sections": [
+                {
+                    "label": "Channel points",
+                    "description": "Farms channel points on your followed live channels in the background. The channel you are actively watching already earns on its own.",
+                    "fields": [
+                        { "key": "active", "type": "toggle", "label": "Farming active", "description": "Pause without uninstalling.", "default": true },
+                        { "key": "max_concurrent", "type": "number", "label": "Channels at once", "description": "Twitch credits points on up to two channels at a time.", "min": 1, "max": 2, "default": 2 },
+                        { "key": "priority_channels", "type": "string_list", "label": "Priority channels", "description": "Logins to farm first, one per line. Others fill the remaining slots." }
+                    ]
+                },
+                {
+                    "label": "Drops mining",
+                    "description": "Watches a stream that has an active drop campaign and claims each drop when it completes. A mined channel counts as one of the two watch slots.",
+                    "fields": [
+                        { "key": "mining_active", "type": "toggle", "label": "Mine drops", "default": false },
+                        { "key": "priority_games", "type": "string_list", "label": "Priority games", "description": "Game names to mine first, one per line." },
+                        { "key": "excluded_games", "type": "string_list", "label": "Excluded games", "description": "Game names to never mine, one per line." },
+                        { "key": "priority_mode", "type": "select", "label": "Selection", "default": "PriorityOnly", "options": [
+                            { "value": "PriorityOnly", "label": "Priority games only" },
+                            { "value": "EndingSoonest", "label": "Ending soonest first" },
+                            { "value": "LowAvailFirst", "label": "Low availability first" }
+                        ] }
+                    ]
+                },
+                {
+                    "label": "Recovery",
+                    "description": "How mining reacts when a stream stalls, goes offline, or changes game.",
+                    "fields": [
+                        { "key": "recovery_mode", "type": "select", "label": "Mode", "default": "Automatic", "options": [
+                            { "value": "Automatic", "label": "Automatic" },
+                            { "value": "Relaxed", "label": "Relaxed" },
+                            { "value": "ManualOnly", "label": "Manual only" }
+                        ] },
+                        { "key": "detect_game_change", "type": "toggle", "label": "Switch if the stream changes game", "default": true },
+                        { "key": "stale_minutes", "type": "number", "label": "Stall timeout (minutes)", "description": "Switch channels after this long with no drop progress.", "min": 2, "max": 30, "default": 7 }
+                    ]
+                }
+            ]
         })
     }
 
@@ -92,12 +134,31 @@ impl Farmer {
             self.settings.max_concurrent = (n as usize).clamp(1, 2);
         }
         if let Some(list) = values.get("priority_channels").and_then(|v| v.as_array()) {
-            self.settings.priority_logins = list
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect();
+            self.settings.priority_logins = string_list(list);
+        }
+
+        // Drops mining.
+        let m: &mut MiningSettings = &mut self.miner.settings;
+        if let Some(active) = values.get("mining_active").and_then(|v| v.as_bool()) {
+            m.enabled = active;
+        }
+        if let Some(list) = values.get("priority_games").and_then(|v| v.as_array()) {
+            m.priority_games = string_list(list);
+        }
+        if let Some(list) = values.get("excluded_games").and_then(|v| v.as_array()) {
+            m.excluded_games = string_list(list);
+        }
+        if let Some(mode) = values.get("priority_mode").and_then(|v| v.as_str()) {
+            m.priority_mode = PriorityMode::parse(mode);
+        }
+        if let Some(mode) = values.get("recovery_mode").and_then(|v| v.as_str()) {
+            m.recovery_mode = RecoveryMode::parse(mode);
+        }
+        if let Some(d) = values.get("detect_game_change").and_then(|v| v.as_bool()) {
+            m.detect_game_change = d;
+        }
+        if let Some(n) = values.get("stale_minutes").and_then(|v| v.as_u64()) {
+            m.stale_threshold_secs = n.clamp(2, 30) * 60;
         }
     }
 
@@ -179,26 +240,31 @@ impl Farmer {
         }
     }
 
-    /// Picks up to max_concurrent channels: priority logins first (when live),
-    /// then least-recently-watched of the rest.
-    fn pick_channels(&self) -> Vec<Channel> {
+    /// Picks up to `max` channels for points farming: priority logins first
+    /// (when live), then least-recently-watched of the rest, skipping the
+    /// channel already being mined for drops.
+    fn pick_channels(&self, max: usize, exclude: &Option<String>) -> Vec<Channel> {
+        let excluded = |id: &str| exclude.as_deref() == Some(id);
         let mut picked: Vec<Channel> = Vec::new();
         for login in &self.settings.priority_logins {
-            if picked.len() >= self.settings.max_concurrent {
+            if picked.len() >= max {
                 break;
             }
             if let Some(ch) = self.live.iter().find(|c| &c.login == login) {
-                picked.push(ch.clone());
+                if !excluded(&ch.channel_id) {
+                    picked.push(ch.clone());
+                }
             }
         }
         let mut rest: Vec<&Channel> = self
             .live
             .iter()
             .filter(|c| !picked.iter().any(|p| p.channel_id == c.channel_id))
+            .filter(|c| !excluded(&c.channel_id))
             .collect();
         rest.sort_by_key(|c| self.last_watched.get(&c.channel_id).copied().unwrap_or(0));
         for ch in rest {
-            if picked.len() >= self.settings.max_concurrent {
+            if picked.len() >= max {
                 break;
             }
             picked.push(ch.clone());
@@ -207,7 +273,8 @@ impl Farmer {
     }
 
     async fn on_tick(&mut self) {
-        if !self.settings.active || self.live.is_empty() {
+        let cp_active = self.settings.active && !self.live.is_empty();
+        if !cp_active && !self.miner.settings.enabled {
             return;
         }
         let Some(cred) = self.ensure_credential().await else {
@@ -225,8 +292,38 @@ impl Farmer {
         let user_id = self.user_id.clone().unwrap();
         self.tick_count += 1;
 
-        if self.current_set.is_empty() || self.tick_count % ROTATION_TICKS == 1 {
-            self.current_set = self.pick_channels();
+        // Drops mining runs first; the mined channel takes one of the two
+        // concurrent watch slots, so points farming gets the rest.
+        let mined = self
+            .miner
+            .tick(
+                &self.client,
+                &cred,
+                &user_id,
+                &self.device_id,
+                &self.session_id,
+                self.tick_count,
+                &self.host,
+            )
+            .await;
+
+        if !cp_active {
+            return;
+        }
+
+        let reserved = if mined.is_some() { 1 } else { 0 };
+        let available = self.settings.max_concurrent.saturating_sub(reserved);
+        let invalid = self.current_set.len() > available
+            || mined
+                .as_ref()
+                .is_some_and(|m| self.current_set.iter().any(|c| &c.channel_id == m));
+        if available == 0 {
+            self.current_set.clear();
+        } else if self.current_set.is_empty()
+            || self.tick_count % ROTATION_TICKS == 1
+            || invalid
+        {
+            self.current_set = self.pick_channels(available, &mined);
         }
 
         let set = self.current_set.clone();
