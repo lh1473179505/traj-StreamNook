@@ -286,6 +286,12 @@ pub async fn prepare_install(
         std::fs::remove_dir_all(&staging).ok();
         bail!("the artifact does not contain its declared entry '{}'", manifest.runtime.entry);
     }
+    if let Some(ui_entry) = &manifest.runtime.ui_entry {
+        if !staging.join(ui_entry).exists() {
+            std::fs::remove_dir_all(&staging).ok();
+            bail!("the artifact does not contain its declared ui_entry '{ui_entry}'");
+        }
+    }
 
     let record = record_from_manifest(&manifest, &source.url, &live_pkg_dir(plugin_id)?);
     Ok(PreparedInstall {
@@ -308,6 +314,11 @@ pub fn prepare_local_install(dir: &str) -> Result<InstalledPlugin> {
     if !dir_path.join(&manifest.runtime.entry).exists() {
         bail!("the folder does not contain the declared entry '{}'", manifest.runtime.entry);
     }
+    if let Some(ui_entry) = &manifest.runtime.ui_entry {
+        if !dir_path.join(ui_entry).exists() {
+            bail!("the folder does not contain the declared ui_entry '{ui_entry}'");
+        }
+    }
     Ok(record_from_manifest(&manifest, "local-dev", &dir_path))
 }
 
@@ -316,11 +327,14 @@ fn record_from_manifest(
     source: &str,
     dir: &PathBuf,
 ) -> InstalledPlugin {
+    // Enabling the plugin is the grant: the install (or first-enable) consent
+    // already discloses the credential, so allow handover without re-prompting
+    // every session. The user can still revoke it per plugin from its details.
     let credential_consent = manifest
         .capabilities
         .credentials
         .iter()
-        .map(|k| (k.clone(), "ask".to_string()))
+        .map(|k| (k.clone(), "always".to_string()))
         .collect();
     InstalledPlugin {
         id: manifest.id.clone(),
@@ -332,8 +346,10 @@ fn record_from_manifest(
         homepage: manifest.homepage.clone(),
         enabled: false,
         source: source.to_string(),
+        kind: manifest.runtime.kind.clone(),
         dir: dir.to_string_lossy().to_string(),
         entry: manifest.runtime.entry.clone(),
+        ui_entry: manifest.runtime.ui_entry.clone(),
         args: manifest.runtime.args.clone(),
         granted: GrantedCaps {
             events: manifest.capabilities.events.clone(),

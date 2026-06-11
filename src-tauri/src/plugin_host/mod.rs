@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use process::SupCmd;
@@ -146,6 +146,11 @@ pub struct PluginInfo {
     pub homepage: Option<String>,
     pub enabled: bool,
     pub running: bool,
+    /// Runtime kind: "process" or "ui".
+    pub kind: String,
+    /// True when the plugin contributes an in-app UI module the frontend
+    /// loads: a ui plugin, or a process plugin with a ui_entry (hybrid).
+    pub has_ui: bool,
     pub source: String,
     pub granted: registry::GrantedCaps,
     pub credential_consent: HashMap<String, String>,
@@ -186,6 +191,23 @@ fn ensure_official_source(registry: &mut Registry) -> bool {
     }
 }
 
+/// Upgrades any legacy "ask" credential consent (prompt every session) to
+/// "always". Enabling a plugin, with the consent shown at install or first
+/// enable, is the grant; re-prompting each launch was too much. Returns true
+/// when something changed.
+fn migrate_credential_consent(registry: &mut Registry) -> bool {
+    let mut changed = false;
+    for plugin in &mut registry.plugins {
+        for state in plugin.credential_consent.values_mut() {
+            if state == "ask" {
+                *state = "always".to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub struct PluginHost {
     inner: Arc<HostInner>,
 }
@@ -211,22 +233,35 @@ impl PluginHost {
         match registry::load() {
             Ok(mut loaded) => {
                 // Seed the built-in StreamNook source so its curated catalog is
-                // available immediately, with no manual add.
-                if ensure_official_source(&mut loaded) {
+                // available immediately, with no manual add; and upgrade any
+                // legacy per-session credential consent to the granted-at-enable
+                // model so plugins are not re-prompted every launch.
+                let mut dirty = ensure_official_source(&mut loaded);
+                dirty |= migrate_credential_consent(&mut loaded);
+                if dirty {
                     if let Err(e) = registry::save(&loaded) {
-                        log::error!("[PluginHost] failed to persist built-in source: {e}");
+                        log::error!("[PluginHost] failed to persist registry on startup: {e}");
                     }
                 }
+                // Only process plugins get a supervisor; ui plugins are
+                // loaded by the frontend, which reads the registry itself.
                 let enabled: Vec<String> = loaded
                     .plugins
                     .iter()
-                    .filter(|p| p.enabled)
+                    .filter(|p| p.enabled && p.kind == "process")
                     .map(|p| p.id.clone())
                     .collect();
                 *self.inner.registry.lock().await = loaded;
                 for id in enabled {
                     self.spawn_supervisor(id);
                 }
+                // Startup runs concurrently with the webview boot; this ping
+                // makes a window that listed plugins before the registry was
+                // ready re-sync (the ui-plugin loader listens for it).
+                let _ = self.inner.app.emit(
+                    "plugin://state-changed",
+                    json!({ "plugin_id": Value::Null, "running": false }),
+                );
             }
             Err(e) => {
                 log::error!("[PluginHost] registry load failed: {e}");
@@ -258,7 +293,15 @@ impl PluginHost {
                 description: p.description.clone(),
                 homepage: p.homepage.clone(),
                 enabled: p.enabled,
-                running: running.contains_key(&p.id),
+                // A ui plugin has no process; enabled means the frontend
+                // loads it, which is its running state.
+                running: if p.kind == "ui" {
+                    p.enabled
+                } else {
+                    running.contains_key(&p.id)
+                },
+                kind: p.kind.clone(),
+                has_ui: p.kind == "ui" || p.ui_entry.is_some(),
                 source: p.source.clone(),
                 granted: p.granted.clone(),
                 credential_consent: p.credential_consent.clone(),
@@ -496,7 +539,7 @@ impl PluginHost {
     }
 
     pub async fn set_enabled(&self, plugin_id: &str, enabled: bool) -> Result<()> {
-        {
+        let (kind, has_ui) = {
             let mut registry = self.inner.registry.lock().await;
             let plugin = registry
                 .plugins
@@ -504,16 +547,61 @@ impl PluginHost {
                 .find(|p| p.id == plugin_id)
                 .ok_or_else(|| anyhow!("plugin '{plugin_id}' is not installed"))?;
             plugin.enabled = enabled;
+            let info = (plugin.kind.clone(), plugin.kind == "ui" || plugin.ui_entry.is_some());
             registry::save(&registry)?;
-        }
-        if enabled {
-            if !self.inner.running.read().await.contains_key(plugin_id) {
-                self.spawn_supervisor(plugin_id.to_string());
+            info
+        };
+        // The process part: spawn or shut down the sidecar. A pure ui plugin
+        // has none. A hybrid (process + ui_entry) plugin runs both.
+        if kind == "process" {
+            if enabled {
+                if !self.inner.running.read().await.contains_key(plugin_id) {
+                    self.spawn_supervisor(plugin_id.to_string());
+                }
+            } else if let Some(handle) = self.inner.running.read().await.get(plugin_id) {
+                let _ = handle.cmd_tx.send(SupCmd::Shutdown);
             }
-        } else if let Some(handle) = self.inner.running.read().await.get(plugin_id) {
-            let _ = handle.cmd_tx.send(SupCmd::Shutdown);
+        }
+        // The UI part: the frontend loader listens for this signal and loads
+        // or unloads the module in each window. Emitted for any plugin that
+        // contributes UI, so a pure-ui plugin loads even though no process
+        // event would otherwise fire.
+        if has_ui {
+            let _ = self.inner.app.emit(
+                "plugin://state-changed",
+                serde_json::json!({ "plugin_id": plugin_id, "running": enabled }),
+            );
         }
         Ok(())
+    }
+
+    /// Reads the in-app UI module of an enabled plugin for the frontend loader
+    /// (UI_PLUGINS.md): a ui plugin's `entry`, or a hybrid process plugin's
+    /// `ui_entry`. Fails closed when the plugin has no UI or is not enabled.
+    pub async fn ui_bundle(&self, plugin_id: &str) -> Result<String> {
+        let (dir, module) = {
+            let registry = self.inner.registry.lock().await;
+            let plugin = registry
+                .plugins
+                .iter()
+                .find(|p| p.id == plugin_id)
+                .ok_or_else(|| anyhow!("plugin '{plugin_id}' is not installed"))?;
+            if !plugin.enabled {
+                bail!("plugin '{plugin_id}' is not enabled");
+            }
+            let module = if plugin.kind == "ui" {
+                plugin.entry.clone()
+            } else {
+                plugin
+                    .ui_entry
+                    .clone()
+                    .ok_or_else(|| anyhow!("plugin '{plugin_id}' has no UI module"))?
+            };
+            (plugin.dir.clone(), module)
+        };
+        let path = std::path::Path::new(&dir).join(&module);
+        std::fs::read_to_string(&path)
+            .map_err(|e| anyhow!("failed to read the plugin module {}: {e}", path.display()))
     }
 
     pub async fn get_panel(&self, plugin_id: &str) -> Option<Value> {
@@ -569,7 +657,7 @@ impl PluginHost {
 
     pub async fn reset_credential_consent(&self, plugin_id: &str, kind: &str) -> Result<()> {
         self.inner
-            .set_credential_consent(plugin_id, kind, "ask")
+            .set_credential_consent(plugin_id, kind, "always")
             .await
     }
 
