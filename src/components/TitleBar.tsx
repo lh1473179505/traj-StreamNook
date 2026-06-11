@@ -104,6 +104,12 @@ const TitleBar = () => {
   const loadMiningStatus = useCallback(async () => {
     try {
       const status = await invoke<MiningStatus>('get_mining_status');
+      // This reads the built-in miner and is only a stale-protection backup;
+      // live updates arrive on the 'mining-status-update' event. When mining is
+      // driven by another source (a plugin, surfaced through that same event)
+      // the built-in miner reads idle, so don't let this backup wipe a live
+      // session's progress back to the no-progress (gift) state.
+      if (!status.is_mining && useAppStore.getState().isMiningActive) return;
       setMiningStatus(status);
     } catch {
       // Silently fail - not critical for title bar
@@ -380,7 +386,10 @@ const TitleBar = () => {
             {(() => {
               const isChannelPointsMining = dropsSettings?.auto_claim_channel_points ?? false;
               const isBothActive = isMiningActive && isChannelPointsMining;
-              const showProgressBadge = isMiningActive && progressPercent > 0;
+              // While drops mining is active the indicator is the drop's
+              // percentage (even at 0%), like it has always been, never a
+              // placeholder gift. The gift shimmer is only for points-only.
+              const showProgressBadge = isMiningActive;
 
               // Determine gift box color/shimmer class
               // Silver = channel points only, Gold = drops only, Iridescent = both
