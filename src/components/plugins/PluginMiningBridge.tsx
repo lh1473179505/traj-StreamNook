@@ -91,9 +91,11 @@ export default function PluginMiningBridge() {
                     };
 
                     // Drive the same native signals the built-in miner emits, so
-                    // the title bar, sidebar, and Drops center all update.
+                    // the title bar, sidebar, and Drops center all update. The
+                    // lit state tracks actually mining a channel (is_mining), not
+                    // merely having a target, so the indicator is honest.
                     emit('mining-status-update', status).catch(() => {});
-                    useAppStore.getState().setMiningActive(!!v.is_mining || !!v.active);
+                    useAppStore.getState().setMiningActive(!!v.is_mining);
                 }
             );
             if (disposed) {

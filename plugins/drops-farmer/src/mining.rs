@@ -15,14 +15,27 @@ use crate::twitch::{self, Cred};
 
 const CLAIM_QUERY_HASH: &str =
     "a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930";
+/// Persisted query hash for the Inventory operation, the source of live
+/// per-drop progress while mining.
+const INVENTORY_QUERY_HASH: &str =
+    "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b";
 
 /// One time-based drop within a campaign.
 #[derive(Clone, Debug)]
 pub struct Drop {
+    /// timeBasedDrop id, used to match live progress from the inventory.
+    pub id: String,
     pub required_minutes: i32,
     pub current_minutes: i32,
     pub is_claimed: bool,
     pub drop_instance_id: Option<String>,
+}
+
+/// Live progress for one drop, read from the Inventory query.
+struct InvProgress {
+    current_minutes: i32,
+    is_claimed: bool,
+    drop_instance_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +144,7 @@ pub async fn fetch_campaigns(
             .map(|arr| {
                 arr.iter()
                     .map(|d| Drop {
+                        id: d["id"].as_str().unwrap_or_default().to_string(),
                         required_minutes: d["requiredMinutesWatched"].as_i64().unwrap_or(0) as i32,
                         current_minutes: d["self"]["currentMinutesWatched"].as_i64().unwrap_or(0)
                             as i32,
@@ -150,6 +164,56 @@ pub async fn fetch_campaigns(
         });
     }
     Ok(campaigns)
+}
+
+/// Live per-drop progress for the campaigns currently being mined, keyed
+/// campaign_id -> (drop_id -> progress). Twitch reports active mining progress
+/// here, in the inventory, NOT in the campaign list (whose
+/// self.currentMinutesWatched stays at 0 while mining), so this is what the
+/// miner must read to see a drop advance.
+async fn fetch_inventory(
+    client: &Client,
+    cred: &Cred,
+    device_id: &str,
+    session_id: &str,
+) -> Result<HashMap<String, HashMap<String, InvProgress>>> {
+    let body: Value = gql(client, cred, device_id, session_id)
+        .json(&json!({
+            "operationName": "Inventory",
+            "variables": { "fetchRewardCampaigns": false },
+            "extensions": { "persistedQuery": { "version": 1, "sha256Hash": INVENTORY_QUERY_HASH } }
+        }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let mut out: HashMap<String, HashMap<String, InvProgress>> = HashMap::new();
+    let Some(list) =
+        body["data"]["currentUser"]["inventory"]["dropCampaignsInProgress"].as_array()
+    else {
+        return Ok(out);
+    };
+    for c in list {
+        let Some(cid) = c["id"].as_str() else { continue };
+        let mut drops = HashMap::new();
+        if let Some(arr) = c["timeBasedDrops"].as_array() {
+            for d in arr {
+                let Some(did) = d["id"].as_str() else { continue };
+                let s = &d["self"];
+                drops.insert(
+                    did.to_string(),
+                    InvProgress {
+                        current_minutes: s["currentMinutesWatched"].as_i64().unwrap_or(0) as i32,
+                        is_claimed: s["isClaimed"].as_bool().unwrap_or(false),
+                        drop_instance_id: s["dropInstanceID"].as_str().map(String::from),
+                    },
+                );
+            }
+        }
+        out.insert(cid.to_string(), drops);
+    }
+    Ok(out)
 }
 
 /// Live channels streaming a game with drops enabled, most-viewers first.
@@ -487,7 +551,8 @@ impl Miner {
         }
         self.blacklist.retain(|_, exp| *exp > tick_count);
 
-        // Refresh campaigns periodically (and on first run) to learn progress.
+        // Refresh the campaign LIST periodically (and on first run); it changes
+        // slowly. Live progress is overlaid every tick below.
         if self.campaigns.is_empty() || tick_count.saturating_sub(self.campaigns_tick) >= 3 {
             match fetch_campaigns(client, cred, device_id, session_id).await {
                 Ok(c) => {
@@ -496,18 +561,40 @@ impl Miner {
                 }
                 Err(e) => host.log("debug", format!("campaign fetch failed: {e}")).await,
             }
-            // Claim anything finished.
-            let claimable: Vec<String> = self
-                .campaigns
-                .iter()
-                .filter_map(|c| c.claimable_drop().and_then(|d| d.drop_instance_id.clone()))
-                .collect();
-            for instance in claimable {
-                if let Ok(true) =
-                    claim_drop(client, cred, device_id, session_id, &instance).await
-                {
-                    host.notify_user("info", "Claimed a completed drop").await;
+        }
+        // Overlay live progress from the inventory every tick. The campaign list
+        // reports 0 watched minutes while mining; the inventory is where the
+        // minutes actually climb, so without this the active drop never advances
+        // (the badge sits at 0%) and the miner sees a false stall and thrashes
+        // between channels.
+        match fetch_inventory(client, cred, device_id, session_id).await {
+            Ok(progress) => {
+                for campaign in &mut self.campaigns {
+                    if let Some(drops) = progress.get(&campaign.id) {
+                        for drop in &mut campaign.drops {
+                            if let Some(p) = drops.get(&drop.id) {
+                                drop.current_minutes = p.current_minutes;
+                                drop.is_claimed = p.is_claimed;
+                                if p.drop_instance_id.is_some() {
+                                    drop.drop_instance_id = p.drop_instance_id.clone();
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            Err(e) => host.log("debug", format!("inventory fetch failed: {e}")).await,
+        }
+        // Claim anything finished (the overlay above ran first, so a drop just
+        // claimed shows as claimed and won't be claimed twice).
+        let claimable: Vec<String> = self
+            .campaigns
+            .iter()
+            .filter_map(|c| c.claimable_drop().and_then(|d| d.drop_instance_id.clone()))
+            .collect();
+        for instance in claimable {
+            if let Ok(true) = claim_drop(client, cred, device_id, session_id, &instance).await {
+                host.notify_user("info", "Claimed a completed drop").await;
             }
         }
 
