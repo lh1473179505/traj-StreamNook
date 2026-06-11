@@ -1,0 +1,91 @@
+# Plugin Manifest v1
+
+Every plugin ships a `plugin.toml` at the root of its artifact. The manifest is the complete, machine-readable statement of what the plugin is and what it may ask the host for. Anything not declared here is denied at runtime.
+
+## Example
+
+```toml
+id          = "community.drops-farmer"
+name        = "Drops and Points Farmer"
+version     = "1.2.0"
+author      = "communityhandle"
+tier        = "C"
+description = "Background drops and channel-points farming."
+homepage    = "https://example.org/drops-farmer"
+host_min    = "8.0.0"
+
+[runtime]
+kind      = "process"
+entry     = "drops-farmer.exe"
+args      = []
+transport = "stdio"
+
+[capabilities]
+events       = ["on_watch_tick", "on_followed_live", "on_channel_change"]
+host_methods = ["get_followed_live", "notify", "log", "register_panel", "get_panel_values"]
+credentials  = ["twitch.android"]
+network      = "external"
+ui           = ["panel"]
+```
+
+## Top-level fields
+
+| Field | Type | Constraints |
+|---|---|---|
+| `id` | string | Reverse-DNS, globally unique, must match `^[a-z0-9]+(\.[a-z0-9-]+)+$`, max 64 chars. Never changes across versions |
+| `name` | string | Display name, max 40 chars |
+| `version` | string | Semver (`MAJOR.MINOR.PATCH`) |
+| `author` | string | Author handle as listed in the index |
+| `tier` | string | `"A"`, `"B"`, or `"C"`. See tier definitions below. Declared by the author, verified by the index curator; a plugin may not self-certify into a lower tier |
+| `description` | string | Plain-language summary, max 200 chars, shown in the install dialog |
+| `homepage` | string | Optional, `https` URL |
+| `host_min` | string | Minimum StreamNook version (semver). Install is blocked on older hosts |
+
+## `[runtime]`
+
+| Field | Type | Constraints |
+|---|---|---|
+| `kind` | string | `"process"` in v1. `"wasm"` is reserved and rejected by the v1 host |
+| `entry` | string | Path of the executable, relative to the plugin directory. Must not contain `..` or be absolute |
+| `args` | string array | Arguments passed at spawn. Optional, default empty |
+| `transport` | string | `"stdio"` in v1. `"socket"` is reserved and rejected by the v1 host |
+
+## `[capabilities]`
+
+The whole permission contract. The consent dialog renders exactly this block in plain language (see CAPABILITIES.md for the vocabulary and the rendered strings).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `events` | string array | Events the plugin may subscribe to. Subset of the event list in PROTOCOL.md |
+| `host_methods` | string array | Host methods the plugin may call. Note `get_credential` is governed by `credentials`, not by this list |
+| `credentials` | string array | Credential kinds the broker may hand over, each requiring separate first-use consent. v1 vocabulary: `"twitch.android"` |
+| `network` | string | `"none"` or `"external"`. Informational and surfaced in consent: the host cannot prevent a separate process from using the network, so this field exists to make the plugin's behavior explicit to the user. A plugin observed doing networking it declared it does not do is grounds for index removal |
+| `ui` | string array | UI contributions. v1 vocabulary: `"panel"` |
+
+Unknown capability strings cause install rejection in v1 hosts (fail closed), with one exception: index metadata may carry forward-looking strings for newer hosts, and the install dialog of an older host shows them as "requires a newer StreamNook".
+
+## Signing fields
+
+The manifest itself carries no signature block. Signatures are detached and live alongside the artifact; the author's public key is pinned through the index and the first-install flow. This avoids a self-referential artifact (the manifest travels inside the signed artifact) and keeps one verification path. See SIGNING.md.
+
+## Risk tiers
+
+| Tier | Definition | Examples | Distribution |
+|---|---|---|---|
+| A | No realistic concern: official APIs, local-only features, read-only integrations, ordinary user actions | Theme packs, layout tools, local stats | Official index |
+| B | Unofficial transport or private APIs used the way a normal viewer would; user-initiated actions with no official equivalent | Alternate emote providers, community badge sources | Official index |
+| C | Real enforcement exposure: watching-without-watching, automated claiming, ad stripping or circumvention, automation against Twitch | Drops or points farming, ad bypass | Community indexes only, explicit risk consent |
+
+The tier drives the consent flow (CAPABILITIES.md) and where the plugin may be listed (SIGNING.md). The official index never lists Tier C.
+
+## Validation order at install
+
+1. Artifact hash matches the index entry.
+2. Detached signature verifies against the author key (pinned via the index and trust-on-first-use).
+3. Manifest parses, all constraints above hold.
+4. Manifest `id`, `version`, and `tier` exactly match the index entry. Any mismatch blocks install.
+5. `host_min` is satisfied and `runtime.kind` plus `runtime.transport` are supported.
+6. The consent dialog is shown; the user grants capabilities (possibly a subset).
+7. The plugin is unpacked into its own directory and registered.
+
+A failure at any step blocks install with a specific reason. There is no partial install.
