@@ -560,6 +560,9 @@ pub struct AppState {
     /// Out-of-process plugin host (spawn, supervise, capability and
     /// credential brokering). See docs/plugins/.
     pub plugin_host: Arc<crate::plugin_host::PluginHost>,
+    /// Core parity watch heartbeat: one minute-watched per minute for the
+    /// on-screen channel while it plays. See watch_heartbeat_service.rs.
+    pub watch_heartbeat: Arc<crate::services::watch_heartbeat_service::WatchHeartbeatService>,
 }
 
 #[cfg(test)]

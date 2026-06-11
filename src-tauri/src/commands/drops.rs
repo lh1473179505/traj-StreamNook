@@ -161,6 +161,31 @@ pub async fn get_all_channel_points_balances(
     Ok(background_service.get_channel_points_balances().await)
 }
 
+/// Shared active-channel chokepoint: points the parity heartbeat at the
+/// channel now on screen and forwards the matching stream event to plugins.
+/// Every caller of start/update monitoring funnels through here, including
+/// the chat hot-swap that tracks the focused tile in the multi-stream grid.
+async fn report_active_channel(state: &State<'_, AppState>, channel_id: &str, login: &str) {
+    let previous = state
+        .watch_heartbeat
+        .set_target(channel_id.to_string(), login.to_string())
+        .await;
+    let kind = match previous.as_deref() {
+        None => "start",
+        Some(prev) if prev != channel_id => "change",
+        _ => return, // same channel re-registered; nothing changed
+    };
+    let _ = state
+        .plugin_host
+        .report_stream_event(
+            kind,
+            Some(channel_id.to_string()),
+            Some(login.to_string()),
+            None,
+        )
+        .await;
+}
+
 #[tauri::command]
 pub async fn start_drops_monitoring(
     channel_id: String,
@@ -168,17 +193,28 @@ pub async fn start_drops_monitoring(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    let drops_service = state.drops_service.lock().await;
-    drops_service
-        .start_monitoring(channel_id, channel_name, app_handle)
-        .await;
+    {
+        let drops_service = state.drops_service.lock().await;
+        drops_service
+            .start_monitoring(channel_id.clone(), channel_name.clone(), app_handle)
+            .await;
+    }
+    report_active_channel(&state, &channel_id, &channel_name).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_drops_monitoring(state: State<'_, AppState>) -> Result<(), String> {
-    let drops_service = state.drops_service.lock().await;
-    drops_service.stop_monitoring().await;
+    {
+        let drops_service = state.drops_service.lock().await;
+        drops_service.stop_monitoring().await;
+    }
+    if let Some(prev) = state.watch_heartbeat.clear_target().await {
+        let _ = state
+            .plugin_host
+            .report_stream_event("stop", Some(prev), None, None)
+            .await;
+    }
     Ok(())
 }
 
@@ -188,10 +224,24 @@ pub async fn update_monitoring_channel(
     channel_name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let drops_service = state.drops_service.lock().await;
-    drops_service
-        .update_current_channel(channel_id, channel_name)
-        .await;
+    {
+        let drops_service = state.drops_service.lock().await;
+        drops_service
+            .update_current_channel(channel_id.clone(), channel_name.clone())
+            .await;
+    }
+    report_active_channel(&state, &channel_id, &channel_name).await;
+    Ok(())
+}
+
+/// Player playback state for the parity heartbeat: minute-watched events
+/// only send while the video is actually playing.
+#[tauri::command]
+pub async fn report_player_playing(
+    playing: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.watch_heartbeat.set_playing(playing);
     Ok(())
 }
 

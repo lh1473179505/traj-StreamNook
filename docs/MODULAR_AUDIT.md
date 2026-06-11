@@ -431,21 +431,21 @@ Phase 0, immediate posture fix (decision 12; ships in the next release, independ
 
 Phase 1, foundations (no behavior change):
 
-- [ ] Freeze and document the host and plugin JSON-RPC protocol, the event and host-method list, and the manifest schema.
-- [ ] Define the capability vocabulary and the consent copy for each tier.
-- [ ] Set up the signing scheme (minisign-style ed25519) and the index document format.
+- [x] Freeze and document the host and plugin JSON-RPC protocol, the event and host-method list, and the manifest schema. (docs/plugins/, commit bb6adc2)
+- [x] Define the capability vocabulary and the consent copy for each tier. (docs/plugins/CAPABILITIES.md)
+- [x] Set up the signing scheme (minisign-style ed25519) and the index document format. (docs/plugins/SIGNING.md; marketplace metadata added additively later)
 
 Phase 2, host runtime and UI (still no risky behavior moved):
 
-- [ ] Build the plugin host in core: process supervisor (spawn, health, restart, shutdown), the JSON-RPC transport with framing, the event dispatcher, the capability broker, and the credential broker with consent and logging.
-- [ ] Build the React Plugins page, the sources model, install with signature and hash verification, the consent and warning flow, and host-rendered plugin panels.
-- [ ] Ship with zero plugins and an official index that is empty or lists only Tier A and B samples.
+- [x] Build the plugin host in core: process supervisor (spawn, health, restart, shutdown), the JSON-RPC transport with framing, the event dispatcher, the capability broker, and the credential broker with consent and logging. (src-tauri/src/plugin_host/, commit adaff8e)
+- [x] Build the React Plugins page, the sources model, install with signature and hash verification, the consent and warning flow, and host-rendered plugin panels. (plus marketplace detail pages, commit b840a50)
+- [x] Ship with zero plugins and an official index that is empty or lists only Tier A and B samples. (index scaffolded at github.com/winters27/streamnook-plugins, empty; the in-app pin stays unset until the operator key exists)
 
 Phase 3, core parity heartbeat:
 
-- [ ] Extract a single active-channel minute-watched heartbeat tied to the player: one channel, only while it is actually rendering and playing, using the user's own credential, on the working `sendSpadeEvents` path (not the legacy endpoint).
-- [ ] In MultiNook, heartbeat only the focused or spotlit tile.
-- [ ] Confirm that with no plugins enabled, points accrue and drop progress advances on the watched channel only, and nothing is sent for any other channel.
+- [x] Extract a single active-channel minute-watched heartbeat tied to the player: one channel, only while it is actually rendering and playing, using the user's own credential, on the working `sendSpadeEvents` path (not the legacy endpoint). (services/watch_heartbeat_service.rs; playback gated by player playing and pause events; offline and VOD self-guard via the live broadcast-id check)
+- [x] In MultiNook, heartbeat only the focused or spotlit tile. (the heartbeat target rides the active-channel chokepoints, which already follow the focused chat; playback state is optimistic on target change since grid tiles always autoplay)
+- [ ] Confirm that with no plugins enabled, points accrue and drop progress advances on the watched channel only, and nothing is sent for any other channel. (runtime verification pending: needs a live watch session and balance observation by the owner)
 
 Phase 4, first extraction (drops and points farming, as a Rust sidecar):
 

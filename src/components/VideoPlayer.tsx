@@ -1720,6 +1720,13 @@ const VideoPlayer = () => {
           fatalErrorCountRef.current = 0;
           manifestErrorCountRef.current = 0;
           nonFatalErrorCountRef.current = 0;
+
+          // Parity heartbeat gate: minute-watched reporting runs only while
+          // the video is actually playing.
+          invoke('report_player_playing', { playing: true }).catch(() => {});
+        }}
+        onPause={() => {
+          invoke('report_player_playing', { playing: false }).catch(() => {});
         }}
       />
 

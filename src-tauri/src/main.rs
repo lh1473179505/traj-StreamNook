@@ -302,6 +302,13 @@ fn main() {
             // plugins; it only ever runs what the user installs and enables.
             let plugin_host = Arc::new(plugin_host::PluginHost::new(app_handle.clone()));
 
+            // Core parity heartbeat: reports the on-screen channel while it
+            // plays, nothing else. Ticks no-op until a stream is watched.
+            let watch_heartbeat = Arc::new(
+                services::watch_heartbeat_service::WatchHeartbeatService::new(),
+            );
+            watch_heartbeat.start();
+
             let app_state = AppState {
                 settings: settings_arc,
                 drops_service,
@@ -311,6 +318,7 @@ fn main() {
                 emote_service: emote_service.clone(),
                 twitch_auth,
                 plugin_host: plugin_host.clone(),
+                watch_heartbeat,
             };
 
             // Clone the app_state before managing it
@@ -717,6 +725,7 @@ fn main() {
             start_drops_monitoring,
             stop_drops_monitoring,
             update_monitoring_channel,
+            report_player_playing,
             // Mining commands
             start_auto_mining,
             start_campaign_mining,
