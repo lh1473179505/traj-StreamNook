@@ -40,7 +40,27 @@ export default function PluginMiningBridge() {
         const refreshProvider = async () => {
             try {
                 const id = await invoke<string | null>('plugins_provides', { feature: 'drops.mining' });
-                if (!disposed) providerRef.current = id ?? null;
+                if (disposed) return;
+                const next = id ?? null;
+                const had = providerRef.current;
+                providerRef.current = next;
+                // The mining provider went away (plugin disabled or removed). It
+                // can't push a final stopped status once its process is gone, so
+                // stand the native mining UI down here, otherwise a reopened
+                // overlay would seed from a stale "mining" status.
+                if (had && !next) {
+                    const store = useAppStore.getState();
+                    store.setLiveMiningStatus(null);
+                    store.setMiningActive(false);
+                    emit('mining-status-update', {
+                        is_mining: false,
+                        current_channel: null,
+                        current_campaign: null,
+                        current_drop: null,
+                        eligible_channels: [],
+                        last_update: new Date().toISOString(),
+                    } as MiningStatus).catch(() => {});
+                }
             } catch {
                 /* plugin host unavailable */
             }
@@ -96,6 +116,10 @@ export default function PluginMiningBridge() {
                     // merely having a target, so the indicator is honest.
                     emit('mining-status-update', status).catch(() => {});
                     useAppStore.getState().setMiningActive(!!v.is_mining);
+                    // Cache the live status so a reopened Drops overlay can seed
+                    // from it. Held while a target is set (mining or finding a
+                    // channel); cleared when mining stops.
+                    useAppStore.getState().setLiveMiningStatus(v.active ? status : null);
                 }
             );
             if (disposed) {

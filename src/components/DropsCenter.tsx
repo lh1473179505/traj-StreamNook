@@ -1026,8 +1026,15 @@ export default function DropsCenter() {
 
             const progressData = await invoke<DropProgress[]>('get_drop_progress').catch(() => [] as DropProgress[]);
 
-            // Update mining status state if we got a fresh one
-            if (currentMiningStatus) {
+            // Seed mining status. A plugin powering mining reports through the
+            // bridge into the store and keeps it there even while this overlay
+            // is closed, so prefer that live status over the built-in miner's
+            // (which reads idle in plugin mode). This is what makes a reopened
+            // overlay immediately show what is being mined.
+            const liveStatus = useAppStore.getState().liveMiningStatus;
+            if (liveStatus) {
+                setMiningStatus(liveStatus);
+            } else if (currentMiningStatus) {
                 setMiningStatus(currentMiningStatus);
             }
 
@@ -1341,8 +1348,10 @@ export default function DropsCenter() {
             const auth = await checkAuthentication();
             if (auth) {
                 try {
-                    const status = await invoke<MiningStatus>('get_mining_status');
-                    setMiningStatus(status);
+                    // Prefer the bridge-cached live status (a plugin mining)
+                    // over the built-in miner, so reopening mid-mining shows it.
+                    const liveStatus = useAppStore.getState().liveMiningStatus;
+                    setMiningStatus(liveStatus ?? await invoke<MiningStatus>('get_mining_status'));
                     const settings = await invoke<DropsSettings>('get_drops_settings');
                     setDropsSettings(settings);
                 } catch (e) {

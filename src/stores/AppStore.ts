@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import type { Settings, TwitchUser, TwitchStream, UserInfo, TwitchCategory, HypeTrainData, TwitchVideo, ModLogEvent } from '../types';
+import type { Settings, TwitchUser, TwitchStream, UserInfo, TwitchCategory, HypeTrainData, TwitchVideo, ModLogEvent, MiningStatus } from '../types';
 import { trackActivity } from '../services/logService';
 import { Logger, setDiagnosticsEnabled } from '../utils/logger';
 // Direct import (not via the keybindings index) to avoid a storecommands cycle.
 import { getPlayerControls } from '../keybindings/playerControls';
 import { qualitiesEquivalent } from '../utils/quality';
+import { reportCodecPreference } from '../utils/codecPreference';
 import { upsertUser, grantActiveSeasonalAccolades, grantCakeDayAccolade } from '../services/supabaseService';
 import { emitSettingsUpdated } from '../utils/settingsBroadcast';
 
@@ -266,6 +267,12 @@ interface AppState {
   currentUser: TwitchUser | null;
   isMiningActive: boolean;
   setMiningActive: (active: boolean) => void;
+  // Latest live mining status, written by the always-mounted PluginMiningBridge
+  // when a plugin powers mining. It survives the Drops overlay closing, so a
+  // reopened overlay can immediately show what is being mined. Null when no
+  // plugin is mining (the built-in miner's status is read on demand instead).
+  liveMiningStatus: MiningStatus | null;
+  setLiveMiningStatus: (status: MiningStatus | null) => void;
   isTheaterMode: boolean;
   originalChatPlacement: string | null;
   toasts: Toast[];
@@ -489,6 +496,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentUser: null,
   isMiningActive: false,
   setMiningActive: (active: boolean) => set({ isMiningActive: active }),
+  liveMiningStatus: null,
+  setLiveMiningStatus: (status: MiningStatus | null) => set({ liveMiningStatus: status }),
   isTheaterMode: false,
   originalChatPlacement: null,
   toasts: [],
@@ -973,6 +982,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     invoke('set_diagnostics_enabled', { enabled: diagnosticsEnabled }).catch((e) => {
       Logger.warn('[Diagnostics] Failed to sync to backend:', e);
     });
+
+    // Tell the resolver which video codecs this machine can decode (capability-probed
+    // here in the webview), gated by the enhanced-codecs setting. Must run before any
+    // stream resolves, so the resolver can prefer AV1/HEVC where decodable.
+    reportCodecPreference(settings.streamlink?.enhanced_codecs ?? true);
 
     // Connect to Discord if enabled
     if (settings.discord_rpc_enabled) {
