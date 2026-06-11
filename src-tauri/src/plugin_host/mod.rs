@@ -161,6 +161,31 @@ pub struct SourceInfo {
     pub official: bool,
 }
 
+/// Seeds, or re-pins, the built-in StreamNook source so its curated catalog is
+/// available with no manual add. If the user had already added the same URL as
+/// a community source, it is upgraded in place (marked built-in, re-pinned to
+/// the bundled operator key). Returns true when the registry changed.
+fn ensure_official_source(registry: &mut Registry) -> bool {
+    let Some((url, pubkey)) = install::OFFICIAL_INDEX else {
+        return false;
+    };
+    if let Some(existing) = registry.sources.iter_mut().find(|s| s.url == url) {
+        let changed = !existing.official || existing.operator_pubkey != pubkey;
+        existing.official = true;
+        existing.operator_pubkey = pubkey.to_string();
+        changed
+    } else {
+        registry.sources.push(SourceEntry {
+            url: url.to_string(),
+            name: "StreamNook".to_string(),
+            operator: "StreamNook".to_string(),
+            operator_pubkey: pubkey.to_string(),
+            official: true,
+        });
+        true
+    }
+}
+
 pub struct PluginHost {
     inner: Arc<HostInner>,
 }
@@ -184,7 +209,14 @@ impl PluginHost {
     /// Loads the registry, starts every enabled plugin, starts the emitters.
     pub async fn startup(&self) {
         match registry::load() {
-            Ok(loaded) => {
+            Ok(mut loaded) => {
+                // Seed the built-in StreamNook source so its curated catalog is
+                // available immediately, with no manual add.
+                if ensure_official_source(&mut loaded) {
+                    if let Err(e) = registry::save(&loaded) {
+                        log::error!("[PluginHost] failed to persist built-in source: {e}");
+                    }
+                }
                 let enabled: Vec<String> = loaded
                     .plugins
                     .iter()
@@ -280,6 +312,9 @@ impl PluginHost {
 
     pub async fn remove_source(&self, url: &str) -> Result<()> {
         let mut registry = self.inner.registry.lock().await;
+        if registry.sources.iter().any(|s| s.url == url && s.official) {
+            bail!("the built-in StreamNook source cannot be removed");
+        }
         let before = registry.sources.len();
         registry.sources.retain(|s| s.url != url);
         if registry.sources.len() == before {

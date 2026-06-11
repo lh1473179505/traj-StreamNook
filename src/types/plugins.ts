@@ -57,6 +57,9 @@ export interface IndexEntry {
   downloads?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
+  /** First-party (built by StreamNook). Drives the "official" badge. Approved
+   *  third-party plugins leave this false; being in the index is their approval. */
+  official?: boolean;
 }
 
 /** Positive when a is newer than b. Semver-ish, tolerant of short versions. */

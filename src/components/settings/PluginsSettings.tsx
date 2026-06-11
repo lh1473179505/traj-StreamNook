@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -17,6 +17,7 @@ import { useAppStore } from '../../stores/AppStore';
 import { SettingsSection } from './_primitives';
 import { Tooltip } from '../ui/Tooltip';
 import TierBadge from '../plugins/TierBadge';
+import OfficialBadge from '../plugins/OfficialBadge';
 import PluginConsentModal, { ConsentSubject } from '../plugins/PluginConsentModal';
 import PluginDetailOverlay from '../plugins/PluginDetailOverlay';
 import PluginPanelRenderer from '../plugins/PluginPanelRenderer';
@@ -183,6 +184,19 @@ const PluginsSettings = () => {
       unlisteners.forEach((un) => un());
     };
   }, [refresh]);
+
+  // Show the curated StreamNook catalog up front: browse the built-in source
+  // once it has loaded, so its approved plugins appear without a manual click.
+  const didInitBrowse = useRef(false);
+  useEffect(() => {
+    if (didInitBrowse.current) return;
+    const official = sources.find((s) => s.official);
+    if (!official) return;
+    didInitBrowse.current = true;
+    invoke<IndexEntry[]>('plugins_browse_source', { url: official.url })
+      .then((entries) => setBrowse({ url: official.url, entries }))
+      .catch((err) => Logger.error('[Plugins] auto-browse failed:', err));
+  }, [sources]);
 
   const fail = (err: unknown) => {
     Logger.error('[Plugins] action failed:', err);
@@ -656,6 +670,7 @@ const PluginsSettings = () => {
                           <span className="truncate text-[13px] font-medium text-textPrimary">
                             {entry.name}
                           </span>
+                          {entry.official && <OfficialBadge />}
                           <TierBadge tier={entry.tier} />
                         </div>
                         <p className="mt-0.5 truncate text-[11px] text-textSecondary">

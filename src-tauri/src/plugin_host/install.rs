@@ -10,10 +10,16 @@ use super::manifest::{PluginManifest, Tier};
 use super::registry::{self, GrantedCaps, InstalledPlugin, SourceEntry};
 use super::signing;
 
-/// The official index. None until the index operations questions (hosting,
-/// key custody, rotation) are resolved; the sources UI explains the absence.
-/// Must be set, with its operator public key, before a release ships.
-pub const OFFICIAL_INDEX: Option<(&str, &str)> = None;
+/// The built-in StreamNook plugin index: the curated marketplace the app reads
+/// out of the box. `(index url, operator public key)`. The app pins this
+/// operator key from here (not trust-on-first-use) and seeds the source on
+/// startup, so the catalog of approved plugins shows with no manual add. Every
+/// listing is curated and operator-signed; per-plugin `official` marks the
+/// first-party ones.
+pub const OFFICIAL_INDEX: Option<(&str, &str)> = Some((
+    "https://raw.githubusercontent.com/StreamNook/streamnook-plugins/main/index.json",
+    "RWQjpDWje0/OzmnUXUjak7pAGJnNdqpz30FLjHzeTX8cP+rS8i5HCyvy",
+));
 
 /// Caps to keep a hostile index or artifact from filling the disk.
 const MAX_INDEX_BYTES: usize = 5 * 1024 * 1024;
@@ -62,6 +68,11 @@ pub struct IndexEntry {
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// First-party: built by StreamNook itself. Drives the "official" badge.
+    /// Approved third-party plugins (curated into the index but authored by
+    /// someone else) leave this false; being in the index is their approval.
+    #[serde(default)]
+    pub official: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -213,10 +224,10 @@ pub async fn prepare_install(
         .find(|p| p.id == plugin_id)
         .ok_or_else(|| anyhow!("plugin '{plugin_id}' is not listed by this source"))?;
 
-    let tier = Tier::parse(&entry.tier)?;
-    if source.official && tier == Tier::C {
-        bail!("the official index cannot list this plugin tier; entry ignored");
-    }
+    // Validate the declared tier is a known value. All tiers may be listed in
+    // any index; curation (what the operator approved into the index), not the
+    // tier, decides what appears. The manifest tier must still match below.
+    Tier::parse(&entry.tier)?;
 
     // Artifact download and verification.
     let artifact = http_get_bytes(&entry.artifact.url, MAX_ARTIFACT_BYTES).await?;

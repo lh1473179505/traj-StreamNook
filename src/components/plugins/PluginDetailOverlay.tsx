@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { IndexEntry, PluginInfo, PluginTier, compareVersions } from '../../types/plugins';
 import TierBadge from './TierBadge';
+import OfficialBadge from './OfficialBadge';
 import MarkdownLite from './MarkdownLite';
 import { Tooltip } from '../ui/Tooltip';
 import { Logger } from '../../utils/logger';
@@ -179,6 +180,7 @@ const PluginDetailOverlay = ({ entry, sourceName, installed, busy, onInstall, on
                   <span className="truncate text-[15px] font-semibold text-textPrimary">
                     {entry.name}
                   </span>
+                  {entry.official && <OfficialBadge />}
                   <TierBadge tier={entry.tier} />
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-textSecondary">
