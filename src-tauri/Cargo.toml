@@ -58,6 +58,12 @@ scopeguard = "1.2"
 phf = "0.11"
 lru = "0.12"
 
+# Plugin host: manifest parsing, version gating, artifact verification and unpack
+toml = "0.8"
+semver = "1"
+minisign-verify = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 log = "0.4"
 env_logger = "0.11"
 tauri-plugin-deep-link = "2.4.7"

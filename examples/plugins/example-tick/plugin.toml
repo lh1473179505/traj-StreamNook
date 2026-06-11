@@ -1,0 +1,20 @@
+id          = "dev.example-tick"
+name        = "Example Tick Logger"
+version     = "0.1.0"
+author      = "local"
+tier        = "A"
+description = "Sample plugin for testing the host: logs watch ticks, lists live follows, and registers a settings panel."
+host_min    = "7.0.0"
+
+[runtime]
+kind      = "process"
+entry     = "plugin.cmd"
+args      = []
+transport = "stdio"
+
+[capabilities]
+events       = ["on_watch_tick", "on_followed_live", "on_panel_change"]
+host_methods = ["get_followed_live", "notify", "log", "register_panel", "get_panel_values"]
+credentials  = []
+network      = "none"
+ui           = ["panel"]

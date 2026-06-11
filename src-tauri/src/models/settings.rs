@@ -557,6 +557,9 @@ pub struct AppState {
     /// scraped the cookie via `webview_cookie::read_twitch_web_auth_token`
     /// goes through this service instead.
     pub twitch_auth: TwitchAuthService,
+    /// Out-of-process plugin host (spawn, supervise, capability and
+    /// credential brokering). See docs/plugins/.
+    pub plugin_host: Arc<crate::plugin_host::PluginHost>,
 }
 
 #[cfg(test)]

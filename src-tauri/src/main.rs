@@ -31,7 +31,8 @@ use commands::{
     badges::*, cache::*, channel_panels::*, chat::*, chat_identity::*, components::*,
     cosmetics_cache::*, diagnostic_logging::*, discord::*, drops::*, emoji::*, emote_prefetch::*,
     emotes::*, eventsub::*, hype_train::*, identity::*, justlog::*, layout::*, link_preview::*,
-    logs::*, mod_log_storage::*, multi_nook::*, profile_cache::*, proxy_health::*, resub::*,
+    logs::*, mod_log_storage::*, multi_nook::*, plugins::*, profile_cache::*, proxy_health::*,
+    resub::*,
     screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
     streaming::*, subscriptions::*, twitch::*, universal_cache::*, user_profile::*,
     watch_streak::*, whisper_storage::*,
@@ -67,6 +68,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 mod commands;
 mod models;
+mod plugin_host;
 mod services;
 mod utils;
 
@@ -296,6 +298,10 @@ fn main() {
             let twitch_auth =
                 services::twitch_auth_service::TwitchAuthService::new(app_handle.clone());
 
+            // Out-of-process plugin host (docs/plugins/). Ships with zero
+            // plugins; it only ever runs what the user installs and enables.
+            let plugin_host = Arc::new(plugin_host::PluginHost::new(app_handle.clone()));
+
             let app_state = AppState {
                 settings: settings_arc,
                 drops_service,
@@ -304,6 +310,7 @@ fn main() {
                 layout_service: layout_service.clone(),
                 emote_service: emote_service.clone(),
                 twitch_auth,
+                plugin_host: plugin_host.clone(),
             };
 
             // Clone the app_state before managing it
@@ -311,6 +318,12 @@ fn main() {
 
             // Manage AppState directly, not wrapped in Arc
             app.manage(app_state);
+
+            // Start the plugin host: loads the registry and starts plugins
+            // the user previously enabled. No-op with none installed.
+            tauri::async_runtime::spawn(async move {
+                plugin_host.startup().await;
+            });
 
             // Start background service
             tauri::async_runtime::spawn(async move {
@@ -848,6 +861,25 @@ fn main() {
             // Screen capture (Profile share)
             capture_screen_region,
             capture_animated_webp,
+            // Plugin host commands
+            plugins_list,
+            plugins_sources,
+            plugins_add_source,
+            plugins_remove_source,
+            plugins_browse_source,
+            plugins_begin_install,
+            plugins_commit_install,
+            plugins_cancel_install,
+            plugins_install_local,
+            plugins_uninstall,
+            plugins_set_enabled,
+            plugins_get_panel,
+            plugins_set_panel_values,
+            plugins_respond_consent,
+            plugins_revoke_credential,
+            plugins_reset_credential_consent,
+            plugins_audit_log,
+            plugins_report_stream_event,
         ])
         // Window-event handler. Two behaviors:
         //
@@ -916,6 +948,24 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Ask running plugin processes to shut down before the app
+                // process dies, waiting briefly so well-behaved plugins exit
+                // gracefully (stragglers are killed with the supervisor).
+                let state = app_handle.state::<AppState>();
+                let host = state.plugin_host.clone();
+                tauri::async_runtime::block_on(async move {
+                    host.shutdown_all().await;
+                    for _ in 0..20 {
+                        if !host.has_running().await {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                });
+            }
+        });
 }

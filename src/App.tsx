@@ -36,6 +36,7 @@ import EmoteSpotlight from './components/EmoteSpotlight';
 import BadgeDetailOverlay from './components/BadgeDetailOverlay';
 import ChangelogOverlay from './components/ChangelogOverlay';
 import WhispersWidget from './components/WhispersWidget';
+import PluginRuntimeBridge from './components/plugins/PluginRuntimeBridge';
 import SetupWizard from './components/SetupWizard';
 import Sidebar from './components/Sidebar';
 import ClipModal from './components/ClipModal';
@@ -1635,6 +1636,7 @@ function App() {
         isOpen={showWhispersOverlay}
         onClose={() => setShowWhispersOverlay(false)}
       />
+      <PluginRuntimeBridge />
       <AnimatePresence>
         {showListsPanel && <ListsPanel />}
       </AnimatePresence>

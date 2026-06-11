@@ -27,6 +27,7 @@ pub mod link_preview;
 pub mod logs;
 pub mod mod_log_storage;
 pub mod multi_nook;
+pub mod plugins;
 pub mod profile_cache;
 pub mod proxy_health;
 pub mod resub;
