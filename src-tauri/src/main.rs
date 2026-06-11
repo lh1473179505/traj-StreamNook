@@ -31,8 +31,7 @@ use commands::{
     badges::*, cache::*, channel_panels::*, chat::*, chat_identity::*, components::*,
     cosmetics_cache::*, diagnostic_logging::*, discord::*, drops::*, emoji::*, emote_prefetch::*,
     emotes::*, eventsub::*, hype_train::*, identity::*, justlog::*, layout::*, link_preview::*,
-    logs::*, mod_log_storage::*, multi_nook::*, plugins::*, profile_cache::*, proxy_health::*,
-    resub::*,
+    logs::*, mod_log_storage::*, multi_nook::*, plugins::*, profile_cache::*, resub::*,
     screen_capture::*, settings::*, seventv::*, seventv_cosmetics::*, seventv_cosmetics_fetch::*,
     streaming::*, subscriptions::*, twitch::*, universal_cache::*, user_profile::*,
     watch_streak::*, whisper_storage::*,
@@ -863,10 +862,6 @@ fn main() {
             get_watch_streak,
             get_watch_streaks_batch,
             share_watch_streak,
-            // Proxy Health commands
-            get_proxy_list,
-            check_proxy_health,
-            generate_optimal_proxy_args,
             // Screen capture (Profile share)
             capture_screen_region,
             capture_animated_webp,

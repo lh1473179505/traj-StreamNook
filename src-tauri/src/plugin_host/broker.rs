@@ -47,10 +47,34 @@ pub async fn handle_host_method(
             if !playlist_url.starts_with("http://") && !playlist_url.starts_with("https://") {
                 return Err(RpcErr::invalid_params("playlist_url must be an http(s) URL"));
             }
-            // The relay-session hookup lands with the ad-bypass extraction
-            // (migration plan phase 5); until then no session registry exists
-            // to apply an upstream to, so every stream id is unknown.
-            Err(RpcErr::unknown_stream(stream_id))
+            // Route to the matching relay session: the solo player's session
+            // (stream id "solo") or a MultiNook tile by its id. The swap keeps
+            // the local port and tells the player to reload onto it.
+            if stream_id == crate::services::stream_server::SOLO_STREAM_ID {
+                if !crate::services::stream_server::solo_session_active() {
+                    return Err(RpcErr::unknown_stream(stream_id));
+                }
+                crate::services::stream_server::swap_upstream(playlist_url.to_string())
+                    .await
+                    .map_err(|e| RpcErr::internal(&e.to_string()))?;
+            } else if crate::services::multi_nook_server::MultiNookServer::get_port(stream_id)
+                .await
+                .is_some()
+            {
+                crate::services::multi_nook_server::MultiNookServer::swap_upstream(
+                    stream_id,
+                    playlist_url.to_string(),
+                )
+                .await
+                .map_err(|e| RpcErr::internal(&e.to_string()))?;
+            } else {
+                return Err(RpcErr::unknown_stream(stream_id));
+            }
+            debug!(
+                "[PluginHost] {} swapped the upstream for stream '{}'",
+                record.id, stream_id
+            );
+            Ok(json!({}))
         }
         "get_credential" => {
             let kind = params

@@ -1,5 +1,4 @@
 use crate::models::settings::AppState;
-use crate::services::auth_proxy;
 use crate::services::multi_nook_server::MultiNookServer;
 use crate::services::twitch_resolver as tr;
 use log::debug;
@@ -41,40 +40,34 @@ pub async fn start_multi_nook(
         ));
     }
 
-    let (use_proxy, proxy_playlist, stream_timeout) = {
-        let settings = state.settings.lock().unwrap();
-        (
-            settings.streamlink.use_proxy,
-            settings.streamlink.proxy_playlist.clone(),
-            settings.streamlink.stream_timeout,
-        )
-    };
+    let stream_timeout = { state.settings.lock().unwrap().streamlink.stream_timeout };
 
     let channel =
         channel_from_url(&url).ok_or_else(|| format!("Unrecognized Twitch URL: {}", url))?;
     let oauth = state.twitch_auth.get_token().await.ok();
-    let bases = auth_proxy::parse_proxy_bases(&proxy_playlist);
 
     // MultiNook resolves each tile with a SINGLE attempt (retry_delay = 0). Unlike
     // the solo player, a grid tile is expected to be live, so the solo path's
     // retry-until-live loop is wrong here: it would keep an offline channel
-    // hammering usher / GQL / the proxy pool every `retry_streams` seconds for the
-    // full `stream_timeout` budget (60s by default), saturating the network and the
-    // shared proxy pool and stalling the OTHER tiles' playback. Failing fast lets an
-    // offline tile show its overlay right away; the per-tile Retry button (frontend)
-    // covers the rare "channel just went live" case. `stream_timeout` is still passed
-    // as the budget but is moot at retry_delay = 0 (single attempt).
-    let r = tr::resolve_live_resilient(
-        &channel,
-        oauth.as_deref(),
-        &bases,
-        use_proxy,
-        &quality,
-        0,
-        stream_timeout,
+    // hammering usher / GQL every `retry_streams` seconds for the full
+    // `stream_timeout` budget (60s by default), saturating the network and
+    // stalling the OTHER tiles' playback. Failing fast lets an offline tile show
+    // its overlay right away; the per-tile Retry button (frontend) covers the
+    // rare "channel just went live" case. `stream_timeout` is still passed as
+    // the budget but is moot at retry_delay = 0 (single attempt).
+    let core =
+        tr::resolve_live_resilient(&channel, oauth.as_deref(), &quality, 0, stream_timeout).await;
+
+    // Same hand-off as the solo player: a resolution-owning plugin takes the
+    // non-entitled tile when installed, addressed by this tile's stream id.
+    let r = match crate::commands::streaming::resolve_via_plugin(
+        &state, &stream_id, &channel, &quality, &core,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Some(plugin_resolved) => plugin_resolved,
+        None => core.map_err(|e| e.to_string())?,
+    };
 
     let port = MultiNookServer::start_proxy(&stream_id, r.url)
         .await

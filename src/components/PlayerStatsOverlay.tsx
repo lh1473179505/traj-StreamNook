@@ -151,7 +151,7 @@ const PlayerStatsOverlay = ({ hlsRef, videoRef, open, onToggle, onGoLive, adSour
         : 'Sub (direct)'
       : adSource.mode === 'auth-only'
         ? 'Direct (ads)'
-        : `Proxy${adSource.region ? ` ${adSource.region}` : ''}`
+        : `Plugin${adSource.region ? ` ${adSource.region}` : ''}`
     : null;
 
   // Go Live is for genuine drift (a scrub-back or latency creep), not the path's

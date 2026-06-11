@@ -1,6 +1,5 @@
 import { Dropdown } from '../ui/Dropdown';
 import { useAppStore } from '../../stores/AppStore';
-import ProxyHealthChecker from './ProxyHealthChecker';
 import { SettingsSection, SettingsRow, SegmentedSelect } from './_primitives';
 import { DEFAULT_AUDIO_BOOST } from '../../types';
 import { Fader } from '../AudioBoostFaders';
@@ -38,9 +37,6 @@ const PlayerSettings = () => {
   const streamlinkDefaults = {
     stream_timeout: 60,
     retry_streams: 3,
-    use_proxy: true,
-    proxy_playlist:
-      '--twitch-proxy-playlist=https://lb-na.cdn-perfprod.com,https://eu.luminous.dev --twitch-proxy-playlist-fallback',
     enhanced_codecs: true,
   };
 
@@ -202,56 +198,6 @@ const PlayerSettings = () => {
             />
           }
         />
-
-        <SettingsRow
-          title="Use Proxy Routing"
-          description="Route playlists through CDN proxies (recommended for ad-blocking)"
-          control={
-            <Toggle
-              enabled={streamlink.use_proxy}
-              onChange={() =>
-                updateSettings({
-                  ...settings,
-                  streamlink: { ...streamlink, use_proxy: !streamlink.use_proxy },
-                })
-              }
-            />
-          }
-        >
-          {streamlink.use_proxy && (
-            <div className="space-y-4">
-              <ProxyHealthChecker />
-
-              <details className="group">
-                <summary className="cursor-pointer text-sm font-medium text-textSecondary hover:text-textPrimary transition-colors flex items-center gap-2">
-                  <span className="transform transition-transform group-open:rotate-90">▶</span>
-                  Advanced: Manual Proxy Configuration
-                </summary>
-                <div className="mt-3 p-3 bg-glass rounded-lg">
-                  <label className="block text-sm font-medium text-textPrimary mb-2">
-                    Proxy Arguments
-                  </label>
-                  <input
-                    type="text"
-                    value={streamlink.proxy_playlist}
-                    onChange={(e) =>
-                      updateSettings({
-                        ...settings,
-                        streamlink: { ...streamlink, proxy_playlist: e.target.value },
-                      })
-                    }
-                    className="w-full glass-input text-textPrimary text-sm px-3 py-2 font-mono"
-                    placeholder="--twitch-proxy-playlist=https://..."
-                  />
-                  <p className="text-xs text-textSecondary mt-1">
-                    Custom proxy playlist arguments. Use the health checker above to auto-generate optimal settings,
-                    or manually specify proxy URLs here.
-                  </p>
-                </div>
-              </details>
-            </div>
-          )}
-        </SettingsRow>
 
         <SettingsRow
           title={`Connection Timeout: ${streamlink.stream_timeout}s`}

@@ -3,18 +3,13 @@
 // This is the in-Rust replacement for what Streamlink did with `--stream-url`:
 // turn a channel + quality into the media-playlist URL the player loads.
 //
-// The fragile core (GQL PlaybackAccessToken, usher fetch, TTV-LOL proxy race,
-// splice, out-of-band entitlement) already lives in `auth_proxy` and is reused
-// here as plain function calls. The genuinely new pieces are the HLS master
-// playlist parser (`parse_master`) and variant selection (`select_variant`),
-// which mirror what Streamlink was doing after it received the master.
-//
-// Phase 1: this path runs behind the `native_resolver` settings flag (default
-// off) and an agreement harness (`verify_resolver`) that logs native-vs-
-// Streamlink resolution differences on real streams. VOD/clip land in Phase 2.
+// The fragile core (GQL PlaybackAccessToken, usher fetch, out-of-band
+// entitlement) lives in `auth_proxy` and is reused here as plain function
+// calls. The genuinely new pieces are the HLS master playlist parser
+// (`parse_master`) and variant selection (`select_variant`), which mirror what
+// Streamlink was doing after it received the master.
 
 use crate::services::auth_proxy::{self, PlaybackStatus};
-use crate::services::proxy_health;
 use crate::services::quality::{pick_closest_quality, sort_qualities_descending};
 use anyhow::{anyhow, Context, Result};
 use log::debug;
@@ -323,24 +318,21 @@ fn audio_index(variants: &[Variant]) -> Option<usize> {
 
 /// Resolve a live channel to a media-playlist URL, fully in Rust.
 ///
-/// Faithfully mirrors `auth_proxy::handle_playlist`'s routing, then parses the
-/// resulting master and selects the requested variant instead of serving the
-/// master over HTTP to a Streamlink subprocess:
-///   - Tier 1/2: Turbo or channel-sub → authenticated master directly (ad-free,
-///     full quality, credits the streamer), no proxy.
-///   - Tier 3 (`use_proxy`): race the TTV-LOL proxies (bundled-pool fallback) and
-///     the authed master in parallel, splice in the 1440p/2160p tiers.
-///   - `use_proxy = false`: authenticated master only (no proxy/splice).
+/// Entitlement-first: a Turbo or channel-subscribed viewer gets the
+/// authenticated master directly (ad-free, full quality, credits the
+/// streamer). Everyone else gets the same direct master the web player would
+/// serve them, authenticated when logged in and anonymous otherwise. The core
+/// applies no ad handling to it; a playback plugin that owns resolution can
+/// take over the non-entitled case at the command layer (see
+/// `commands::streaming::resolve_via_plugin`).
 pub async fn resolve_live(
     channel: &str,
     oauth_token: Option<&str>,
-    proxy_bases: &[String],
-    use_proxy: bool,
     quality: &str,
 ) -> Result<ResolvedLive> {
     let channel = channel.to_lowercase();
 
-    // Tier 1/2 — entitlement-first (only when logged in).
+    // Entitlement-first (only when logged in).
     if let Some(token) = oauth_token {
         let reason = if auth_proxy::account_has_turbo(token).await {
             Some("turbo")
@@ -350,7 +342,7 @@ pub async fn resolve_live(
             None
         };
         if let Some(reason) = reason {
-            match auth_proxy::fetch_auth_master(&channel, token).await {
+            match auth_proxy::fetch_auth_master(&channel, Some(token)).await {
                 Ok(master) => {
                     debug!(
                         "[Resolver] {} entitled ({}) → authed master direct",
@@ -373,101 +365,38 @@ pub async fn resolve_live(
         }
     }
 
-    // Non-entitled (or anonymous / auth fetch failed).
-    if use_proxy {
-        // Tier 3 — proxy + splice. Race ad-free proxy master and authed master.
-        let ttvlol_fut = auth_proxy::fetch_ttvlol_with_fallback(&channel, proxy_bases);
-        let auth_fut = async {
-            match oauth_token {
-                Some(t) => auth_proxy::fetch_auth_master(&channel, t).await.map(Some),
-                None => Ok(None),
-            }
-        };
-        let (ttvlol, auth) = tokio::join!(ttvlol_fut, auth_fut);
-        let auth_master = auth.unwrap_or(None);
-        let auth_fallback = auth_master.clone();
+    // Non-entitled: the direct master, with the viewer's own credential when
+    // present and anonymously otherwise (same as the logged-out web player).
+    let master = auth_proxy::fetch_auth_master(&channel, oauth_token).await?;
+    let status = PlaybackStatus {
+        channel: channel.clone(),
+        mode: "auth-only".to_string(),
+        entitled: false,
+        proxy_base: None,
+        proxy_region: None,
+    };
+    build(channel, master, status, quality)
+}
 
-        let (mut master, mut status) = match (ttvlol, auth_master) {
-            (Ok((base, t)), Some(a)) => {
-                let region = proxy_health::region_for_base(&base);
-                (
-                    auth_proxy::splice(&t, &a),
-                    PlaybackStatus {
-                        channel: channel.clone(),
-                        mode: "proxy".to_string(),
-                        entitled: false,
-                        proxy_base: Some(base),
-                        proxy_region: region,
-                    },
-                )
-            }
-            (Ok((base, t)), None) => {
-                let region = proxy_health::region_for_base(&base);
-                (
-                    t,
-                    PlaybackStatus {
-                        channel: channel.clone(),
-                        mode: "proxy".to_string(),
-                        entitled: false,
-                        proxy_base: Some(base),
-                        proxy_region: region,
-                    },
-                )
-            }
-            (Err(e), Some(a)) => {
-                debug!(
-                    "[Resolver] {} proxy failed ({}); auth master only (ads)",
-                    channel, e
-                );
-                (
-                    a,
-                    PlaybackStatus {
-                        channel: channel.clone(),
-                        mode: "auth-only".to_string(),
-                        entitled: false,
-                        proxy_base: None,
-                        proxy_region: None,
-                    },
-                )
-            }
-            (Err(e1), None) => return Err(anyhow!("both fetches failed: ttvlol={}", e1)),
-        };
-
-        // Defense in depth: if the chosen master still parses to nothing (a proxy
-        // served a shape we can't read, or an empty body), fall back to the
-        // authenticated master when we have a usable one. This is Streamlink's
-        // proxy→upstream fallback: an ad-bearing stream beats no stream.
-        if parse_master(&master).is_empty() {
-            if let Some(a) = auth_fallback.filter(|a| !parse_master(a).is_empty()) {
-                debug!(
-                    "[Resolver] {} proxy master had no usable variants; falling back to authed master",
-                    channel
-                );
-                master = a;
-                status = PlaybackStatus {
-                    channel: channel.clone(),
-                    mode: "auth-only".to_string(),
-                    entitled: false,
-                    proxy_base: None,
-                    proxy_region: None,
-                };
-            }
-        }
-
-        build(channel, master, status, quality)
-    } else {
-        // Direct auth, no proxy. Requires a login.
-        let token = oauth_token.ok_or_else(|| anyhow!("non-proxy mode requires a twitch login"))?;
-        let master = auth_proxy::fetch_auth_master(&channel, token).await?;
-        let status = PlaybackStatus {
-            channel: channel.clone(),
-            mode: "auth-only".to_string(),
-            entitled: false,
-            proxy_base: None,
-            proxy_region: None,
-        };
-        build(channel, master, status, quality)
-    }
+/// Build a `ResolvedLive` from a master playlist a playback plugin supplied
+/// through the `playback.resolve` hook. Same parse and variant selection as a
+/// core-fetched master; only the status provenance differs.
+pub fn resolve_from_master(
+    channel: &str,
+    master: String,
+    quality: &str,
+    base: Option<String>,
+    region: Option<String>,
+) -> Result<ResolvedLive> {
+    let channel = channel.to_lowercase();
+    let status = PlaybackStatus {
+        channel: channel.clone(),
+        mode: "plugin".to_string(),
+        entitled: false,
+        proxy_base: base,
+        proxy_region: region,
+    };
+    build(channel, master, status, quality)
 }
 
 /// Retry `resolve_live` until it succeeds or the time budget elapses — the
@@ -482,12 +411,9 @@ pub async fn resolve_live(
 /// unless `--retry-max` is set, and StreamNook historically bounded it with the
 /// subprocess timeout, so we reuse `stream_timeout` as that ceiling. The first
 /// attempt always runs even if the budget is tiny.
-#[allow(clippy::too_many_arguments)]
 pub async fn resolve_live_resilient(
     channel: &str,
     oauth_token: Option<&str>,
-    proxy_bases: &[String],
-    use_proxy: bool,
     quality: &str,
     retry_delay_secs: u32,
     budget_secs: u32,
@@ -496,7 +422,7 @@ pub async fn resolve_live_resilient(
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match resolve_live(channel, oauth_token, proxy_bases, use_proxy, quality).await {
+        match resolve_live(channel, oauth_token, quality).await {
             Ok(r) => return Ok(r),
             Err(e) => {
                 let elapsed = start.elapsed().as_secs() as u32;
@@ -1053,19 +979,6 @@ https://x/1080.m3u8\n";
         assert_eq!(v[0].name, "1080p60");
         assert_eq!(v[0].group_id, "chunked");
         assert_eq!(v[0].url, "https://x/1080.m3u8");
-    }
-
-    #[test]
-    fn error_page_body_is_not_a_master() {
-        // The HTML/JSON error bodies the flaky proxies return with HTTP 200.
-        assert!(!auth_proxy::looks_like_master(
-            "<!DOCTYPE html><html><head><title>Server error!</title></head></html>"
-        ));
-        assert!(!auth_proxy::looks_like_master(
-            "{\"code\":404,\"error\":\"HTTP status client error\"}"
-        ));
-        assert!(auth_proxy::looks_like_master(MASTER_MODERN_IVS));
-        assert!(auth_proxy::looks_like_master(MASTER_NICKMERCS));
     }
 
     #[test]

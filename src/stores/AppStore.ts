@@ -13,11 +13,11 @@ import { emitSettingsUpdated } from '../utils/settingsBroadcast';
 type StreamStartResult = {
   url: string;
   quality: string;
-  /** How the live stream resolved: 'turbo' | 'subscribed' | 'hide_ads' | 'proxy' | 'auth-only'. */
+  /** How the live stream resolved: 'turbo' | 'subscribed' | 'auth-only' | 'plugin'. */
   mode?: string;
-  /** True when Twitch's own entitlement (Turbo / channel sub) is serving an ad-free stream, no proxy. */
+  /** True when Twitch's own entitlement (Turbo / channel sub) is serving an ad-free stream. */
   entitled?: boolean;
-  /** Proxy region (e.g. 'EU') when the ad-block proxy was used. */
+  /** Region label (e.g. 'EU') reported by a resolution-owning plugin. */
   proxy_region?: string;
   /** Quality menu the resolver discovered (variant names + best/worst). */
   available?: string[];
@@ -1482,14 +1482,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyAdPivot: (url, region) => {
-    // Backend already demoted the leaking region and hot-swapped the relay's
-    // upstream; pointing the player at the fresh localhost URL re-inits hls.js
-    // on the clean source (same mechanism as a quality change).
+    // A resolution-owning plugin already swapped the relay's upstream
+    // (set_upstream); pointing the player at the fresh localhost URL re-inits
+    // hls.js on the clean source (same mechanism as a quality change).
     const cur = get().adSource;
-    Logger.info(`[AdPivot] reloading player on clean region${region ? ` (${region})` : ''}`);
+    Logger.info(`[AdPivot] reloading player on the swapped upstream${region ? ` (${region})` : ''}`);
     set({
       streamUrl: url,
-      adSource: cur ? { ...cur, region } : { mode: 'proxy', entitled: false, region },
+      adSource: cur ? { ...cur, region } : { mode: 'plugin', entitled: false, region },
     });
   },
 

@@ -32,7 +32,6 @@ pub mod mining_service;
 pub mod mod_log_storage_service;
 pub mod multi_nook_server;
 pub mod profile_cache_service;
-pub mod proxy_health;
 pub mod quality;
 pub mod seventv_auth_service;
 pub mod seventv_eventapi;

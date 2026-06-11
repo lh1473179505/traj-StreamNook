@@ -120,19 +120,6 @@ pub struct StreamlinkSettings {
     pub stream_timeout: u32,
     /// Delay (seconds) between native resolve attempts (0 = single attempt).
     pub retry_streams: u32,
-    #[serde(default = "default_true")]
-    pub use_proxy: bool, // Route playlists through the ad-block proxy pool
-    pub proxy_playlist: String, // Proxy base URLs (parsed into the resolver's pool)
-    /// ID of the last proxy applied (persists through restarts/updates)
-    #[serde(default)]
-    pub last_applied_proxy_id: Option<String>,
-    /// Whether the current proxy was auto-selected (optimizer can override on next launch)
-    /// When false, a user manually chose a proxy and the optimizer will respect that choice
-    #[serde(default = "default_true")]
-    pub proxy_auto_optimized: bool,
-    /// Whether proxy optimization has been run at least once (replaces volatile localStorage flag)
-    #[serde(default)]
-    pub proxy_optimized_once: bool,
     /// Request Twitch's Enhanced Broadcasting variants (h265 + AV1 in addition
     /// to h264) when resolving.
     #[serde(default = "default_true")]
@@ -144,11 +131,6 @@ impl Default for StreamlinkSettings {
         Self {
             stream_timeout: 60,
             retry_streams: 3,
-            use_proxy: true,
-            proxy_playlist: "--twitch-proxy-playlist=https://lb-na.cdn-perfprod.com,https://eu.luminous.dev --twitch-proxy-playlist-fallback".to_string(),
-            last_applied_proxy_id: None,
-            proxy_auto_optimized: true,
-            proxy_optimized_once: false,
             enhanced_codecs: true,
         }
     }

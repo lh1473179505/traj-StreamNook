@@ -1807,15 +1807,15 @@ const VideoPlayer = () => {
                         ? 'Ad-free via Twitch Turbo'
                         : 'Ad-free via your subscription'
                       : adSource.mode === 'auth-only'
-                        ? 'Ad-blocking unavailable'
-                        : 'Ad-blocking proxy active'}
+                        ? 'Direct stream'
+                        : 'Ad-free via plugin'}
                   </p>
                   <p className="text-textSecondary text-xs leading-relaxed">
                     {adSource.entitled
                       ? 'Playing directly from Twitch. No proxy.'
                       : adSource.mode === 'auth-only'
                         ? 'Ads may appear on this stream.'
-                        : `Routing through ${adSource.region || 'a proxy'} for an ad-free stream.`}
+                        : `An installed plugin resolved this stream${adSource.region ? ` through ${adSource.region}` : ''}.`}
                   </p>
                   {activeQuality && !qualitiesEquivalent(settings.quality, activeQuality) && (
                     <p className="text-textMuted text-[10px] leading-relaxed">

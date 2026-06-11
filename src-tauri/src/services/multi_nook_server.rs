@@ -193,6 +193,22 @@ impl MultiNookServer {
         registry.len()
     }
 
+    /// Replace a tile's upstream playlist with one a resolution-owning plugin
+    /// supplied via `set_upstream`. Reuses the tile-restart path: the relay
+    /// keeps its port, resets its ad state, and re-probes the new upstream.
+    pub async fn swap_upstream(stream_id: &str, playlist_url: String) -> Result<()> {
+        let exists = STREAM_REGISTRY.lock().await.contains_key(stream_id);
+        if !exists {
+            return Err(anyhow::anyhow!("no relay session for tile '{stream_id}'"));
+        }
+        Self::start_proxy(stream_id, playlist_url).await?;
+        info!(
+            "[MultiNook] '{}' upstream swapped by a playback plugin",
+            stream_id
+        );
+        Ok(())
+    }
+
     /// Snapshot every tile's ad-detection state, keyed by stream_id (for a
     /// command / the future auto-pivot). Parity with the solo `ad_state()`.
     pub async fn ad_snapshot() -> HashMap<String, ad_detect::AdDetectionState> {
@@ -294,24 +310,30 @@ impl MultiNookServer {
             }
         };
 
-        // Detect (for per-tile state) then strip leaked ad segments before the
-        // tile's player sees them — same shared logic as the solo player. This
-        // server only relays the media playlist (not .ts), so every body is a
-        // playlist worth scanning/filtering; free, no extra requests.
+        // Detect ad markers for the per-tile state — same shared logic as the
+        // solo player, and read-only the same way: the tile relay is
+        // ad-neutral and serves the upstream's segments untouched. Transitions
+        // feed the `on_ad_window` plugin event keyed by this tile's stream id.
+        // This server only relays the media playlist (not .ts), so every body
+        // is a playlist worth scanning; free, no extra requests.
         if let Ok(text) = std::str::from_utf8(&bytes) {
-            let ads_now = {
+            let (was, ads_now) = {
                 let mut st = ad_state.lock().unwrap();
+                let was = st.ads_present;
                 if let Some(n) = ad_detect::update(&mut st, text) {
                     info!(
                         "[MultiNook] ad markers detected on '{}' (break #{}): {:?}",
                         stream_id, n, st.matched_markers
                     );
                 }
-                st.ads_present
+                (was, st.ads_present)
             };
+            if was != ads_now {
+                crate::services::stream_server::notify_ad_window(&stream_id, ads_now);
+            }
 
-            // Build the served playlist exactly like the solo relay (stream_server):
-            // ad-filtered base, then lower Twitch's over-declared
+            // Build the served playlist exactly like the solo relay
+            // (stream_server): lower Twitch's over-declared
             // #EXT-X-TARGETDURATION (it declares 6s for ~2s segments) to the real
             // segment size. hls.js derives its live-playlist RELOAD cadence from
             // targetduration, so the inflated 6 makes it re-poll too slowly to keep a
@@ -321,14 +343,7 @@ impl MultiNookServer {
             // right after load. Finally promote low-latency PREFETCH hints (ad-gated,
             // refresh-stable) so tiles on a low-latency channel ride near the live edge
             // like the solo player; normal-latency channels have no hints (no-op).
-            let (filtered, dropped, _real) = ad_detect::filter_ad_segments(text);
-            if dropped > 0 {
-                debug!(
-                    "[MultiNook] '{}' stripped {} ad segment(s)",
-                    stream_id, dropped
-                );
-            }
-            let mut work: String = if dropped > 0 { filtered } else { text.to_string() };
+            let mut work: String = text.to_string();
             if let Some(rt) = ad_detect::retarget_playlist(&work) {
                 work = rt;
             }

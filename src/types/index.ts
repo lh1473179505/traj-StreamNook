@@ -40,14 +40,6 @@ export interface CacheSettings {
 export interface StreamlinkSettings {
   stream_timeout: number;          // Native retry budget (seconds)
   retry_streams: number;           // Native retry delay between attempts (seconds)
-  use_proxy: boolean;              // Route playlists through the ad-block proxy pool
-  proxy_playlist: string;          // Proxy base URLs
-  /** ID of the last proxy applied (persists through restarts/updates) */
-  last_applied_proxy_id?: string;
-  /** Whether the current proxy was auto-selected (optimizer can override on next launch) */
-  proxy_auto_optimized?: boolean;
-  /** Whether proxy optimization has been run at least once */
-  proxy_optimized_once?: boolean;
   /** Request h265 + AV1 in addition to h264. Unlocks Twitch Enhanced
    *  Broadcasting tiers (1440p60 AV1, 720p60 HEVC). Default on. */
   enhanced_codecs?: boolean;
@@ -1093,44 +1085,5 @@ export interface HypeTrainData {
 
 
 
-// ===== Proxy Health Types =====
-
-/** A proxy server entry from the bundled list */
-export interface ProxyServer {
-  id: string;
-  url: string;
-  name: string;
-  region: string;    // e.g., 'NA', 'EU', 'AS', 'SA', 'RU'
-  provider: string;  // e.g., 'TTV-LOL-PRO', 'luminous-ttv', 'community'
-  priority: number;
-}
-
-/** Result of a health check on a single proxy */
-export interface ProxyHealthResult {
-  id: string;
-  url: string;
-  name: string;
-  region: string;
-  is_healthy: boolean;
-  latency_ms: number | null;
-  error: string | null;
-  checked_at: string;
-}
-
-/** Aggregated proxy health check response */
-export interface ProxyHealthCheckResponse {
-  results: ProxyHealthResult[];
-  best_proxy: ProxyHealthResult | null;
-  check_duration_ms: number;
-  total_checked: number;
-  healthy_count: number;
-}
-
-/** Bundled proxy list structure */
-export interface ProxyList {
-  version: string;
-  lastUpdated: string;
-  proxies: ProxyServer[];
-}
 
 

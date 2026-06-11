@@ -4,7 +4,85 @@ use crate::services::stream_server::StreamServer;
 use crate::services::twitch_resolver as tr;
 use log::debug;
 use serde::Serialize;
+use serde_json::json;
 use tauri::State;
+
+/// The hook a resolution-owning plugin fills (see docs/plugins/HOOKS.md): the
+/// host invokes this action with the channel and quality, and the plugin
+/// answers with a master playlist for the relay to serve.
+pub(crate) const PLAYBACK_RESOLVE_HOOK: &str = "playback.resolve";
+
+/// Hand a non-entitled live resolution to an installed playback plugin, when
+/// one provides the `playback.resolve` hook.
+///
+/// `core` is the core resolver's own result: entitled resolutions are never
+/// delegated (Turbo or a channel sub is already ad-free), and a successful
+/// core master rides along in the action args so the plugin can graft the
+/// above-1080p tiers the viewer's login unlocks onto whatever master it
+/// resolves. Returns `None` whenever the plugin path does not produce a
+/// playable result, so the caller falls back to the core resolution.
+pub(crate) async fn resolve_via_plugin(
+    state: &State<'_, AppState>,
+    stream_id: &str,
+    channel: &str,
+    quality: &str,
+    core: &Result<tr::ResolvedLive, anyhow::Error>,
+) -> Option<tr::ResolvedLive> {
+    if core.as_ref().map(|r| r.status.entitled).unwrap_or(false) {
+        return None;
+    }
+    state.plugin_host.provides(PLAYBACK_RESOLVE_HOOK).await?;
+    let auth_master = core.as_ref().ok().map(|r| r.master.clone());
+    let args = json!({
+        "stream_id": stream_id,
+        "channel": channel,
+        "quality": quality,
+        "auth_master": auth_master,
+    });
+    let answer = match state
+        .plugin_host
+        .invoke_action(PLAYBACK_RESOLVE_HOOK, args)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("[Streaming] {} plugin resolve failed: {}", channel, e);
+            return None;
+        }
+    };
+    if answer
+        .get("declined")
+        .and_then(|d| d.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let master = answer.get("master")?.as_str()?.to_string();
+    let base = answer
+        .get("base")
+        .and_then(|b| b.as_str())
+        .map(String::from);
+    let region = answer
+        .get("region")
+        .and_then(|r| r.as_str())
+        .map(String::from);
+    match tr::resolve_from_master(channel, master, quality, base, region) {
+        Ok(r) => {
+            debug!(
+                "[Streaming] {} resolved by a playback plugin (region={:?})",
+                channel, r.status.proxy_region
+            );
+            Some(r)
+        }
+        Err(e) => {
+            debug!(
+                "[Streaming] {} plugin master unusable ({}); using the core resolution",
+                channel, e
+            );
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamStartResult {
@@ -55,7 +133,7 @@ fn local_player_url(port: u16) -> String {
 }
 
 /// Resolve a Twitch clip to its signed MP4 URL WITHOUT touching any global live-
-/// stream state (no `clear_active_stream`, no proxy server, no `currentStream`
+/// stream state (no solo-session reset, no proxy server, no `currentStream`
 /// swap). The in-chat clip modal plays that MP4 directly in its own `<video>`,
 /// so the main stream/chat keeps running underneath and the user lands back
 /// exactly where they were when the modal closes.
@@ -89,9 +167,9 @@ pub async fn start_stream(
 ) -> Result<StreamStartResult, String> {
     debug!("[Streaming] start_stream called for URL: {}", url);
 
-    // Reset any prior auto-pivot context up front; only a proxied live resolve
-    // below re-arms it (keeps a stale pivot off a clip/VOD/entitled stream).
-    crate::services::stream_server::clear_active_stream();
+    // Clear the prior solo session up front; only a live resolve below
+    // re-registers it (keeps a stale session off clip/VOD playback).
+    crate::services::stream_server::set_solo_session(None);
 
     let streamlink_settings = { state.settings.lock().unwrap().streamlink.clone() };
     let oauth = state.twitch_auth.get_token().await.ok();
@@ -134,20 +212,31 @@ pub async fn start_stream(
     // Live channel.
     let channel =
         channel_from_url(&url).ok_or_else(|| format!("Unrecognized Twitch URL: {}", url))?;
-    let bases = auth_proxy::parse_proxy_bases(&streamlink_settings.proxy_playlist);
     // retry_streams = delay between attempts, stream_timeout = total budget, so a
     // channel that just went live connects once its playlist appears.
-    let r = tr::resolve_live_resilient(
+    let core = tr::resolve_live_resilient(
         &channel,
         oauth.as_deref(),
-        &bases,
-        streamlink_settings.use_proxy,
         &quality,
         streamlink_settings.retry_streams,
         streamlink_settings.stream_timeout,
     )
+    .await;
+
+    // A resolution-owning plugin takes the non-entitled case when installed;
+    // otherwise (or when it declines or fails) the core resolution serves.
+    let r = match resolve_via_plugin(
+        &state,
+        crate::services::stream_server::SOLO_STREAM_ID,
+        &channel,
+        &quality,
+        &core,
+    )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Some(plugin_resolved) => plugin_resolved,
+        None => core.map_err(|e| e.to_string())?,
+    };
 
     log::info!(
         "[Streaming] {} '{}' → '{}' (mode={}) available={:?}",
@@ -158,20 +247,13 @@ pub async fn start_stream(
         r.available
     );
     auth_proxy::set_status(r.status.clone());
-    // Arm the ad auto-pivot only for proxied streams (entitled Turbo/sub streams
-    // are already ad-free and must not pivot).
-    if r.status.mode == "proxy" {
-        crate::services::stream_server::set_active_stream(
-            channel.clone(),
-            quality.clone(),
-            bases.clone(),
-            r.status.proxy_base.clone(),
-            state.twitch_auth.clone(),
-        );
-    }
     let port = StreamServer::start_proxy_server(r.url)
         .await
         .map_err(|e| e.to_string())?;
+    // Register the live solo session AFTER the relay is serving it, so the
+    // plugin protocol's "solo" stream id (set_upstream, on_ad_window) always
+    // addresses a live relay.
+    crate::services::stream_server::set_solo_session(Some(channel.clone()));
     Ok(StreamStartResult {
         url: local_player_url(port),
         quality: r.quality,
@@ -209,13 +291,6 @@ pub async fn get_stream_qualities(
     url: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let (use_proxy, proxy_playlist) = {
-        let settings = state.settings.lock().unwrap();
-        (
-            settings.streamlink.use_proxy,
-            settings.streamlink.proxy_playlist.clone(),
-        )
-    };
     let oauth = state.twitch_auth.get_token().await.ok();
 
     // Resolve once at "best" and surface the variant menu it discovered. The
@@ -233,8 +308,7 @@ pub async fn get_stream_qualities(
     } else {
         let channel =
             channel_from_url(&url).ok_or_else(|| format!("Unrecognized Twitch URL: {}", url))?;
-        let bases = auth_proxy::parse_proxy_bases(&proxy_playlist);
-        tr::resolve_live(&channel, oauth.as_deref(), &bases, use_proxy, "best")
+        tr::resolve_live(&channel, oauth.as_deref(), "best")
             .await
             .map(|r| r.available)
             .map_err(|e| e.to_string())

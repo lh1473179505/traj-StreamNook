@@ -449,12 +449,6 @@ function App() {
         autoSyncUniversalCacheIfStale();
       });
 
-      // Auto-optimize proxy routing on every launch
-      // Ensures proxy is enabled, runs health check, and applies fastest proxy
-      import('./services/proxyAutoOptimizer').then(({ runProxyOptimization }) => {
-        runProxyOptimization();
-      });
-
       // Pre-fetch cosmetics for current user
       const { currentUser, isAuthenticated } = useAppStore.getState();
       if (isAuthenticated && currentUser?.user_id) {

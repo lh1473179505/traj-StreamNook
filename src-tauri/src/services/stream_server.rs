@@ -2,17 +2,15 @@ use crate::services::ll_origin::{
     empty_cors, media_response, opt_raw_query, parse_directive, parse_part_path,
     playlist_response,
 };
-use crate::services::twitch_auth_service::TwitchAuthService;
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{error, info};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use reqwest::Client;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use warp::Filter;
 
@@ -61,50 +59,40 @@ fn reset_ad_state() {
     crate::services::ll_origin::stop();
 }
 
-/// Fold a relayed media playlist into the solo stream's ad-detection state. We
-/// need our own scan because StreamNook resolves with `--stream-url`, so
-/// Streamlink's plugin never filters segments on the live stream — this relay
-/// is the only watcher.
+/// Fold a relayed media playlist into the solo stream's ad-detection state.
+/// Detection here is read-only: the relay serves the playlist untouched and
+/// only RECORDS whether ad markers are present, for the UI counter and the
+/// `on_ad_window` plugin event. On an ad-state transition the subscribed
+/// plugins are notified; a resolution-owning plugin reacts by handing the
+/// relay a new upstream via `set_upstream`.
 fn detect_ads_in_playlist(playlist: &str) {
-    let mut st = AD_STATE.lock().unwrap();
-    if let Some(n) = crate::services::ad_detect::update(&mut st, playlist) {
-        info!(
-            "[StreamServer] ad markers detected in live playlist (break #{}): {:?}",
-            n, st.matched_markers
-        );
+    let (was, now) = {
+        let mut st = AD_STATE.lock().unwrap();
+        let was = st.ads_present;
+        if let Some(n) = crate::services::ad_detect::update(&mut st, playlist) {
+            info!(
+                "[StreamServer] ad markers detected in live playlist (break #{}): {:?}",
+                n, st.matched_markers
+            );
+        }
+        (was, st.ads_present)
+    };
+    if was != now {
+        notify_ad_window(SOLO_STREAM_ID, now);
     }
 }
 
-// ----- Auto-pivot: escape a leaked ad on a proxied stream -----
-//
-// When the in-band detector sees a leaked ad persist on a proxied (non-entitled)
-// stream, re-resolve the same channel/quality through a DIFFERENT proxy region,
-// hot-swap the relay's upstream, and nudge the player to reload onto the clean
-// source. Guardrails (from the ad architecture): fire only on a debounced
-// confirmed ad, with a cooldown so a slow connection can't be thrashed. Only the
-// proxy path can pivot — entitled (Turbo/sub) and direct streams never arm it.
+/// The stream id the solo relay session is addressed by in the plugin
+/// protocol (`set_upstream`, `on_ad_window`). MultiNook tiles use their own
+/// per-tile ids.
+pub const SOLO_STREAM_ID: &str = "solo";
 
-const PIVOT_DEBOUNCE_POLLS: u32 = 2;
-const PIVOT_COOLDOWN: Duration = Duration::from_secs(30);
-
-/// Everything needed to re-resolve the currently-playing proxied stream.
-struct ActiveStream {
-    channel: String,
-    quality: String,
-    configured_bases: Vec<String>,
-    current_base: Option<String>,
-    tried_bases: Vec<String>,
-    twitch_auth: TwitchAuthService,
-    last_pivot: Option<Instant>,
-    pivoting: bool,
-}
-
-static ACTIVE: Lazy<std::sync::Mutex<Option<ActiveStream>>> =
+/// The channel the solo relay is currently serving, when it is a live stream
+/// (None for VOD/clip playback and when stopped). This is what makes the solo
+/// session addressable by plugins.
+static SOLO_CHANNEL: Lazy<std::sync::Mutex<Option<String>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
 static APP_HANDLE: once_cell::sync::OnceCell<tauri::AppHandle> = once_cell::sync::OnceCell::new();
-/// Consecutive polls where inline filtering couldn't yield a playable (real)
-/// segment — i.e. the region is serving an all-ad window. Drives the pivot.
-static PIVOT_EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
 /// Whether the currently-relayed stream is a low-latency broadcast (the relay
 /// sees Twitch's PREFETCH hints on it). The player reads this via the
 /// `get_stream_low_latency` command to decide whether to ride a ~2s cushion,
@@ -229,165 +217,64 @@ fn segment_redirect(request_path: &str) -> Option<warp::http::Response<Vec<u8>>>
     Some(resp)
 }
 
-/// Store the app handle so the pivot task can emit the `ad-pivot` reload event.
+/// Store the app handle so the relay can emit reload events and reach the
+/// plugin host for `on_ad_window` notifications.
 pub fn set_app_handle(handle: tauri::AppHandle) {
     let _ = APP_HANDLE.set(handle);
 }
 
-/// Arm the pivot for a proxied solo stream. Call ONLY for `mode == "proxy"`;
-/// entitled/direct streams are already ad-free and must not pivot.
-pub fn set_active_stream(
-    channel: String,
-    quality: String,
-    configured_bases: Vec<String>,
-    current_base: Option<String>,
-    twitch_auth: TwitchAuthService,
-) {
-    *ACTIVE.lock().unwrap() = Some(ActiveStream {
-        channel,
-        quality,
-        configured_bases,
-        current_base,
-        tried_bases: Vec::new(),
-        twitch_auth,
-        last_pivot: None,
-        pivoting: false,
+/// Record (or clear) the live channel the solo relay serves. Live starts set
+/// it; VOD/clip starts and stops clear it.
+pub fn set_solo_session(channel: Option<String>) {
+    *SOLO_CHANNEL.lock().unwrap() = channel;
+}
+
+/// True while the solo relay is serving a live channel (the precondition for
+/// a plugin to swap its upstream).
+pub fn solo_session_active() -> bool {
+    SOLO_CHANNEL.lock().unwrap().is_some()
+}
+
+/// Forward an ad-window transition for a relay session to subscribed plugins
+/// as the protocol's `on_ad_window` event. Fire-and-forget; called from the
+/// relay's request path, so the actual emit runs on its own task. Shared with
+/// MultiNook (per-tile stream ids).
+pub(crate) fn notify_ad_window(stream_id: &str, active: bool) {
+    let Some(app) = APP_HANDLE.get() else {
+        return;
+    };
+    let app = app.clone();
+    let stream_id = stream_id.to_string();
+    tokio::spawn(async move {
+        let state = app.state::<crate::models::settings::AppState>();
+        state.plugin_host.emit_ad_window(&stream_id, active).await;
     });
-    PIVOT_EMPTY_POLLS.store(0, Ordering::Relaxed);
 }
 
-/// Disarm the pivot (stream stop, or a non-proxy / entitled start).
-pub fn clear_active_stream() {
-    *ACTIVE.lock().unwrap() = None;
-    PIVOT_EMPTY_POLLS.store(0, Ordering::Relaxed);
-}
-
-/// Reset the in-flight flag and start a cooldown (used after a failed pivot so
-/// we don't hammer re-resolution while ads keep leaking).
-fn end_pivot_with_cooldown() {
-    if let Some(a) = ACTIVE.lock().unwrap().as_mut() {
-        a.pivoting = false;
-        a.last_pivot = Some(Instant::now());
+/// Replace the solo relay's upstream playlist with one a resolution-owning
+/// plugin supplied via `set_upstream`, and tell the player to reload onto it.
+/// This is the mid-stream escalation path (e.g. the plugin re-resolved through
+/// a different region after a leaked ad window).
+pub async fn swap_upstream(playlist_url: String) -> Result<()> {
+    let channel = SOLO_CHANNEL
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no live solo relay session"))?;
+    let port = StreamServer::start_proxy_server(playlist_url).await?;
+    if let Some(app) = APP_HANDLE.get() {
+        let url = format!(
+            "http://localhost:{}/stream.m3u8?t={}",
+            port,
+            chrono::Utc::now().timestamp_millis()
+        );
+        let _ = app.emit(
+            "ad-pivot",
+            serde_json::json!({ "url": url, "channel": channel }),
+        );
     }
-    PIVOT_EMPTY_POLLS.store(0, Ordering::Relaxed);
-}
-
-/// Called after each playlist relay. Inline filtering removes leaked ads
-/// seamlessly; the pivot is the escalation for the rare case filtering can't
-/// help — a region serving an all-ad window (no real segment survives the
-/// filter). When that persists past the debounce and we're not cooling down,
-/// re-resolve through a clean region. Best-effort and non-blocking.
-fn maybe_trigger_pivot(filtering_insufficient: bool) {
-    if !filtering_insufficient {
-        PIVOT_EMPTY_POLLS.store(0, Ordering::Relaxed);
-        return;
-    }
-    if PIVOT_EMPTY_POLLS.fetch_add(1, Ordering::Relaxed) + 1 < PIVOT_DEBOUNCE_POLLS {
-        return;
-    }
-    let go = {
-        let mut guard = ACTIVE.lock().unwrap();
-        match guard.as_mut() {
-            Some(a)
-                if !a.pivoting && a.last_pivot.is_none_or(|t| t.elapsed() >= PIVOT_COOLDOWN) =>
-            {
-                a.pivoting = true;
-                true
-            }
-            _ => false,
-        }
-    };
-    if go {
-        tokio::spawn(async { do_pivot().await });
-    }
-}
-
-async fn do_pivot() {
-    // Gather re-resolve context and mark the leaking base as tried so the race
-    // prefers a different region.
-    let (channel, quality, bases, twitch_auth) = {
-        let mut guard = ACTIVE.lock().unwrap();
-        let a = match guard.as_mut() {
-            Some(a) => a,
-            None => return,
-        };
-        if let Some(cur) = a.current_base.clone() {
-            if !a.tried_bases.contains(&cur) {
-                a.tried_bases.push(cur);
-            }
-        }
-        let clean: Vec<String> = a
-            .configured_bases
-            .iter()
-            .filter(|b| !a.tried_bases.contains(b))
-            .cloned()
-            .collect();
-        let bases = if clean.is_empty() {
-            a.configured_bases.clone() // exhausted — let the race/fallback try anything
-        } else {
-            clean
-        };
-        (
-            a.channel.clone(),
-            a.quality.clone(),
-            bases,
-            a.twitch_auth.clone(),
-        )
-    };
-
-    let oauth = twitch_auth.get_token().await.ok();
-    let result = crate::services::twitch_resolver::resolve_live(
-        &channel,
-        oauth.as_deref(),
-        &bases,
-        true,
-        &quality,
-    )
-    .await;
-
-    match result {
-        Ok(r) => match StreamServer::start_proxy_server(r.url).await {
-            Ok(port) => {
-                crate::services::auth_proxy::set_status(r.status.clone());
-                {
-                    let mut guard = ACTIVE.lock().unwrap();
-                    if let Some(a) = guard.as_mut() {
-                        a.current_base = r.status.proxy_base.clone();
-                        a.last_pivot = Some(Instant::now());
-                        a.pivoting = false;
-                    }
-                }
-                PIVOT_EMPTY_POLLS.store(0, Ordering::Relaxed);
-                if let Some(app) = APP_HANDLE.get() {
-                    let url = format!(
-                        "http://localhost:{}/stream.m3u8?t={}",
-                        port,
-                        chrono::Utc::now().timestamp_millis()
-                    );
-                    let _ = app.emit(
-                        "ad-pivot",
-                        serde_json::json!({
-                            "url": url,
-                            "region": r.status.proxy_region,
-                            "channel": channel,
-                        }),
-                    );
-                }
-                info!(
-                    "[AdPivot] {} re-resolved through region {:?} after a leaked ad",
-                    channel, r.status.proxy_region
-                );
-            }
-            Err(e) => {
-                error!("[AdPivot] {} hot-swap failed: {}", channel, e);
-                end_pivot_with_cooldown();
-            }
-        },
-        Err(e) => {
-            error!("[AdPivot] {} re-resolve failed: {}", channel, e);
-            end_pivot_with_cooldown();
-        }
-    }
+    info!("[StreamServer] {} upstream swapped by a playback plugin", channel);
+    Ok(())
 }
 
 impl StreamServer {
@@ -551,15 +438,13 @@ impl StreamServer {
             }
         };
 
-        // Ad handling on playlists (never on .ts payloads). These bytes are
-        // already in hand, and the live media playlist is re-fetched on every
-        // live-edge poll, so this is free. Two steps:
-        //   1) detect — record markers for the UI counter / diagnostics;
-        //   2) filter — strip leaked ad segments before the player sees them
-        //      (the native port of the plugin's `should_filter_segment`), so a
-        //      proxy leak is removed seamlessly with no reload.
-        // The pivot is the escalation only when filtering yields no real segment
-        // (an all-ad window); it never fires while filtering is coping.
+        // Playlist handling (never on .ts payloads). These bytes are already
+        // in hand, and the live media playlist is re-fetched on every
+        // live-edge poll, so this is free. Detection is read-only: the relay
+        // is ad-neutral and serves the upstream's segments as they are. Ad
+        // markers are only RECORDED, for the UI counter and the `on_ad_window`
+        // plugin event (a resolution-owning plugin escalates by swapping the
+        // upstream; core never edits ads out).
         if !request_path.ends_with(".ts") {
             if let Ok(text) = std::str::from_utf8(&bytes) {
                 detect_ads_in_playlist(text);
@@ -572,22 +457,9 @@ impl StreamServer {
                 // from the RAW text, before promotion rewrites the hints away).
                 let is_low_latency = text.contains("#EXT-X-TWITCH-PREFETCH:");
 
-                let (filtered, dropped, real) =
-                    crate::services::ad_detect::filter_ad_segments(text);
-                maybe_trigger_pivot(dropped > 0 && real == 0);
-                if dropped > 0 {
-                    debug!(
-                        "[StreamServer] stripped {} ad segment(s); {} real remain",
-                        dropped, real
-                    );
-                }
-
-                // Build the served playlist: ad-filtered base, then two rewrites.
-                let mut work: String = if dropped > 0 {
-                    filtered
-                } else {
-                    text.to_string()
-                };
+                // Build the served playlist: two latency rewrites on the
+                // otherwise untouched upstream text.
+                let mut work: String = text.to_string();
 
                 // 1) Lower Twitch's over-declared #EXT-X-TARGETDURATION (6s for ~2s
                 //    segments) to the real segment size so hls.js can ride closer to
@@ -599,9 +471,9 @@ impl StreamServer {
                 // 2) Promote Twitch's low-latency PREFETCH hints into real segments
                 //    (moves the live edge ~4s closer on low-latency channels). hls.js
                 //    ignores the raw PREFETCH tag, so this is what unlocks ~2s. Gated
-                //    on an ad-free playlist so a prefetch ad segment can never be
-                //    fast-pathed past the filter; entitled streams (no ads) always
-                //    promote, normal-latency streams have no hints so this is a no-op.
+                //    on an ad-free playlist so an in-progress ad segment is never
+                //    fast-pathed to the live edge; ad-free streams always promote,
+                //    normal-latency streams have no hints so this is a no-op.
                 //
                 // Promote PREFETCH hints into real segments (the only way to ride ~2s
                 // on a low-latency channel), made refresh-stable by two cooperating
@@ -772,7 +644,7 @@ impl StreamServer {
         *PROXY_URL.lock().await = None;
         *CURRENT_PORT.lock().await = None;
         reset_ad_state();
-        clear_active_stream();
+        set_solo_session(None);
         Ok(())
     }
 
