@@ -173,8 +173,8 @@ const PluginDetailOverlay = ({ entry, sourceName, installed, busy, onInstall, on
                     official={!!entry.official}
                     author={entry.author.name}
                     tier={entry.tier}
-                    sizeClass="h-4 w-4 rounded-full"
-                    glyphSize={10}
+                    sizeClass="h-5 w-5 rounded"
+                    glyphSize={12}
                   />
                   <span className="truncate">by {entry.author.name}</span>
                   {entry.author.verified && (

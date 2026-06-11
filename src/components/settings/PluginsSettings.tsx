@@ -453,7 +453,7 @@ const PluginsSettings = () => {
                         official={!!entry.official}
                         author={entry.author.name}
                         tier={entry.tier}
-                        sizeClass="h-4 w-4 rounded-full"
+                        sizeClass="h-5 w-5 rounded"
                         glyphSize={10}
                       />
                       <span className="truncate">by {entry.author.name}</span>
@@ -558,7 +558,7 @@ const PluginsSettings = () => {
                         official={pluginOfficial}
                         author={plugin.author}
                         tier={plugin.tier}
-                        sizeClass="h-4 w-4 rounded-full"
+                        sizeClass="h-5 w-5 rounded"
                         glyphSize={10}
                       />
                       <span className="truncate">{plugin.author}</span>
