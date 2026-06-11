@@ -49,37 +49,21 @@ Credential lines render in warning color in every tier. Granting the capability 
 |---|---|
 | `ui: panel` | "Adds a settings panel inside StreamNook" |
 
-## Consent flows by tier
+## Consent flow
 
-Tier badges in the plugins page and dialogs: Tier A renders as a green badge labeled "Safe", Tier B as an amber badge labeled "Unofficial interfaces", Tier C as a red badge labeled "Account risk".
+One calm, capability-focused dialog for every plugin, regardless of tier. The tier is quiet curation metadata; it renders as a neutral capability-scope badge ("Standard", "Extended", "Advanced"), never a risk rating.
 
-### Tier A
+The install / enable dialog shows:
 
-Single dialog: plugin name, author, version, source index, the capability lines, buttons Install and Cancel. No risk language.
+- The plugin name, author, version, and tier badge.
+- One line: "This add-on runs as its own program alongside StreamNook. It can do the following:"
+- The capability lines from the granted set (the login-access line, when present, is rendered with mild emphasis because it is the most powerful capability).
+- For an add-on from a community source, one neutral note: "Community sources aren't reviewed by StreamNook. Install add-ons from sources you trust."
+- Buttons: "Cancel" and "Install" (or "Enable").
 
-### Tier B
+No tier-specific warnings, no "account suspension" copy, no acknowledgment checkbox. The capability list is the contract: what the add-on can do is stated plainly and the user confirms. The separate first-credential-handover prompt (below) is the checkpoint for actually handing over the login token.
 
-Same dialog as Tier A plus one fixed line above the capability list:
-
-> "This add-on talks to Twitch or other services over interfaces they do not officially document, in the way a normal viewer would."
-
-### Tier C
-
-Full warning dialog. Fixed copy, with the capability lines rendered beneath it:
-
-> **{name} can get your Twitch account suspended.**
->
-> This add-on automates watching or claiming, or changes how ads are delivered. Twitch's Terms of Service prohibit this, and accounts that do it risk suspension and loss of drops, points, and entitlements.
->
-> StreamNook does not include, ship, or endorse this behavior. You are choosing to install community software that runs as its own program, built by {author}, from a source you added ({source name}).
-
-Below the capability list, a required checkbox:
-
-> [ ] I understand this can get my Twitch account suspended, and I accept that risk.
-
-The confirm button (label: "Install anyway") stays disabled until the checkbox is checked. A single click can never enable a Tier C plugin.
-
-### First credential handover (any tier)
+### First credential handover (any plugin)
 
 Triggered by the plugin's first `get_credential` call for a kind in a session, independent of install-time grants:
 
@@ -101,7 +85,7 @@ Adding a source is itself a consented action:
 >
 > {source URL}
 >
-> StreamNook does not review, host, or endorse plugins from this source. It may list software that violates Twitch's Terms of Service. The source operator's key fingerprint is shown below; future updates from this source must be signed with the same key.
+> StreamNook doesn't review or host what community sources list, so add ones you trust. The source operator's key fingerprint is shown below; future updates from this source must be signed with the same key.
 >
 > {fingerprint}
 
@@ -110,6 +94,6 @@ Buttons: "Add source", "Cancel".
 ## Rules for the host implementation
 
 - Render capability lines from the granted set, not the requested set, everywhere they appear after install.
-- Never collapse the Tier C dialog into a generic confirm. The copy above is part of the frozen contract.
-- The consent dialog must show author, version, tier badge, and source for every install, every update that adds capabilities, and every tier change. An update that requests new capabilities or a higher tier re-runs the full consent flow for its tier.
+- Keep the consent dialog calm and capability-focused; the tier badge is neutral, not a risk label.
+- The consent dialog must show author, version, tier badge, and source for every install and every update that adds capabilities. An update that requests new capabilities re-runs the consent flow.
 - Credential handovers are appended to a per-plugin audit log with timestamp and credential kind. The log is local and user-viewable.

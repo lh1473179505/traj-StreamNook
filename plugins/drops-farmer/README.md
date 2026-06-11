@@ -1,8 +1,8 @@
 # Drops and Points Farmer
 
-A StreamNook plugin that farms Twitch channel points (and, in a later version, mines drops) in the background, across your followed live channels. It runs as a separate program that StreamNook starts and talks to; the StreamNook core contains none of this behavior.
+A StreamNook plugin that farms Twitch channel points (and, in a later version, mines drops) in the background, across your followed live channels. It runs as a separate program that StreamNook starts and talks to. It lives outside the core app as an opt-in add-on, so the core stays lean and you run it only if you want it.
 
-This is a Tier C plugin: it automates watching, which Twitch's Terms of Service prohibit and which can put your account at risk. StreamNook does not ship, host, or endorse it. You install and enable it deliberately.
+It does its own networking and uses your Twitch login, handed over by StreamNook's credential broker after you allow it, so it can watch and claim on your account.
 
 ## What it does
 
@@ -30,4 +30,4 @@ The host runs `target/release/drops-farmer.exe`, as declared in `plugin.toml`.
 
 ## Developing against StreamNook
 
-In StreamNook open Settings, Plugins, Develop, and register this folder. Enabling the plugin runs you through the Tier C consent flow; the first time it needs your token it asks again, specifically for that.
+In StreamNook open Settings, Plugins, Develop, and register this folder. Enabling it shows the capability consent once; the first time it needs your login token it asks again, specifically for that.

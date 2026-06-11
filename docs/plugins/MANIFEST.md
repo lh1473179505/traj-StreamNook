@@ -68,15 +68,17 @@ Unknown capability strings cause install rejection in v1 hosts (fail closed), wi
 
 The manifest itself carries no signature block. Signatures are detached and live alongside the artifact; the author's public key is pinned through the index and the first-install flow. This avoids a self-referential artifact (the manifest travels inside the signed artifact) and keeps one verification path. See SIGNING.md.
 
-## Risk tiers
+## Tiers
 
-| Tier | Definition | Examples | Distribution |
-|---|---|---|---|
-| A | No realistic concern: official APIs, local-only features, read-only integrations, ordinary user actions | Theme packs, layout tools, local stats | Official index |
-| B | Unofficial transport or private APIs used the way a normal viewer would; user-initiated actions with no official equivalent | Alternate emote providers, community badge sources | Official index |
-| C | Real enforcement exposure: watching-without-watching, automated claiming, ad stripping or circumvention, automation against Twitch | Drops or points farming, ad bypass | Community indexes only, explicit risk consent |
+A neutral capability-scope label and curation metadata. It is not a risk rating.
 
-The tier drives the consent flow (CAPABILITIES.md) and where the plugin may be listed (SIGNING.md). The official index never lists Tier C.
+| Tier | Label | Scope | Examples | Distribution |
+|---|---|---|---|---|
+| A | Standard | Official APIs, local-only features, read-only integrations, ordinary user actions | Theme packs, layout tools, local stats | Official index |
+| B | Extended | Additional Twitch and third-party interfaces; user-initiated actions with no official equivalent | Alternate emote providers, community badge sources | Official index |
+| C | Advanced | Power-user add-ons that run their own background work and may use the user's login | Drops or points farming, ad bypass | Community sources |
+
+The tier is curation metadata: it determines where a plugin may be listed (SIGNING.md). Its user-facing presentation is a neutral badge; the consent flow (CAPABILITIES.md) is the same calm, capability-focused dialog for every tier. The official index lists the curated A and B tiers; heavier or specialized add-ons live in community sources.
 
 ## Validation order at install
 

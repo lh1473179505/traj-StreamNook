@@ -198,14 +198,11 @@ const PluginsSettings = () => {
         fail(err);
       }
     };
-    // Tier C never enables on a single click: the full risk dialog gates
-    // every enable. A and B consent at install (index) or first enable
-    // (local-dev folders, tracked per id and version).
+    // Index installs consent at install time. Local-dev folders skip that
+    // step, so they get a one-time consent on first enable (per id+version).
     const devConsentKey = `plugin-consent:${plugin.id}@${plugin.version}`;
     const needsDialog =
-      enabled &&
-      (plugin.tier === 'C' ||
-        (plugin.source === 'local-dev' && !localStorage.getItem(devConsentKey)));
+      enabled && plugin.source === 'local-dev' && !localStorage.getItem(devConsentKey);
     if (needsDialog) {
       setConsent({
         subject: {
@@ -215,6 +212,7 @@ const PluginsSettings = () => {
           tier: plugin.tier,
           caps: plugin.granted,
           sourceName: plugin.source === 'local-dev' ? 'a local folder' : plugin.source,
+          community: false,
           action: 'Enable',
         },
         proceed: async () => {
@@ -251,6 +249,7 @@ const PluginsSettings = () => {
           tier: preview.record.tier,
           caps: preview.record.granted,
           sourceName: source.name,
+          community: !source.official,
           action: 'Install',
         },
         proceed: async () => {
@@ -707,13 +706,12 @@ const PluginsSettings = () => {
               />
             </div>
             <Reveal open={confirmSourceUrl !== null}>
-              <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-500/10 px-3.5 py-3">
-                <p className="text-[12px] leading-relaxed text-amber-200">
-                  Add a community plugin source? StreamNook does not review, host,
-                  or endorse plugins from this source. It may list software that
-                  violates Twitch's Terms of Service. The source's signing key is
-                  verified and pinned when it is added; future updates must be
-                  signed with the same key.
+              <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.04] px-3.5 py-3">
+                <p className="text-[12px] leading-relaxed text-textSecondary">
+                  Add a community plugin source? StreamNook doesn't review or host
+                  what community sources list, so add ones you trust. The source's
+                  signing key is verified and pinned when it's added; future updates
+                  must be signed with the same key.
                 </p>
                 <p className="mt-1.5 truncate font-mono text-[11px] text-amber-200/70">
                   {confirmSourceUrl}

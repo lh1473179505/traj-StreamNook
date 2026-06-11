@@ -123,24 +123,26 @@ export function capabilityLines(caps: GrantedCaps): { text: string; warning: boo
   for (const kind of caps.credentials) {
     if (kind === 'twitch.android') {
       lines.push({
-        text: 'Can request your Twitch login token. With it, this plugin can act as your Twitch account',
+        text: 'Uses your Twitch login, so it can act on your account (watch, claim, and the like)',
         warning: true,
       });
     }
   }
   if (caps.network === 'external') {
     lines.push({
-      text: 'Makes its own network connections, to Twitch and elsewhere. StreamNook does not see or control this traffic',
+      text: 'Makes its own network connections; StreamNook does not route this traffic',
       warning: false,
     });
   } else if (caps.network === 'none') {
-    lines.push({ text: 'Declares that it makes no network connections of its own', warning: false });
+    lines.push({ text: 'Makes no network connections of its own', warning: false });
   }
   return lines;
 }
 
+// Neutral, capability-scope labels. The tier is quiet curation metadata, not
+// a risk rating.
 export const TIER_LABEL: Record<PluginTier, string> = {
-  A: 'Safe',
-  B: 'Unofficial interfaces',
-  C: 'Account risk',
+  A: 'Standard',
+  B: 'Extended',
+  C: 'Advanced',
 };

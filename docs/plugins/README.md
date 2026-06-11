@@ -17,7 +17,7 @@ The deliberate omission that makes this work: the host exposes no generic HTTP m
 | Document | Contents |
 |---|---|
 | [PROTOCOL.md](PROTOCOL.md) | Wire format, lifecycle, the full event and host-method list, error codes, versioning rules |
-| [MANIFEST.md](MANIFEST.md) | The `plugin.toml` schema every plugin ships, and the risk-tier definitions |
+| [MANIFEST.md](MANIFEST.md) | The `plugin.toml` schema every plugin ships, and the tier definitions |
 | [CAPABILITIES.md](CAPABILITIES.md) | The capability vocabulary, what each grants, and the exact consent language shown to users |
 | [SIGNING.md](SIGNING.md) | Artifact signing, the index document format, key pinning, and key rotation |
 | [OFFICIAL.md](OFFICIAL.md) | What an official StreamNook plugin is, branding conventions, and what can never be official |
@@ -32,4 +32,4 @@ Protocol version 1. The surface described in these documents is frozen: breaking
 - Plugin: a separate executable described by a manifest, spawned by the host.
 - Capability: a named permission a plugin declares in its manifest and a user grants at install. Anything not granted is denied by default.
 - Credential broker: the host component that hands credentials to plugins, with first-use consent and an audit log.
-- Index: a signed JSON document listing installable plugins. The official index lists safe tiers only; riskier plugins reach users only through community indexes the user adds explicitly.
+- Index: a signed JSON document listing installable plugins. The official index lists a curated set; heavier or specialized add-ons reach users through community indexes the user adds explicitly.

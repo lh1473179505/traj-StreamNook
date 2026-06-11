@@ -12,11 +12,11 @@ An official plugin is one that is:
 
 All three must hold. A fork of an official plugin signed by someone else is not official, and the key pinning in SIGNING.md is what makes that distinction enforceable rather than cosmetic.
 
-## The hard boundary
+## Scope of the official index
 
-The official index lists Tier A and B plugins only; this is decision 10 in the migration audit and the host enforces it (a Tier C entry in the official index is ignored). That means the behaviors the modular effort exists to distance from the core, drops and points farming and ad bypass, can never ship as official plugins, carry StreamNook branding, or be signed with the project key. They reach users only through community sources the user adds deliberately, published under their own community identity. Anything else would rebuild in the marketplace exactly the liability the extraction removed from the binary.
+The official index lists the curated A and B tiers only; this is decision 10 in the migration audit and the host enforces it (a tier C entry in the official index is ignored). The official set is the focused, first-party collection. Heavier or specialized add-ons such as background drops and points automation or ad-bypass resolution are tier C: they are community-distributed, published under their authors' own identity, and not part of the first-party set. Keeping them out of the official index keeps that set focused and first-party, which is the same reason the core itself stays lean.
 
-What CAN be official: safe extensions. Emote and badge providers, chat tools, overlays, notifiers, integrations, and similar Tier A and B functionality.
+What is official: emote and badge providers, chat tools, overlays, notifiers, integrations, and similar A and B functionality.
 
 ## Branding conventions
 
