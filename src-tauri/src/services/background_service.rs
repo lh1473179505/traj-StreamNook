@@ -5,7 +5,9 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Duration};
 
-use crate::models::drops::{ChannelPointsClaim, ChannelPointsClaimType, ReservedStreamSlot};
+use crate::models::drops::{
+    ChannelPointsClaim, ChannelPointsClaimType, DropsSettings, ReservedStreamSlot,
+};
 use crate::models::settings::Settings;
 use crate::services::channel_points_service::ChannelPointsService;
 use crate::services::channel_points_websocket_service::ChannelPointsWebSocketService;
@@ -40,6 +42,15 @@ impl BackgroundService {
             app_handle,
             reserved_slot: Arc::new(RwLock::new(ReservedStreamSlot::default())),
         }
+    }
+
+    /// Push updated drops settings into the running service. The service holds
+    /// its own clone of Settings taken at construction, so without this push a
+    /// runtime toggle change would not reach the farming loops until the next
+    /// launch (in particular, turning farming off would not stop them).
+    pub async fn update_drops_settings(&self, drops: DropsSettings) {
+        let mut settings = self.settings.write().await;
+        settings.drops = drops;
     }
 
     pub async fn start(&self) {

@@ -28,7 +28,15 @@ pub async fn update_drops_settings(
     // Also persist to the main settings file so changes survive app restart
     {
         let mut app_settings = state.settings.lock().map_err(|e| e.to_string())?;
-        app_settings.drops = settings;
+        app_settings.drops = settings.clone();
+    }
+
+    // Keep the running background service in sync: it holds its own clone of
+    // Settings, so without this push the farming loops would not see a toggle
+    // change until the next launch.
+    {
+        let bg_service = state.background_service.lock().await;
+        bg_service.update_drops_settings(settings).await;
     }
 
     // Save to disk

@@ -26,6 +26,14 @@ pub async fn save_settings(settings: Settings, state: State<'_, AppState>) -> Re
         *state_settings = settings.clone();
     }
 
+    // Keep the running background service's settings clone in sync so drops
+    // toggle changes made through a whole-settings save reach the farming
+    // loops immediately instead of at next launch.
+    {
+        let bg_service = state.background_service.lock().await;
+        bg_service.update_drops_settings(settings.drops.clone()).await;
+    }
+
     // Save to our custom location in the same directory as cache
     let settings_path = get_settings_path()?;
     let json = serde_json::to_string_pretty(&settings)
