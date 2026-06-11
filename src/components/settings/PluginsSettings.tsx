@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,6 +9,7 @@ import {
   KeyRound,
   Plus,
   Puzzle,
+  Search,
   ScrollText,
   Settings2,
   Trash2,
@@ -139,7 +140,9 @@ const PluginsSettings = () => {
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState<string | null>(null);
-  const [browse, setBrowse] = useState<{ url: string; entries: IndexEntry[] } | null>(null);
+  const [catalog, setCatalog] = useState<{ entry: IndexEntry; source: SourceInfo }[]>([]);
+  const [search, setSearch] = useState('');
+  const [tab, setTab] = useState<'discover' | 'installed' | 'sources'>('discover');
   const [detail, setDetail] = useState<{ entry: IndexEntry; source: SourceInfo } | null>(null);
   const [newSourceUrl, setNewSourceUrl] = useState('');
   const [showAddSource, setShowAddSource] = useState(false);
@@ -185,18 +188,44 @@ const PluginsSettings = () => {
     };
   }, [refresh]);
 
-  // Show the curated StreamNook catalog up front: browse the built-in source
-  // once it has loaded, so its approved plugins appear without a manual click.
-  const didInitBrowse = useRef(false);
+  // Aggregate every source's listings into one searchable catalog, so the
+  // store shows all approved plugins up front (official source first, so it
+  // wins when the same plugin id appears in more than one source).
   useEffect(() => {
-    if (didInitBrowse.current) return;
-    const official = sources.find((s) => s.official);
-    if (!official) return;
-    didInitBrowse.current = true;
-    invoke<IndexEntry[]>('plugins_browse_source', { url: official.url })
-      .then((entries) => setBrowse({ url: official.url, entries }))
-      .catch((err) => Logger.error('[Plugins] auto-browse failed:', err));
+    let cancelled = false;
+    (async () => {
+      const ordered = [...sources].sort((a, b) => Number(b.official) - Number(a.official));
+      const combined: { entry: IndexEntry; source: SourceInfo }[] = [];
+      const seen = new Set<string>();
+      for (const source of ordered) {
+        try {
+          const entries = await invoke<IndexEntry[]>('plugins_browse_source', { url: source.url });
+          for (const entry of entries) {
+            if (seen.has(entry.id)) continue;
+            seen.add(entry.id);
+            combined.push({ entry, source });
+          }
+        } catch {
+          /* an unreachable source just contributes nothing */
+        }
+      }
+      if (!cancelled) setCatalog(combined);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [sources]);
+
+  const filteredCatalog = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return catalog;
+    return catalog.filter(
+      ({ entry }) =>
+        entry.name.toLowerCase().includes(q) ||
+        entry.description.toLowerCase().includes(q) ||
+        entry.author.name.toLowerCase().includes(q)
+    );
+  }, [catalog, search]);
 
   const fail = (err: unknown) => {
     Logger.error('[Plugins] action failed:', err);
@@ -346,23 +375,137 @@ const PluginsSettings = () => {
     }
   };
 
-  const doBrowse = async (source: SourceInfo) => {
-    if (browse?.url === source.url) {
-      setBrowse(null);
-      return;
-    }
-    try {
-      const entries = await invoke<IndexEntry[]>('plugins_browse_source', { url: source.url });
-      setBrowse({ url: source.url, entries });
-    } catch (err) {
-      fail(err);
-    }
-  };
-
   return (
-    <div className="space-y-9">
+    <div className="flex flex-col gap-5">
+      {/* App-store tabs + search */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-1 rounded-lg bg-white/[0.03] p-1">
+          {(['discover', 'installed', 'sources'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={`rounded-md px-3.5 py-1.5 text-[12px] font-medium capitalize transition-colors ${
+                tab === t ? 'bg-white/[0.08] text-textPrimary' : 'text-textSecondary hover:text-textPrimary'
+              }`}
+            >
+              {t === 'installed' && plugins.length > 0 ? `Installed (${plugins.length})` : t}
+            </button>
+          ))}
+        </div>
+        {tab === 'discover' && (
+          <div className="relative ml-auto min-w-[200px] flex-1 sm:max-w-[320px]">
+            <Search
+              size={14}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-textMuted"
+            />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search plugins..."
+              className="glass-input w-full rounded-lg py-2 pl-9 pr-3 text-[13px] text-textPrimary"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Discover */}
+      {tab === 'discover' &&
+        (catalog.length === 0 ? (
+          <div className="flex flex-col items-center py-12 text-center">
+            <div
+              className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl"
+              style={{ background: 'rgba(165, 185, 150, 0.14)', boxShadow: TILE_BEVEL }}
+            >
+              <Puzzle className="h-6 w-6 text-textPrimary" strokeWidth={2} />
+            </div>
+            <h2 className="text-[16px] font-semibold text-textPrimary">No plugins to show</h2>
+            <p className="mt-1.5 max-w-[400px] text-[13px] leading-relaxed text-textSecondary">
+              Approved plugins from your sources appear here. If this stays empty, the
+              sources may be unreachable, or you can add one under Sources.
+            </p>
+          </div>
+        ) : filteredCatalog.length === 0 ? (
+          <p className="py-12 text-center text-[13px] text-textSecondary">
+            No plugins match your search.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {filteredCatalog.map(({ entry, source }) => {
+              const installedPlugin = plugins.find((p) => p.id === entry.id);
+              const hasUpdate = Boolean(
+                installedPlugin && compareVersions(entry.version, installedPlugin.version) > 0
+              );
+              const isCurrent = Boolean(installedPlugin) && !hasUpdate;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => setDetail({ entry, source })}
+                  className="flex flex-col rounded-xl border border-white/5 bg-white/[0.03] p-3.5 text-left transition-colors hover:bg-white/[0.06]"
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="flex h-11 w-11 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl"
+                      style={{ background: TIER_TINT[entry.tier], boxShadow: TILE_BEVEL }}
+                    >
+                      {entry.icon_url ? (
+                        <img
+                          src={entry.icon_url}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <Puzzle size={20} strokeWidth={2.25} className="text-textPrimary" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-semibold text-textPrimary">
+                        {entry.name}
+                      </span>
+                      <span className="block truncate text-[11px] text-textMuted">
+                        by {entry.author.name}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-2.5 flex items-center gap-1.5">
+                    {entry.official && <OfficialBadge />}
+                    <TierBadge tier={entry.tier} />
+                  </div>
+                  <p
+                    className="mt-2 flex-1 text-[12px] leading-relaxed text-textSecondary"
+                    style={{
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {entry.description}
+                  </p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className="text-[11px] text-textMuted">v{entry.version}</span>
+                    <span
+                      className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
+                        isCurrent
+                          ? 'border-white/5 bg-white/[0.03] text-textMuted'
+                          : 'border-accent/25 bg-accent/15 text-textPrimary'
+                      }`}
+                    >
+                      {hasUpdate ? 'Update' : isCurrent ? 'Installed' : 'Get'}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+
       {/* Installed */}
-      {plugins.length === 0 ? (
+      {tab === 'installed' &&
+        (plugins.length === 0 ? (
         <div className="flex flex-col items-center py-10 text-center">
           <div
             className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl"
@@ -370,15 +513,15 @@ const PluginsSettings = () => {
           >
             <Puzzle className="h-6 w-6 text-textPrimary" strokeWidth={2} />
           </div>
-          <h2 className="text-[16px] font-semibold text-textPrimary">No plugins yet</h2>
+          <h2 className="text-[16px] font-semibold text-textPrimary">Nothing installed yet</h2>
           <p className="mt-1.5 max-w-[400px] text-[13px] leading-relaxed text-textSecondary">
-            Plugins are separate programs StreamNook starts and supervises. The app
-            ships with none; anything that appears here is something you chose to
-            add, and it only ever gets the capabilities you grant it.
+            Plugins are separate programs StreamNook starts and supervises. Browse
+            the store to add one; it only ever gets the capabilities you grant it,
+            and you turn it on here when you're ready.
           </p>
           <div className="mt-5 flex gap-2">
-            <Chip label="Add a source" emphasis onClick={() => setShowAddSource(true)} />
-            <Chip label="Register a dev folder" onClick={() => setShowDevelop(true)} />
+            <Chip label="Browse the store" emphasis onClick={() => setTab('discover')} />
+            <Chip label="Manage sources" onClick={() => setTab('sources')} />
           </div>
         </div>
       ) : (
@@ -573,9 +716,11 @@ const PluginsSettings = () => {
             );
           })}
         </SettingsSection>
-      )}
+        ))}
 
       {/* Sources */}
+      {tab === 'sources' && (
+        <div className="flex flex-col gap-9">
       <SettingsSection
         label="Sources"
         description="Where plugins come from. Each source signs its listings; the key is pinned the first time you add it, and StreamNook does not review or host what community sources list."
@@ -606,10 +751,6 @@ const PluginsSettings = () => {
                 </p>
               </div>
               <div className="flex flex-shrink-0 items-center gap-1.5">
-                <Chip
-                  label={browse?.url === source.url ? 'Hide' : 'Browse'}
-                  onClick={() => doBrowse(source)}
-                />
                 {!source.official && (
                   <IconAction
                     hint="Remove source"
@@ -617,7 +758,6 @@ const PluginsSettings = () => {
                     onClick={async () => {
                       try {
                         await invoke('plugins_remove_source', { url: source.url });
-                        if (browse?.url === source.url) setBrowse(null);
                         await refresh();
                       } catch (err) {
                         fail(err);
@@ -629,68 +769,6 @@ const PluginsSettings = () => {
                 )}
               </div>
             </div>
-
-            <Reveal open={browse?.url === source.url}>
-              <div className="mt-3 space-y-1.5">
-                {browse?.entries.length === 0 && (
-                  <p className="px-1 py-1 text-[12px] text-textSecondary">
-                    This source lists no plugins.
-                  </p>
-                )}
-                {browse?.entries.map((entry) => {
-                  const installedPlugin = plugins.find((p) => p.id === entry.id);
-                  const hasUpdate = Boolean(
-                    installedPlugin && compareVersions(entry.version, installedPlugin.version) > 0
-                  );
-                  const isCurrent = Boolean(installedPlugin) && !hasUpdate;
-                  return (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => setDetail({ entry, source })}
-                      className="flex w-full items-center gap-3 rounded-lg bg-white/[0.03] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06]"
-                    >
-                      <div
-                        className="flex h-9 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded-lg"
-                        style={{ background: TIER_TINT[entry.tier], boxShadow: TILE_BEVEL }}
-                      >
-                        {entry.icon_url ? (
-                          <img
-                            src={entry.icon_url}
-                            alt=""
-                            className="h-full w-full object-cover"
-                            loading="lazy"
-                          />
-                        ) : (
-                          <Puzzle size={16} strokeWidth={2.25} className="text-textPrimary" />
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-[13px] font-medium text-textPrimary">
-                            {entry.name}
-                          </span>
-                          {entry.official && <OfficialBadge />}
-                          <TierBadge tier={entry.tier} />
-                        </div>
-                        <p className="mt-0.5 truncate text-[11px] text-textSecondary">
-                          v{entry.version} by {entry.author.name} · {entry.description}
-                        </p>
-                      </div>
-                      <span
-                        className={`flex-shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-medium ${
-                          isCurrent
-                            ? 'border-white/5 bg-white/[0.03] text-textMuted'
-                            : 'border-accent/25 bg-accent/15 text-textPrimary'
-                        }`}
-                      >
-                        {hasUpdate ? 'Update' : isCurrent ? 'Installed' : 'View'}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </Reveal>
           </div>
         ))}
 
@@ -783,6 +861,8 @@ const PluginsSettings = () => {
           </div>
         )}
       </SettingsSection>
+        </div>
+      )}
 
       <PluginDetailOverlay
         entry={detail?.entry ?? null}
