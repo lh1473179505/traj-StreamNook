@@ -293,6 +293,24 @@ const ChatSettings = () => {
         </SettingsRow>
       </SettingsSection>
 
+      <SettingsSection label="Channel Points">
+        <SettingsRow
+          title="Auto-claim bonus chests"
+          description="Automatically collect the bonus chest on the stream you're watching. When off, a claim button appears on the points icon so you can grab it yourself. Background farming of channels you're not watching is a separate opt-in plugin."
+          control={
+            <Toggle
+              enabled={settings.auto_claim_points_watching ?? false}
+              onChange={() =>
+                updateSettings({
+                  ...settings,
+                  auto_claim_points_watching: !(settings.auto_claim_points_watching ?? false),
+                })
+              }
+            />
+          }
+        />
+      </SettingsSection>
+
       <SettingsSection label="Chat Design">
         <SettingsRow
           title="Show Message Dividers"

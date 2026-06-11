@@ -857,6 +857,14 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   // Channel points state
   const [channelPoints, setChannelPoints] = useState<number | null>(null);
   const [channelPointsHovered, setChannelPointsHovered] = useState(false);
+  // Bonus-chest claim for the actively watched channel. When auto-claim is on
+  // it is collected silently; when off a clickable chest surfaces on the
+  // points button. Background farming of channels you are not watching is a
+  // separate opt-in plugin, not this.
+  const [availableClaim, setAvailableClaim] = useState<{ id: string; channelId: string } | null>(null);
+  const [claimingChest, setClaimingChest] = useState(false);
+  const claimingChestRef = useRef(false);
+  const autoClaimWatching = useAppStore((s) => s.settings.auto_claim_points_watching ?? false);
   const [showChannelPointsMenu, setShowChannelPointsMenu] = useState(false);
   const [isLoadingChannelPoints, setIsLoadingChannelPoints] = useState(false);
   const [customPointsName, setCustomPointsName] = useState<string | null>(null);
@@ -1410,6 +1418,67 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       fetchChannelPoints().finally(() => setIsLoadingChannelPoints(false));
     }
   }, [currentStream?.user_login, fetchChannelPoints]);
+
+  // Claim the watched channel's bonus chest (manual click or auto).
+  const claimWatchedChest = useCallback(async (claimId: string, channelId: string) => {
+    if (claimingChestRef.current) return;
+    claimingChestRef.current = true;
+    setClaimingChest(true);
+    try {
+      await invoke('claim_channel_points', {
+        channelId,
+        channelName: currentStream?.user_login ?? '',
+        claimId,
+      });
+      setAvailableClaim(null);
+      fetchChannelPoints();
+    } catch (err) {
+      Logger.warn('[ChatWidget] bonus chest claim failed:', err);
+    } finally {
+      claimingChestRef.current = false;
+      setClaimingChest(false);
+    }
+  }, [currentStream?.user_login, fetchChannelPoints]);
+
+  // Detect the bonus chest on the channel being watched; auto-claim it when
+  // the setting is on, otherwise surface a clickable chest. Polls each minute
+  // while watching. Silent if the user has no drops login or the channel has
+  // no points (the chest just never appears).
+  useEffect(() => {
+    if (!currentStream?.user_id || !currentStream?.user_login) {
+      setAvailableClaim(null);
+      return;
+    }
+    let cancelled = false;
+    const channelId = currentStream.user_id;
+    const channelName = currentStream.user_login;
+    const check = async () => {
+      try {
+        const claim = await invoke<{ id: string } | null>('check_channel_points', {
+          channelId,
+          channelName,
+        });
+        if (cancelled) return;
+        if (claim && claim.id) {
+          if (useAppStore.getState().settings.auto_claim_points_watching) {
+            await claimWatchedChest(claim.id, channelId);
+          } else {
+            setAvailableClaim({ id: claim.id, channelId });
+          }
+        } else {
+          setAvailableClaim(null);
+        }
+      } catch {
+        // No drops login or channel not eligible: nothing to claim.
+      }
+    };
+    check();
+    const interval = setInterval(check, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [currentStream?.user_id, currentStream?.user_login, claimWatchedChest]);
 
   // Fetch resub notification when entering a new channel
   useEffect(() => {
@@ -4007,8 +4076,24 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
               )}
 
               <div className="flex items-center gap-2 min-w-0">
+                {/* Bonus chest claim — appears on the watched channel when a
+                    chest is ready and auto-claim is off. Click to collect. */}
+                {availableClaim && !autoClaimWatching && (
+                  <Tooltip content="Claim bonus points" side="top">
+                    <button
+                      onClick={() => claimWatchedChest(availableClaim.id, availableClaim.channelId)}
+                      disabled={claimingChest}
+                      aria-label="Claim channel points bonus"
+                      className="flex-shrink-0 self-center flex items-center justify-center w-9 h-9 text-accent-neon transition-opacity duration-200 animate-pulse hover:animate-none disabled:opacity-50"
+                    >
+                      <svg width={18} height={18} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M20 7h-1.7a3 3 0 0 0-4.3-4 3 3 0 0 0-4 0 3 3 0 0 0-4.3 4H4a1 1 0 0 0-1 1v3a1 1 0 0 0 1 1v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1ZM13 5a1 1 0 1 1 2 0 1 1 0 0 1-1 1h-1V5Zm-4-1a1 1 0 0 1 1 1v1H9a1 1 0 0 1 0-2Zm2 16H6v-6h5v6Zm0-8H5V9h6v3Zm7 8h-5v-6h5v6Zm1-8h-6V9h6v3Z" />
+                      </svg>
+                    </button>
+                  </Tooltip>
+                )}
                 {/* Channel Points button - click to open rewards menu, hover for balance */}
-                <div 
+                <div
                   ref={channelPointsRef}
                   className="relative flex-shrink-0 self-center flex items-center"
                   onMouseEnter={() => setChannelPointsHovered(true)}
