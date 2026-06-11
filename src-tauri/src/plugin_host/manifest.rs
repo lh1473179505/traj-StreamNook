@@ -74,6 +74,25 @@ pub struct PluginManifest {
     pub runtime: RuntimeSpec,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// Named hooks this plugin fills. The host exposes hooks; plugins fill
+    /// them; the host never names a specific plugin. See docs/plugins/HOOKS.md.
+    #[serde(default)]
+    pub contributes: Contributes,
+}
+
+/// What a plugin plugs into. All entries are namespaced ids (e.g. `drops.mine`)
+/// defined by the host feature that exposes the hook, not by the plugin.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Contributes {
+    /// Actions the plugin handles when the host UI invokes them.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// Status slots the plugin pushes values into for the host UI to show.
+    #[serde(default)]
+    pub status: Vec<String>,
+    /// Feature flags the plugin provides; the host lights up the matching UI.
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +107,17 @@ pub struct RuntimeSpec {
 
 fn default_transport() -> String {
     "stdio".to_string()
+}
+
+/// A dotted, lowercase identifier with at least two segments, e.g. `drops.mine`.
+fn is_namespaced_id(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() >= 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
 }
 
 fn default_network() -> String {
@@ -212,6 +242,19 @@ impl PluginManifest {
         for u in &self.capabilities.ui {
             if !KNOWN_UI.contains(&u.as_str()) {
                 bail!("unknown ui capability '{u}' (requires a newer StreamNook?)");
+            }
+        }
+        // Contributions are free-form, plugin-author-supplied ids, but must be
+        // namespaced (e.g. `drops.mine`) so they cannot collide with internals.
+        for hook in self
+            .contributes
+            .actions
+            .iter()
+            .chain(&self.contributes.status)
+            .chain(&self.contributes.provides)
+        {
+            if !is_namespaced_id(hook) {
+                bail!("contribution '{hook}' must be a namespaced id like 'feature.name'");
             }
         }
         Ok(())

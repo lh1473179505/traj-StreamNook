@@ -9,6 +9,10 @@ export interface GrantedCaps {
   credentials: string[];
   network: string;
   ui: string[];
+  // Named hooks the plugin fills (see HOOKS.md).
+  actions?: string[];
+  status?: string[];
+  provides?: string[];
 }
 
 export interface PluginInfo {
@@ -135,6 +139,9 @@ export function capabilityLines(caps: GrantedCaps): { text: string; warning: boo
     });
   } else if (caps.network === 'none') {
     lines.push({ text: 'Makes no network connections of its own', warning: false });
+  }
+  if (caps.provides && caps.provides.length > 0) {
+    lines.push({ text: "Powers some of the app's built-in controls", warning: false });
   }
   return lines;
 }

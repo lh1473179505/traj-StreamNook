@@ -209,6 +209,32 @@ pub async fn plugins_fetch_readme(url: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Invokes a named hook action on whichever plugin handles it. Core UI uses
+/// this to delegate a control (e.g. start mining a campaign) without knowing
+/// which plugin backs it.
+#[tauri::command]
+pub async fn plugins_invoke_action(
+    action: String,
+    args: Value,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    state
+        .plugin_host
+        .invoke_action(&action, args)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The id of a running plugin that provides a feature, or null. Core UI uses
+/// this to light up controls only when something backs them.
+#[tauri::command]
+pub async fn plugins_provides(
+    feature: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    Ok(state.plugin_host.provides(&feature).await)
+}
+
 #[tauri::command]
 pub async fn plugins_report_stream_event(
     kind: String,

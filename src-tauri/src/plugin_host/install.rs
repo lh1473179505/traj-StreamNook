@@ -330,6 +330,9 @@ fn record_from_manifest(
             credentials: manifest.capabilities.credentials.clone(),
             network: manifest.capabilities.network.clone(),
             ui: manifest.capabilities.ui.clone(),
+            actions: manifest.contributes.actions.clone(),
+            status: manifest.contributes.status.clone(),
+            provides: manifest.contributes.provides.clone(),
         },
         credential_consent,
     }

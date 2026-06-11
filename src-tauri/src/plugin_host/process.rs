@@ -25,6 +25,14 @@ use super::HostInner;
 pub enum SupCmd {
     /// Forward an event notification (already filtered by hooks).
     Event { method: String, params: Value },
+    /// Send a request to the plugin and return its response (used to invoke a
+    /// hooked action the plugin handles). The reply carries the plugin's
+    /// result, or an error string.
+    Request {
+        method: String,
+        params: Value,
+        reply: oneshot::Sender<std::result::Result<Value, String>>,
+    },
     /// Graceful shutdown (disable, uninstall, or app exit).
     Shutdown,
 }
@@ -247,6 +255,8 @@ async fn run_once(host: &Arc<HostInner>, record: &InstalledPlugin) -> RunOutcome
             record.id.clone(),
             super::RunningHandle {
                 hooks: hooks.iter().cloned().collect(),
+                actions: record.granted.actions.iter().cloned().collect(),
+                provides: record.granted.provides.iter().cloned().collect(),
                 cmd_tx,
                 plugin_version: plugin_version.clone(),
             },
@@ -274,6 +284,18 @@ async fn run_once(host: &Arc<HostInner>, record: &InstalledPlugin) -> RunOutcome
                     if notify_frame(&writer, &method, params).await.is_err() {
                         break RunOutcome::Crashed("write failed while sending an event".into());
                     }
+                }
+                Some(SupCmd::Request { method, params, reply }) => {
+                    // Run the request off the select loop so it keeps serving.
+                    let writer = writer.clone();
+                    let pending = pending.clone();
+                    let next_id = next_id.clone();
+                    tokio::spawn(async move {
+                        let result = request(&writer, &pending, &next_id, &method, params, 30)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(result);
+                    });
                 }
                 Some(SupCmd::Shutdown) | None => {
                     let _ = request(&writer, &pending, &next_id, "shutdown", json!(null), 3).await;
@@ -398,12 +420,14 @@ async fn route_frame(
                 let _ = write_frame(&mut *w, &response).await;
             });
         }
-        // Notification from the plugin. Only `log` is meaningful; everything
-        // else is dropped (notifications cannot receive errors).
+        // Notification from the plugin. `log` and `set_status` are handled;
+        // everything else is dropped (notifications cannot receive errors).
         (false, Some(method)) => {
+            let params = frame.get("params").cloned().unwrap_or(Value::Null);
             if method == "log" {
-                let params = frame.get("params").cloned().unwrap_or(Value::Null);
                 super::broker::handle_log_notification(record, &params);
+            } else if method == "set_status" {
+                super::broker::handle_set_status(host, record, &params);
             } else {
                 debug!(
                     "[PluginHost] {} sent unsupported notification '{}'",

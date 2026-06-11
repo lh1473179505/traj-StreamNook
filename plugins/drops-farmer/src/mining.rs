@@ -296,7 +296,6 @@ impl RecoveryMode {
 
 #[derive(Clone)]
 pub struct MiningSettings {
-    pub enabled: bool,
     pub priority_games: Vec<String>, // lowercase game names
     pub excluded_games: Vec<String>, // lowercase game names
     pub priority_mode: PriorityMode,
@@ -309,7 +308,6 @@ pub struct MiningSettings {
 impl Default for MiningSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
             priority_games: Vec::new(),
             excluded_games: Vec::new(),
             priority_mode: PriorityMode::PriorityOnly,
@@ -321,11 +319,23 @@ impl Default for MiningSettings {
     }
 }
 
+/// What the miner is currently told to do. Set by the panel toggle or, once
+/// the cockpit drives it, by hooked actions from the host UI.
+#[derive(Clone, PartialEq)]
+pub enum MiningTarget {
+    Stopped,
+    /// Pick the best campaign by the user's priority and mode.
+    Auto,
+    /// Mine one specific campaign by id.
+    Campaign(String),
+}
+
 /// Drives drops mining: one campaign and one channel at a time, advancing the
 /// drop with minute-watched, recovering from stalls and offline or
 /// category-changed channels, and claiming completed drops.
 pub struct Miner {
     pub settings: MiningSettings,
+    pub target: MiningTarget,
     campaigns: Vec<Campaign>,
     campaigns_tick: u64,
     current: Option<MiningChannel>,
@@ -340,6 +350,7 @@ impl Miner {
     pub fn new() -> Self {
         Self {
             settings: MiningSettings::default(),
+            target: MiningTarget::Stopped,
             campaigns: Vec::new(),
             campaigns_tick: 0,
             current: None,
@@ -348,6 +359,34 @@ impl Miner {
             last_progress_tick: 0,
             blacklist: HashMap::new(),
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.target != MiningTarget::Stopped
+    }
+
+    pub fn set_target(&mut self, target: MiningTarget) {
+        if target == MiningTarget::Stopped {
+            self.current = None;
+        }
+        self.target = target;
+    }
+
+    /// A status snapshot for the host UI's drops.status slot.
+    pub fn status(&self) -> Value {
+        let campaign = self
+            .current
+            .as_ref()
+            .and_then(|_| self.campaigns.iter().find(|c| c.game_id == self.current_game_id));
+        json!({
+            "active": self.is_active(),
+            "is_mining": self.current.is_some(),
+            "game_name": campaign.map(|c| c.game_name.clone()),
+            "campaign_id": campaign.map(|c| c.id.clone()),
+            "channel_login": self.current.as_ref().map(|c| c.login.clone()),
+            "current_minutes": campaign.and_then(|c| c.active_drop()).map(|d| d.current_minutes),
+            "required_minutes": campaign.and_then(|c| c.active_drop()).map(|d| d.required_minutes),
+        })
     }
 
     fn game_excluded(&self, game_name: &str) -> bool {
@@ -438,7 +477,7 @@ impl Miner {
         tick_count: u64,
         host: &Host,
     ) -> Option<String> {
-        if !self.settings.enabled {
+        if !self.is_active() {
             self.current = None;
             return None;
         }
@@ -468,8 +507,16 @@ impl Miner {
             }
         }
 
-        let ranked = self.ranked_campaigns();
-        let Some(campaign) = ranked.first().cloned() else {
+        let campaign = match &self.target {
+            MiningTarget::Stopped => None,
+            MiningTarget::Auto => self.ranked_campaigns().into_iter().next(),
+            MiningTarget::Campaign(id) => self
+                .campaigns
+                .iter()
+                .find(|c| &c.id == id && c.active_drop().is_some())
+                .cloned(),
+        };
+        let Some(campaign) = campaign else {
             self.current = None;
             return None;
         };

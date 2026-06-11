@@ -324,6 +324,24 @@ fn validate_panel_schema(schema: &Value) -> Result<(), RpcErr> {
     Ok(())
 }
 
+/// `set_status` notification: the plugin pushes a value into a named status
+/// slot it declared. The host forwards it to the frontend as a `plugin://status`
+/// event for whatever UI region owns that slot. Slots the plugin did not
+/// declare are ignored.
+pub fn handle_set_status(host: &Arc<HostInner>, record: &InstalledPlugin, params: &Value) {
+    let Some(slot) = params.get("slot").and_then(|s| s.as_str()) else {
+        return;
+    };
+    if !record.granted.status.iter().any(|s| s == slot) {
+        return;
+    }
+    let value = params.get("value").cloned().unwrap_or(Value::Null);
+    let _ = host.app.emit(
+        "plugin://status",
+        json!({ "plugin_id": record.id, "slot": slot, "value": value }),
+    );
+}
+
 /// `log` notification from a plugin: append to its log file, never answered.
 pub fn handle_log_notification(record: &InstalledPlugin, params: &Value) {
     let level = params.get("level").and_then(|v| v.as_str()).unwrap_or("info");

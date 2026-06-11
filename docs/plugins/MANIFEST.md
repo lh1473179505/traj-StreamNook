@@ -64,6 +64,19 @@ The whole permission contract. The consent dialog renders exactly this block in 
 
 Unknown capability strings cause install rejection in v1 hosts (fail closed), with one exception: index metadata may carry forward-looking strings for newer hosts, and the install dialog of an older host shows them as "requires a newer StreamNook".
 
+## `[contributes]`
+
+Optional. The named hooks the plugin fills so the native UI can delegate to it. See HOOKS.md for the full mechanism.
+
+```toml
+[contributes]
+actions  = ["drops.mine", "drops.stop"]   # actions the plugin handles when the UI invokes them
+status   = ["drops.status"]               # status slots the plugin pushes into for the UI to show
+provides = ["drops.mining"]               # feature flags the host uses to light up matching controls
+```
+
+Each entry is a namespaced id (`feature.name`), defined by the host feature that exposes the hook. Non-namespaced ids are rejected at install.
+
 ## Signing fields
 
 The manifest itself carries no signature block. Signatures are detached and live alongside the artifact; the author's public key is pinned through the index and the first-install flow. This avoids a self-referential artifact (the manifest travels inside the signed artifact) and keeps one verification path. See SIGNING.md.

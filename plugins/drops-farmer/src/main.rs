@@ -10,7 +10,7 @@ mod mining;
 mod protocol;
 mod twitch;
 
-use mining::{MiningSettings, PriorityMode, RecoveryMode};
+use mining::{MiningSettings, MiningTarget, PriorityMode, RecoveryMode};
 use protocol::{read_loop, Host, Inbound};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -137,11 +137,18 @@ impl Farmer {
             self.settings.priority_logins = string_list(list);
         }
 
-        // Drops mining.
-        let m: &mut MiningSettings = &mut self.miner.settings;
+        // Drops mining. The panel toggle maps to auto-mining; the cockpit can
+        // override with a specific campaign through a hooked action.
         if let Some(active) = values.get("mining_active").and_then(|v| v.as_bool()) {
-            m.enabled = active;
+            if active {
+                if !self.miner.is_active() {
+                    self.miner.set_target(MiningTarget::Auto);
+                }
+            } else {
+                self.miner.set_target(MiningTarget::Stopped);
+            }
         }
+        let m: &mut MiningSettings = &mut self.miner.settings;
         if let Some(list) = values.get("priority_games").and_then(|v| v.as_array()) {
             m.priority_games = string_list(list);
         }
@@ -173,6 +180,38 @@ impl Farmer {
             }
         }
         self.host.log("info", "drops-farmer initialized").await;
+    }
+
+    /// Handles a hooked action the host UI invoked (e.g. the Drops center's
+    /// Mine button), then replies to the host and pushes a fresh status so the
+    /// cockpit updates without waiting for the next tick.
+    async fn handle_action(&mut self, id: Value, action: &str, args: &Value) {
+        let result = match action {
+            "drops.mine" => {
+                match args.get("campaign_id").and_then(|v| v.as_str()) {
+                    Some(cid) => self.miner.set_target(MiningTarget::Campaign(cid.to_string())),
+                    None => self.miner.set_target(MiningTarget::Auto),
+                }
+                json!({ "ok": true })
+            }
+            "drops.mine-auto" | "drops.mine-all" => {
+                self.miner.set_target(MiningTarget::Auto);
+                json!({ "ok": true })
+            }
+            "drops.stop" => {
+                self.miner.set_target(MiningTarget::Stopped);
+                json!({ "ok": true })
+            }
+            other => {
+                let _ = self
+                    .host
+                    .respond_error(id, -32601, &format!("unknown action: {other}"))
+                    .await;
+                return;
+            }
+        };
+        let _ = self.host.respond(id, result).await;
+        self.host.set_status("drops.status", self.miner.status()).await;
     }
 
     fn on_followed_live(&mut self, params: &Value) {
@@ -274,7 +313,7 @@ impl Farmer {
 
     async fn on_tick(&mut self) {
         let cp_active = self.settings.active && !self.live.is_empty();
-        if !cp_active && !self.miner.settings.enabled {
+        if !cp_active && !self.miner.is_active() {
             return;
         }
         let Some(cred) = self.ensure_credential().await else {
@@ -306,6 +345,9 @@ impl Farmer {
                 &self.host,
             )
             .await;
+        if self.miner.is_active() {
+            self.host.set_status("drops.status", self.miner.status()).await;
+        }
 
         if !cp_active {
             return;
@@ -414,6 +456,9 @@ async fn main() {
                 if let Some(values) = params.get("values") {
                     farmer.apply_panel_values(values);
                 }
+            }
+            Inbound::Action { id, action, args } => {
+                farmer.handle_action(id, &action, &args).await;
             }
         }
     }

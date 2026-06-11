@@ -42,6 +42,10 @@ pub struct ActiveChannel {
 /// A plugin process that completed its handshake.
 pub struct RunningHandle {
     pub hooks: HashSet<String>,
+    /// Actions this plugin handles and features it provides (the hooks it
+    /// fills), used to route action calls and light up UI generically.
+    pub actions: HashSet<String>,
+    pub provides: HashSet<String>,
     pub cmd_tx: mpsc::UnboundedSender<SupCmd>,
     pub plugin_version: String,
 }
@@ -590,6 +594,45 @@ impl PluginHost {
     /// True while at least one plugin process is still up (exit waits on this).
     pub async fn has_running(&self) -> bool {
         !self.inner.running.read().await.is_empty()
+    }
+
+    /// Invokes a named action on whichever running plugin handles it, and
+    /// returns its result. This is how a core UI hands off a control to a
+    /// plugin without knowing which plugin (or that any plugin) exists.
+    pub async fn invoke_action(&self, action: &str, args: Value) -> Result<Value> {
+        let cmd_tx = {
+            let running = self.inner.running.read().await;
+            running
+                .values()
+                .find(|h| h.actions.contains(action))
+                .map(|h| h.cmd_tx.clone())
+        };
+        let Some(cmd_tx) = cmd_tx else {
+            bail!("no plugin handles the action '{action}'");
+        };
+        let (reply, rx) = oneshot::channel();
+        cmd_tx
+            .send(SupCmd::Request {
+                method: "invoke_action".into(),
+                params: json!({ "action": action, "args": args }),
+                reply,
+            })
+            .map_err(|_| anyhow!("the plugin handling '{action}' is not running"))?;
+        match rx.await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => bail!("the plugin failed to handle '{action}': {e}"),
+            Err(_) => bail!("the plugin did not respond to '{action}'"),
+        }
+    }
+
+    /// The id of a running plugin that provides a feature, if any. Lets a core
+    /// UI light up (or gray out) controls based on whether something backs them.
+    pub async fn provides(&self, feature: &str) -> Option<String> {
+        let running = self.inner.running.read().await;
+        running
+            .iter()
+            .find(|(_, h)| h.provides.contains(feature))
+            .map(|(id, _)| id.clone())
     }
 
     async fn find_info(&self, plugin_id: &str) -> Option<PluginInfo> {

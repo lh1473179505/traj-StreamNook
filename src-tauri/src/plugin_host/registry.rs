@@ -56,6 +56,15 @@ pub struct GrantedCaps {
     pub network: String,
     #[serde(default)]
     pub ui: Vec<String>,
+    /// Named hooks the plugin fills (actions it handles, status slots it
+    /// pushes, feature flags it provides). The host routes generically by
+    /// these names and never references a specific plugin.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub status: Vec<String>,
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

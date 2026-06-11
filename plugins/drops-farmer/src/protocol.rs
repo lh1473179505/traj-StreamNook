@@ -97,6 +97,13 @@ impl Host {
             .await;
     }
 
+    /// Pushes a value into a named status slot the host UI shows.
+    pub async fn set_status(&self, slot: &str, value: Value) {
+        let _ = self
+            .notify("set_status", json!({ "slot": slot, "value": value }))
+            .await;
+    }
+
     pub async fn notify_user(&self, level: &str, message: impl Into<String>) {
         let _ = self
             .request("notify", json!({ "level": level, "message": message.into() }))
@@ -150,6 +157,9 @@ pub enum Inbound {
     FollowedLive(Value),
     WatchTick,
     PanelChange(Value),
+    /// A hooked action the host UI invoked. The engine handles it and replies
+    /// to `id` via the Host so the host's call resolves.
+    Action { id: Value, action: String, args: Value },
 }
 
 /// Reads stdin for the life of the process. Resolves responses, answers
@@ -184,6 +194,17 @@ pub async fn read_loop(stdin: Stdin, host: Host, tx: tokio::sync::mpsc::Sender<I
                     }
                     "ping" => {
                         let _ = host.respond(id, json!({})).await;
+                    }
+                    "invoke_action" => {
+                        // The engine handles it and replies to `id` itself.
+                        let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                        let action = params
+                            .get("action")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let args = params.get("args").cloned().unwrap_or(Value::Null);
+                        let _ = tx.send(Inbound::Action { id, action, args }).await;
                     }
                     "shutdown" => {
                         let _ = host.respond(id, Value::Null).await;
