@@ -90,7 +90,8 @@ export interface PanelField {
     | 'text'
     | 'string_list' // add-and-remove chip rows (not a textarea)
     | 'channel_list' // Twitch channel search picker (avatars, live dots)
-    | 'slider'; // range with a value readout
+    | 'slider' // range with a value readout
+    | 'folder'; // directory path with a native browse dialog
   label: string;
   description?: string;
   default?: unknown;
@@ -135,6 +136,9 @@ export function capabilityLines(caps: GrantedCaps): { text: string; warning: boo
   }
   if (caps.events.includes('on_followed_live')) {
     lines.push({ text: 'Sees which channels you follow are live', warning: false });
+  }
+  if (caps.events.includes('on_chat_message')) {
+    lines.push({ text: 'Sees chat messages in channels you open', warning: false });
   }
   if (caps.events.includes('on_ad_window')) {
     lines.push({ text: 'Knows when an ad break is detected', warning: false });

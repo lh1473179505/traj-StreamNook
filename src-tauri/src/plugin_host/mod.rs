@@ -729,6 +729,19 @@ impl PluginHost {
     /// Forwards an ad-window transition for a relay session (the solo player
     /// or a MultiNook tile) to plugins subscribed to `on_ad_window`. Called by
     /// the relays whenever their read-only ad detection changes state.
+    /// True when at least one running plugin subscribed to chat messages.
+    /// Chat parsing checks this before building the per-message payload, so
+    /// the hot IRC path pays nothing while no plugin listens.
+    pub async fn wants_chat_messages(&self) -> bool {
+        self.inner.any_hook("on_chat_message").await
+    }
+
+    /// Fans one parsed chat message out to subscribed plugins. The payload is
+    /// the lean wire shape from PROTOCOL.md, built by the chat service.
+    pub async fn emit_chat_message(&self, params: Value) {
+        self.inner.emit_event("on_chat_message", params).await;
+    }
+
     pub async fn emit_ad_window(&self, stream_id: &str, active: bool) {
         self.inner
             .emit_event(
