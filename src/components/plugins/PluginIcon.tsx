@@ -67,7 +67,7 @@ export function PluginIcon({
           src={resolved}
           alt=""
           // The portrait brand logo is shown whole; square avatars/icons fill.
-          className={`h-full w-full ${isLogo ? 'object-contain p-1.5' : 'object-cover'}`}
+          className={`h-full w-full ${isLogo ? 'object-contain' : 'object-cover'}`}
           loading="lazy"
           onError={() => setFailed(true)}
         />

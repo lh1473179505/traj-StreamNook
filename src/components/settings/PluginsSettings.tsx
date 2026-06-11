@@ -443,23 +443,21 @@ const PluginsSettings = () => {
                   onClick={() => setDetail({ entry, source })}
                   className="flex flex-col rounded-xl border border-white/5 bg-white/[0.03] p-3.5 text-left transition-colors hover:bg-white/[0.06]"
                 >
-                  <div className="flex items-center gap-3">
-                    <PluginIcon
-                      iconUrl={entry.icon_url}
-                      official={!!entry.official}
-                      author={entry.author.name}
-                      tier={entry.tier}
-                      sizeClass="h-11 w-11 rounded-xl"
-                      glyphSize={20}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-semibold text-textPrimary">
-                        {entry.name}
-                      </span>
-                      <span className="block truncate text-[11px] text-textMuted">
-                        by {entry.author.name}
-                      </span>
-                    </div>
+                  <div className="min-w-0">
+                    <span className="block truncate text-[14px] font-semibold text-textPrimary">
+                      {entry.name}
+                    </span>
+                    <span className="mt-1 flex items-center gap-1.5 text-[11px] text-textMuted">
+                      <PluginIcon
+                        iconUrl={entry.icon_url}
+                        official={!!entry.official}
+                        author={entry.author.name}
+                        tier={entry.tier}
+                        sizeClass="h-4 w-4 rounded-full"
+                        glyphSize={10}
+                      />
+                      <span className="truncate">by {entry.author.name}</span>
+                    </span>
                   </div>
                   <div className="mt-2.5 flex items-center gap-1.5">
                     {entry.official && <OfficialBadge />}
@@ -536,13 +534,6 @@ const PluginsSettings = () => {
             return (
               <div key={plugin.id} className="glass-panel rounded-lg p-4">
                 <div className="flex items-center gap-3.5">
-                  <PluginIcon
-                    official={pluginOfficial}
-                    author={plugin.author}
-                    tier={plugin.tier}
-                    sizeClass="h-10 w-10 rounded-lg"
-                    glyphSize={18}
-                  />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-[14px] font-semibold text-textPrimary">
@@ -557,12 +548,20 @@ const PluginsSettings = () => {
                     </div>
                     <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-textSecondary">
                       {plugin.running && (
-                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        <span className="inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-400" />
                       )}
-                      <span className="truncate">
+                      <span className="flex-shrink-0">
                         {plugin.running ? 'Running' : plugin.enabled ? 'Starting' : 'Off'} · v
-                        {plugin.version} by {plugin.author}
+                        {plugin.version} by
                       </span>
+                      <PluginIcon
+                        official={pluginOfficial}
+                        author={plugin.author}
+                        tier={plugin.tier}
+                        sizeClass="h-4 w-4 rounded-full"
+                        glyphSize={10}
+                      />
+                      <span className="truncate">{plugin.author}</span>
                     </p>
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-0.5">

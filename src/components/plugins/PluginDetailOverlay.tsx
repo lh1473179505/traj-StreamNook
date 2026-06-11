@@ -159,24 +159,24 @@ const PluginDetailOverlay = ({ entry, sourceName, installed, busy, onInstall, on
 
             {/* Identity row */}
             <div className="flex flex-shrink-0 items-center gap-3.5 px-5 py-4">
-              <PluginIcon
-                iconUrl={entry.icon_url}
-                official={!!entry.official}
-                author={entry.author.name}
-                tier={entry.tier}
-                sizeClass="h-12 w-12 rounded-xl"
-                glyphSize={22}
-              />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="truncate text-[15px] font-semibold text-textPrimary">
+                  <span className="truncate text-[16px] font-semibold text-textPrimary">
                     {entry.name}
                   </span>
                   {entry.official && <OfficialBadge />}
                   <TierBadge tier={entry.tier} />
                 </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-textSecondary">
-                  <span className="truncate">{entry.author.name}</span>
+                <div className="mt-1 flex items-center gap-1.5 text-[12px] text-textSecondary">
+                  <PluginIcon
+                    iconUrl={entry.icon_url}
+                    official={!!entry.official}
+                    author={entry.author.name}
+                    tier={entry.tier}
+                    sizeClass="h-4 w-4 rounded-full"
+                    glyphSize={10}
+                  />
+                  <span className="truncate">by {entry.author.name}</span>
                   {entry.author.verified && (
                     <Tooltip content={`Identity verified by ${sourceName}`} delay={200}>
                       <BadgeCheck size={13} className="flex-shrink-0 text-accent" />
