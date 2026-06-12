@@ -59,7 +59,9 @@ export function activate(api: PluginApi): void {
 
   api.ui.registerOverlay({ id: 'lists-panel', Component: ListsOverlay });
 
-  api.settings.registerPanel(ListsSettings);
+  // Feature-detect: settings panels were added after the first UI-plugin host,
+  // so degrade gracefully on an older app instead of failing the whole plugin.
+  api.settings?.registerPanel?.(ListsSettings);
 
   api.ui.registerSlot('modlogs.dock', {
     id: 'lists',

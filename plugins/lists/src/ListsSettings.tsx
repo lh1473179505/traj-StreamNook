@@ -33,13 +33,13 @@ export const ListsSettings: FC = () => {
             role="switch"
             aria-checked={titleBarButton}
             onClick={() => setTitleBarButton(!titleBarButton)}
-            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-              titleBarButton ? 'bg-accent/80' : 'bg-white/10'
+            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+              titleBarButton ? 'bg-accent' : 'bg-gray-600'
             }`}
           >
             <span
-              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-                titleBarButton ? 'translate-x-[18px]' : 'translate-x-0.5'
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                titleBarButton ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
           </button>
