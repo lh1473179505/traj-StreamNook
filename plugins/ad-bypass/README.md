@@ -1,4 +1,4 @@
-# Ad Bypass
+# Ad-Free Playback
 
 A StreamNook plugin that resolves live streams through community playlist proxies so they play without stitched ads. It runs as a separate program that StreamNook starts and talks to.
 
