@@ -13,7 +13,6 @@ The consent dialog renders one line per granted capability, using exactly these 
 | `events: on_stream_start`, `on_stream_stop`, `on_channel_change`, `on_watch_tick` | "Knows which channel you are watching" |
 | `events: on_followed_live` | "Sees which channels you follow are live" |
 | `events: on_chat_message` | "Sees chat messages in channels you open" |
-| `events: on_ad_window` | "Knows when an ad break is detected" |
 | `events: on_settings_change` | "Is told when certain app settings change" |
 | `events: on_panel_change` | Covered by the settings panel line below |
 

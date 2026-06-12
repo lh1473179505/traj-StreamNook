@@ -140,9 +140,6 @@ export function capabilityLines(caps: GrantedCaps): { text: string; warning: boo
   if (caps.events.includes('on_chat_message')) {
     lines.push({ text: 'Sees chat messages in channels you open', warning: false });
   }
-  if (caps.events.includes('on_ad_window')) {
-    lines.push({ text: 'Knows when an ad break is detected', warning: false });
-  }
   if (caps.events.includes('on_settings_change')) {
     lines.push({ text: 'Is told when certain app settings change', warning: false });
   }

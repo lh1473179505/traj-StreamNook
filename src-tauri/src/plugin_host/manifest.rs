@@ -12,7 +12,6 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "on_watch_tick",
     "on_followed_live",
     "on_chat_message",
-    "on_ad_window",
     "on_settings_change",
     "on_panel_change",
 ];

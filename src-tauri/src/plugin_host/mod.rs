@@ -726,9 +726,6 @@ impl PluginHost {
         Ok(())
     }
 
-    /// Forwards an ad-window transition for a relay session (the solo player
-    /// or a MultiNook tile) to plugins subscribed to `on_ad_window`. Called by
-    /// the relays whenever their read-only ad detection changes state.
     /// True when at least one running plugin subscribed to chat messages.
     /// Chat parsing checks this before building the per-message payload, so
     /// the hot IRC path pays nothing while no plugin listens.
@@ -742,18 +739,6 @@ impl PluginHost {
         self.inner.emit_event("on_chat_message", params).await;
     }
 
-    pub async fn emit_ad_window(&self, stream_id: &str, active: bool) {
-        self.inner
-            .emit_event(
-                "on_ad_window",
-                json!({
-                    "stream_id": stream_id,
-                    "active": active,
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                }),
-            )
-            .await;
-    }
 
     /// Graceful shutdown of every running plugin (used at app exit).
     pub async fn shutdown_all(&self) {

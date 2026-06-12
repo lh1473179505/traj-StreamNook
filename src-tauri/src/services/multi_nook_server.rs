@@ -279,11 +279,13 @@ impl MultiNookServer {
             return Ok(empty_cors(404));
         }
 
-        let url = proxy_url
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| warp::reject::not_found())?;
+        // A keep-alive connection can deliver one last poll after the tile relay
+        // stops (the abort only kills the accept loop). A warp rejection would be
+        // a bare 404 without CORS headers, which the webview logs as a CORS error;
+        // answer with a CORS'd 404 instead.
+        let Some(url) = proxy_url.lock().await.clone() else {
+            return Ok(empty_cors(404));
+        };
 
         let response = match HTTP_CLIENT.get(&url).send().await {
             Ok(res) => res,
@@ -311,26 +313,23 @@ impl MultiNookServer {
         };
 
         // Detect ad markers for the per-tile state — same shared logic as the
-        // solo player, and read-only the same way: the tile relay is
-        // ad-neutral and serves the upstream's segments untouched. Transitions
-        // feed the `on_ad_window` plugin event keyed by this tile's stream id.
-        // This server only relays the media playlist (not .ts), so every body
-        // is a playlist worth scanning; free, no extra requests.
+        // solo player, and read-only the same way: the tile relay is ad-neutral
+        // and serves the upstream's segments untouched. The detected state
+        // gates the tile's low-latency prefetch promotion (`ads_now`) so it
+        // never fast-forwards into an ad. For playback only; the core never
+        // reports ads to a plugin. This server only relays the media playlist
+        // (not .ts), so every body is a playlist worth scanning; free.
         if let Ok(text) = std::str::from_utf8(&bytes) {
-            let (was, ads_now) = {
+            let ads_now = {
                 let mut st = ad_state.lock().unwrap();
-                let was = st.ads_present;
                 if let Some(n) = ad_detect::update(&mut st, text) {
                     info!(
                         "[MultiNook] ad markers detected on '{}' (break #{}): {:?}",
                         stream_id, n, st.matched_markers
                     );
                 }
-                (was, st.ads_present)
+                st.ads_present
             };
-            if was != ads_now {
-                crate::services::stream_server::notify_ad_window(&stream_id, ads_now);
-            }
 
             // Build the served playlist exactly like the solo relay
             // (stream_server): lower Twitch's over-declared

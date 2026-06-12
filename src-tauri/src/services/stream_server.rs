@@ -60,31 +60,23 @@ fn reset_ad_state() {
 }
 
 /// Fold a relayed media playlist into the solo stream's ad-detection state.
-/// Detection here is read-only: the relay serves the playlist untouched and
-/// only RECORDS whether ad markers are present, for the UI counter and the
-/// `on_ad_window` plugin event. On an ad-state transition the subscribed
-/// plugins are notified; a resolution-owning plugin reacts by handing the
-/// relay a new upstream via `set_upstream`.
+/// Read-only and for the core's own playback only: the relay serves the
+/// playlist untouched and only RECORDS whether ad markers are present, which
+/// gates the low-latency prefetch promotion (`ads_now`) so it never
+/// fast-forwards into an ad. The core never acts on ads beyond that and never
+/// reports them to a plugin; a resolution-owning plugin detects ads itself.
 fn detect_ads_in_playlist(playlist: &str) {
-    let (was, now) = {
-        let mut st = AD_STATE.lock().unwrap();
-        let was = st.ads_present;
-        if let Some(n) = crate::services::ad_detect::update(&mut st, playlist) {
-            info!(
-                "[StreamServer] ad markers detected in live playlist (break #{}): {:?}",
-                n, st.matched_markers
-            );
-        }
-        (was, st.ads_present)
-    };
-    if was != now {
-        notify_ad_window(SOLO_STREAM_ID, now);
+    let mut st = AD_STATE.lock().unwrap();
+    if let Some(n) = crate::services::ad_detect::update(&mut st, playlist) {
+        info!(
+            "[StreamServer] ad markers detected in live playlist (break #{}): {:?}",
+            n, st.matched_markers
+        );
     }
 }
 
 /// The stream id the solo relay session is addressed by in the plugin
-/// protocol (`set_upstream`, `on_ad_window`). MultiNook tiles use their own
-/// per-tile ids.
+/// protocol (`set_upstream`). MultiNook tiles use their own per-tile ids.
 pub const SOLO_STREAM_ID: &str = "solo";
 
 /// The channel the solo relay is currently serving, when it is a live stream
@@ -250,21 +242,6 @@ pub fn solo_session_active() -> bool {
     SOLO_CHANNEL.lock().unwrap().is_some()
 }
 
-/// Forward an ad-window transition for a relay session to subscribed plugins
-/// as the protocol's `on_ad_window` event. Fire-and-forget; called from the
-/// relay's request path, so the actual emit runs on its own task. Shared with
-/// MultiNook (per-tile stream ids).
-pub(crate) fn notify_ad_window(stream_id: &str, active: bool) {
-    let Some(app) = APP_HANDLE.get() else {
-        return;
-    };
-    let app = app.clone();
-    let stream_id = stream_id.to_string();
-    tokio::spawn(async move {
-        let state = app.state::<crate::models::settings::AppState>();
-        state.plugin_host.emit_ad_window(&stream_id, active).await;
-    });
-}
 
 /// Replace the solo relay's upstream playlist with one a resolution-owning
 /// plugin supplied via `set_upstream`, and tell the player to reload onto it.
@@ -365,11 +342,14 @@ impl StreamServer {
         raw_query: String,
         proxy_url: Arc<Mutex<Option<String>>>,
     ) -> Result<warp::http::Response<Vec<u8>>, warp::Rejection> {
-        let manifest_url = proxy_url
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| warp::reject::not_found())?;
+        // None means stop() already ran. The abort only kills the accept loop;
+        // hyper's per-connection tasks survive it, so the player's keep-alive
+        // connection can still deliver a final poll. A warp rejection here would
+        // answer it with a bare 404 (no CORS headers), which the webview reports
+        // as a CORS error. Answer with a CORS'd 404 so the straggler dies quietly.
+        let Some(manifest_url) = proxy_url.lock().await.clone() else {
+            return Ok(empty_cors(404));
+        };
 
         // Handle CORS Preflight INSTANTLY without hitting Twitch
         if method == warp::http::Method::OPTIONS {

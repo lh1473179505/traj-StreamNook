@@ -75,7 +75,7 @@ Contracts for the hooks core currently exposes. Hook names are owned by the host
   }
   ```
 
-  `stream_id` is the relay session id this resolution will serve (`solo`, or a multi-stream tile id); the plugin keeps it to address later `set_upstream` calls and to match `on_ad_window` events. `auth_master` is core's own direct resolution when it succeeded; a plugin that resolves through an anonymous source can merge the above-1080p tiers from it, since anonymous masters are capped at 1080p.
+  `stream_id` is the relay session id this resolution will serve (`solo`, or a multi-stream tile id); the plugin keeps it to address later `set_upstream` calls. `auth_master` is core's own direct resolution when it succeeded; a plugin that resolves through an anonymous source can merge the above-1080p tiers from it, since anonymous masters are capped at 1080p.
 
   Response, either shape:
 
@@ -88,7 +88,7 @@ Contracts for the hooks core currently exposes. Hook names are owned by the host
 
 - Provides: `playback.resolve` makes core invoke the action at stream start.
 
-The mid-stream loop pairs this hook with the protocol surface: core emits `on_ad_window` on every ad-state transition for a relay session, and the plugin answers a leaked ad window by re-resolving and calling `set_upstream` with a fresh media-playlist URL for that session.
+The mid-stream loop is entirely the plugin's own: it detects ad windows in its own process (polling the playlist it resolved) and answers a leaked ad by re-resolving and calling `set_upstream` with a fresh media-playlist URL for that session. Core never scans for ads on the plugin's behalf; it only exposes `playback.resolve` and `set_upstream`, neither of which is ad-specific.
 
 ## Why this shape
 

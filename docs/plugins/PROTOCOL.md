@@ -96,7 +96,6 @@ Shared shape, the channel object:
 | `on_watch_tick` | `{ "active_channel_id": "12345", "ts": "<RFC 3339>" }` | Periodic tick, nominally every 60 seconds while the app runs. `active_channel_id` is null when nothing is playing. Plugins must not assume exact cadence |
 | `on_followed_live` | `{ "channels": [<channel>...] }` | The set of live followed channels, sent after startup and whenever the host refreshes it |
 | `on_chat_message` | `{ "channel": "somechannel", "message": <chat message> }` | A chat line arrived in a channel the app has open, or was sent from the app. One event per message; delivery starts once the plugin is running and a chat connection exists, with no history replay |
-| `on_ad_window` | `{ "stream_id": "solo", "active": true, "ts": "<RFC 3339>" }` | Read-only ad detection state changed for a relay session (`stream_id` is a relay session id, see `set_upstream`). Emitted on every transition: `active: true` when ad markers appear in the served playlist, `active: false` when they clear |
 | `on_settings_change` | `{ "keys": ["..."] }` | Reserved. Host settings keys the host chooses to expose changed. No keys are guaranteed in v1 |
 | `on_panel_change` | `{ "values": { "<key>": <value> } }` | The user changed values in the plugin's settings panel (requires `ui: panel`) |
 
@@ -133,9 +132,9 @@ Params: `{}`. Result: `{ "channels": [<channel>...] }`.
 
 Params: `{ "stream_id": "solo", "playlist_url": "https://..." }`. Result: `{}`.
 
-Replaces the upstream playlist the host's local relay serves for that stream and tells the player to reload onto it. This is how a resolution-owning plugin feeds the relay mid-stream (for example after `on_ad_window` reported a leaked ad on the current upstream). `playlist_url` is a media playlist matching the session's quality, not a master. Errors: `unknown_stream` if no relay session matches `stream_id`.
+Replaces the upstream playlist the host's local relay serves for that stream and tells the player to reload onto it. This is how a resolution-owning plugin feeds the relay mid-stream (for example after the plugin itself detected a leaked ad on the current upstream). `playlist_url` is a media playlist matching the session's quality, not a master. Errors: `unknown_stream` if no relay session matches `stream_id`.
 
-Relay session ids: the single player's session is the literal id `solo`; each multi-stream tile uses its own tile id. A plugin learns the id for a session from the args of the action that asked it to resolve (see the hook catalog in HOOKS.md); `on_ad_window` events carry the same ids.
+Relay session ids: the single player's session is the literal id `solo`; each multi-stream tile uses its own tile id. A plugin learns the id for a session from the args of the action that asked it to resolve (see the hook catalog in HOOKS.md).
 
 ### get_credential
 
