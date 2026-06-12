@@ -1617,10 +1617,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       set({ streamUrl: result.url, activeQuality: result.quality, adSource: adSourceFrom(result), availableQualities: result.available ?? [], currentStream: info, currentMediaType: 'live', originalMediaUrl: null, isHomeActive: false });
 
-      // Start chat first - only if authenticated and not skipping refresh
+      // Warm up the chat bridge so ChatWidget connects instantly when it
+      // mounts. claim:false because the widget's acquireChannel registers the
+      // real consumer; a claim here has no matching release, so it would pin
+      // the channel's refcount above its consumer count and the room could
+      // never PART after the stream closes.
       if (get().isAuthenticated && !skipChatRefresh) {
         try {
-          await invoke('start_chat', { channel });
+          await invoke('start_chat', { channel, claim: false });
         } catch (e) {
           Logger.warn('Could not start chat:', e);
           // Chat connection failed, but stream can still work
@@ -2054,10 +2058,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         isHomeActive: false
       });
 
-      // Connect chat
+      // Warm up the chat bridge. claim:false for the same reason as the live
+      // path: ChatWidget's acquireChannel registers the real consumer, and an
+      // unreleased claim here would keep the room joined forever.
       if (get().isAuthenticated) {
         try {
-          await invoke('start_chat', { channel });
+          await invoke('start_chat', { channel, claim: false });
           Logger.debug(`[Offline Chat] Connected chat for ${channel}`);
         } catch (e) {
           Logger.warn(`[Offline Chat] Could not connect chat for ${channel}:`, e);

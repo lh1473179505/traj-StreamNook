@@ -22,8 +22,8 @@ pub struct SendResult {
 pub struct ChatService;
 
 impl ChatService {
-    pub async fn start(channel: &str, state: &AppState) -> Result<u16> {
-        IrcService::start(channel, state).await
+    pub async fn start(channel: &str, state: &AppState, claim: bool) -> Result<u16> {
+        IrcService::start(channel, state, claim).await
     }
 
     pub async fn send_message(
@@ -161,5 +161,15 @@ impl ChatService {
 
     pub async fn leave_channel(channel: &str) -> Result<()> {
         IrcService::leave_channel(channel).await
+    }
+
+    /// Re-JOIN after a bridge reconnect without claiming a consumer slot.
+    /// Mirrors `join_channel`'s emote-cache population: after a true cold
+    /// restart the per-channel emote cache was cleared with the rest of the
+    /// IRC state, so segment parsing needs it refilled.
+    pub async fn rejoin_channel(channel: &str, state: &AppState) -> Result<()> {
+        IrcService::rejoin_channel(channel).await?;
+        IrcService::fetch_and_store_emotes(channel, state.emote_service.clone()).await;
+        Ok(())
     }
 }

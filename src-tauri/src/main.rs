@@ -587,6 +587,7 @@ fn main() {
             send_chat_message,
             join_chat_channel,
             leave_chat_channel,
+            rejoin_chat_channel,
             start_multi_chat,
             load_mod_logs,
             append_mod_log,

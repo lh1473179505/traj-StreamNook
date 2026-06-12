@@ -25,9 +25,17 @@ pub async fn get_chat_log_dir(state: State<'_, AppState>) -> Result<String, Stri
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// `claim` (default true) marks the caller as a real chat consumer that will
+/// later balance itself with `leave_chat_channel`. Pass false for ensure-only
+/// calls (the stream-start warm-up) so the channel can still PART once its
+/// actual consumers are gone.
 #[tauri::command]
-pub async fn start_chat(channel: String, state: State<'_, AppState>) -> Result<u16, String> {
-    ChatService::start(&channel, &state)
+pub async fn start_chat(
+    channel: String,
+    claim: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<u16, String> {
+    ChatService::start(&channel, &state, claim.unwrap_or(true))
         .await
         .map_err(|e| e.to_string())
 }
@@ -72,6 +80,20 @@ pub async fn leave_chat_channel(channel: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Re-JOIN a channel after a bridge reconnect. Unlike `join_chat_channel`,
+/// this claims no consumer slot: the caller's original claim either still
+/// stands (only the window-local WebSocket died) or was wiped with the dead
+/// connection. Re-attaching is not a new consumer either way.
+#[tauri::command]
+pub async fn rejoin_chat_channel(
+    channel: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ChatService::rejoin_channel(&channel, &state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn start_multi_chat(
     channels: Vec<String>,
@@ -82,7 +104,7 @@ pub async fn start_multi_chat(
     }
 
     // Start with the first channel
-    let port = ChatService::start(&channels[0], &state)
+    let port = ChatService::start(&channels[0], &state, true)
         .await
         .map_err(|e| e.to_string())?;
 

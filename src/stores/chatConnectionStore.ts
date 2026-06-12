@@ -566,19 +566,27 @@ async function reconnectAll() {
   }
   intentionalDisconnect = false;
 
-  // Cold-start with the first channel; JOIN the rest. The Rust `start_chat`
-  // calls `stop()` at the top so this also resets the server-side state cleanly.
+  // Re-attach with the first channel, then re-JOIN the rest. In the usual
+  // case only this window's local WebSocket died and the Rust IRC service is
+  // still alive, holding the consumer refcounts our channels claimed when they
+  // were acquired. Re-attaching must therefore NOT claim new consumer slots
+  // (`reattach: true` / `rejoin_chat_channel`): a second claim per reconnect
+  // has no matching release, the refcount never returns to zero, and the
+  // channel keeps streaming IRC traffic after every consumer is gone. When the
+  // Rust side really is dead, `start_chat` cold-starts it and the no-claim
+  // path still ends with each channel JOINed; `leave_channel` PARTs cleanly
+  // from a zero count.
   const first = channels[0];
   const firstSlice = state.channels.get(first);
   if (!firstSlice) return;
 
   try {
-    await connectBridgeForFirstChannel(first, firstSlice.channelId);
+    await connectBridgeForFirstChannel(first, firstSlice.channelId, true);
     for (const ch of channels.slice(1)) {
       try {
-        await invoke('join_chat_channel', { channel: ch });
+        await invoke('rejoin_chat_channel', { channel: ch });
       } catch (err) {
-        Logger.error(`[ChatStore] Failed to JOIN ${ch} during reconnect:`, err);
+        Logger.error(`[ChatStore] Failed to re-JOIN ${ch} during reconnect:`, err);
       }
     }
   } catch (err) {
@@ -648,6 +656,10 @@ let chatFirstFrameLogged = true;
 async function connectBridgeForFirstChannel(
   channel: string,
   channelId: string | null,
+  // True when re-attaching after a reconnect: the channel's consumer slot was
+  // already claimed when the slice was created, so the bridge bring-up must
+  // not claim another (see reconnectAll).
+  reattach = false,
 ): Promise<void> {
   if (wsConnecting) {
     Logger.debug('[ChatStore] WS already connecting, skipping duplicate request');
@@ -658,7 +670,7 @@ async function connectBridgeForFirstChannel(
     Logger.debug(`[ChatStore] Invoking start_chat for ${channel}`);
     chatConnectStartedAt = performance.now();
     chatFirstFrameLogged = false;
-    const port = await invoke<number>('start_chat', { channel });
+    const port = await invoke<number>('start_chat', { channel, claim: !reattach });
     Logger.info(`[ChatPerf] start_chat (Rust IRC connect + bridge spawn) took ${Math.round(performance.now() - chatConnectStartedAt)}ms`);
     useChatConnectionStore.setState({ wsPort: port });
 

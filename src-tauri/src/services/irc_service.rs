@@ -48,12 +48,17 @@ static WS_PORT: OnceLock<Mutex<Option<u16>>> = OnceLock::new();
 static USER_BADGES_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 static ROOM_STATE_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 static CHANNEL_EMOTES: OnceLock<Mutex<HashMap<String, EmoteSet>>> = OnceLock::new();
-// Per-channel consumer refcount. Each `start_chat` / `join_chat_channel`
-// from a window increments; each `leave_chat_channel` decrements. Actual IRC
-// JOIN / PART only happens at the 0->1 / 1->0 transitions, so a popout
-// opening for xqc while main's ChatWidget is unmounting (also for xqc)
-// doesn't lose the channel — whichever IPC arrives first, the channel stays
-// JOINed as long as any window still wants it.
+// Per-channel consumer refcount. Each consumer claim (a window's chat store
+// acquiring the channel via `start_chat` / `join_chat_channel`) increments;
+// each `leave_chat_channel` decrements. Actual IRC JOIN / PART only happens
+// at the 0->1 / 1->0 transitions, so a popout opening for xqc while main's
+// ChatWidget is unmounting (also for xqc) doesn't lose the channel — whichever
+// IPC arrives first, the channel stays JOINed as long as any window still
+// wants it. Ensure-only callers (stream-start warm-up, reconnect re-attach,
+// the defensive re-JOIN in send_message) MUST NOT touch this count: they are
+// not new consumers, and a claim nothing releases leaves the count above the
+// real consumer total, so `leave_channel` never reaches zero and the room
+// keeps streaming traffic after every consumer is gone.
 static CHANNEL_REFCOUNT: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 // Handle to the plugin host so parsed chat lines can be forwarded to plugins
 // subscribed to on_chat_message. Set once, on the first chat start.
@@ -167,7 +172,12 @@ fn extract_channel_from_irc_line(line: &str) -> Option<String> {
 }
 
 impl IrcService {
-    pub async fn start(channel: &str, state: &AppState) -> Result<u16> {
+    /// `claim` distinguishes a real new consumer (a window's chat store
+    /// acquiring the channel) from ensure-only callers (the stream-start
+    /// warm-up, reconnect re-attach). Only consumers may bump the per-channel
+    /// refcount; ensure-only callers just need the bridge up and the channel
+    /// JOINed.
+    pub async fn start(channel: &str, state: &AppState, claim: bool) -> Result<u16> {
         let layout_service = state.layout_service.clone();
         let emote_service = state.emote_service.clone();
         let _ = PLUGIN_HOST.set(state.plugin_host.clone());
@@ -189,11 +199,17 @@ impl IrcService {
                     let key = channel.to_lowercase();
                     // `join_channel` is refcount-aware: it bumps the
                     // per-channel consumer count and only sends IRC JOIN on
-                    // the 0->1 transition. Best-effort: failures here just
-                    // mean the channel hasn't been added to the existing IRC
-                    // session; the caller will see that messages aren't
-                    // arriving and can recover.
-                    if let Err(e) = Self::join_channel(&key).await {
+                    // the 0->1 transition. Ensure-only callers skip the bump
+                    // (their consumer, if any, already counted itself).
+                    // Best-effort: failures here just mean the channel hasn't
+                    // been added to the existing IRC session; the caller will
+                    // see that messages aren't arriving and can recover.
+                    let join_result = if claim {
+                        Self::join_channel(&key).await
+                    } else {
+                        Self::ensure_joined(&key).await
+                    };
+                    if let Err(e) = join_result {
                         log::warn!("[IRC Chat] idempotent JOIN failed for {}: {}", key, e);
                     }
                     // Fetch emotes for this channel so segment parsing
@@ -229,11 +245,15 @@ impl IrcService {
         get_channel_emotes().lock().await.clear();
         // Seed the consumer refcount: this is the first window to ask for the
         // initial channel; the IRC JOIN is performed implicitly by
-        // run_irc_connection below, so we just account for it here.
+        // run_irc_connection below, so we just account for it here. Ensure-only
+        // cold starts seed nothing: the first real acquire claims the slot via
+        // join_channel (which sees the channel already joined and only counts).
         {
             let mut refcounts = get_channel_refcount().lock().await;
             refcounts.clear();
-            refcounts.insert(channel.to_lowercase(), 1);
+            if claim {
+                refcounts.insert(channel.to_lowercase(), 1);
+            }
         }
 
         let token = match TwitchService::get_token().await {
@@ -1115,21 +1135,20 @@ impl IrcService {
             }
         };
 
-        // Per-window refcounting doesn't exist on the Rust side yet — each
-        // browser window has its own JS-side refcount, and when one window
-        // releases a channel it issues PART regardless of whether another
-        // window still wants it. So MultiChat can find itself in a state
-        // where it believes it's JOINed but Rust's `current_channels` no
-        // longer contains the channel (and Twitch IRC has likewise PARTed).
-        // Re-JOIN defensively when the caller is sending to a channel we
-        // don't think is active. Cheap on success, recoverable on conflict.
+        // A window's JS store can believe it's JOINed while Rust's
+        // `current_channels` no longer contains the channel (state lost across
+        // a bridge restart, or a racing PART). Re-JOIN defensively when the
+        // caller is sending to a channel we don't think is active. Ensure-only:
+        // the sender's window already claimed its consumer slot when it
+        // acquired the channel, so claiming another here would leave a slot
+        // nothing releases. Cheap on success, recoverable on conflict.
         let needs_join = !get_current_channels().lock().await.contains(&channel);
         if needs_join {
             log::warn!(
                 "[IRC Chat] send_message for {} but channel not in current set; defensive re-JOIN",
                 channel
             );
-            if let Err(e) = Self::join_channel(&channel).await {
+            if let Err(e) = Self::ensure_joined(&channel).await {
                 return Err(anyhow::anyhow!(
                     "Failed to re-JOIN channel {} before send: {}",
                     channel,
@@ -1258,6 +1277,42 @@ impl IrcService {
             return Ok(());
         }
 
+        // First consumer: make sure the channel is actually JOINed. On failure,
+        // give back the consumer slot we claimed so a later retry or the
+        // reconnect path can JOIN cleanly instead of seeing refcount > 1.
+        if let Err(e) = Self::ensure_joined(&key).await {
+            let mut refcounts = get_channel_refcount().lock().await;
+            if let Some(entry) = refcounts.get_mut(&key) {
+                *entry = entry.saturating_sub(1);
+                if *entry == 0 {
+                    refcounts.remove(&key);
+                }
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    /// Re-JOIN a channel after a bridge reconnect without claiming a consumer
+    /// slot. The consumer counted itself when it first acquired the channel;
+    /// counting it again on every reconnect would push the refcount past the
+    /// number of real consumers, and `leave_channel` would then never reach
+    /// zero, leaving the room joined (and its traffic flowing) after every
+    /// consumer is gone.
+    pub async fn rejoin_channel(channel: &str) -> Result<()> {
+        Self::ensure_joined(&channel.to_lowercase()).await
+    }
+
+    /// Send the IRC JOIN for `key` (lowercase) and set up its per-channel
+    /// subscriptions. No-op when the channel is already in the current set
+    /// (its subscriptions were set up by whoever joined it). Never touches the
+    /// consumer refcount; callers decide whether a consumer slot is claimed.
+    async fn ensure_joined(key: &str) -> Result<()> {
+        if get_current_channels().lock().await.contains(key) {
+            return Ok(());
+        }
+
         // The connection may still be establishing: start_chat spawns the IRC
         // task and returns before the writer is set, so when several chats open
         // at once an additional channel's JOIN can arrive before the first
@@ -1267,34 +1322,24 @@ impl IrcService {
         // same burst would silently receive no moderator events.
         let writer = match Self::wait_for_irc_writer(100).await {
             Some(w) => w,
-            None => {
-                // Give back the consumer slot we claimed so a later retry or the
-                // reconnect path can JOIN cleanly instead of seeing refcount > 1.
-                let mut refcounts = get_channel_refcount().lock().await;
-                if let Some(entry) = refcounts.get_mut(&key) {
-                    *entry = entry.saturating_sub(1);
-                    if *entry == 0 {
-                        refcounts.remove(&key);
-                    }
-                }
-                return Err(anyhow::anyhow!("IRC connection not established"));
-            }
+            None => return Err(anyhow::anyhow!("IRC connection not established")),
         };
 
         let mut w = writer.lock().await;
         w.write_all(format!("JOIN #{}\r\n", key).as_bytes()).await?;
         w.flush().await?;
+        drop(w);
 
-        get_current_channels().lock().await.insert(key.clone());
+        get_current_channels().lock().await.insert(key.to_string());
 
-        debug!("[IRC Chat] Joined channel: #{} (first consumer)", key);
+        debug!("[IRC Chat] Joined channel: #{}", key);
 
         // Check for shared chat in the new channel, and subscribe it to the 7TV
         // EventAPI for live emote set updates. Both reuse the same lookup.
-        if let Ok(broadcaster_info) = TwitchService::get_user_by_login(channel).await {
+        if let Ok(broadcaster_info) = TwitchService::get_user_by_login(key).await {
             Self::check_shared_chat_status(&broadcaster_info.id).await;
-            crate::services::seventv_eventapi::subscribe_channel(&key, &broadcaster_info.id).await;
-            crate::services::eventsub_moderation::subscribe_channel(&key, &broadcaster_info.id)
+            crate::services::seventv_eventapi::subscribe_channel(key, &broadcaster_info.id).await;
+            crate::services::eventsub_moderation::subscribe_channel(key, &broadcaster_info.id)
                 .await;
         }
 
