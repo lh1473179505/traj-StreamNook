@@ -1,3 +1,30 @@
+## [8.0.0] - 2026-06-14
+## 🎉 New: A built-in Marketplace, and StreamNook is now modular
+> The features you know no longer all live in one binary. StreamNook 8.0 introduces a real plugin system with a Marketplace built right in: familiar add-ons that used to be part of the core app now ship as opt-in plugins you install in one click, so the app stays lean and you run only what you want. Best of all it is open. The community can build and submit their own plugins, so what is available keeps growing beyond the ones we make.
+
+---
+
+### ✨ What's new
+- **The Marketplace**: Open the Store icon in the title bar to browse a curated catalog of plugins, see exactly what each one does, and install or update in one click. It is built in, so there is nothing to set up.
+- **Community plugins**: The plugin system is open. Anyone can build a plugin and submit it for the Marketplace, so the catalog grows beyond what we ship, and each plugin's settings appear right where they belong in the app.
+- **Update notifications**: When an installed plugin has a newer version, the Store icon shows a count and each plugin gets an Update button in the Installed tab.
+
+### 🧩 Familiar features, now opt-in plugins
+> These were already part of StreamNook. They work the same, they are just plugins now, so you install only the ones you use. Updating from an older version? Open the Store icon and add the ones you used to bring them right back.
+- **Autopilot**: Background Drops and channel-points farming without keeping a stream open, plus a Mine button on every Drops card to farm a reward without watching it.
+- **Ad-Free Playback**: Ad-free live viewing resolved through community playlist proxies, with a built-in proxy health checker.
+- **Lists**: Your go-to text (usernames, commands, links) in a floating, pop-out panel that docks into mod logs, with a command-palette entry and a hotkey.
+
+### ⚡ Low latency, tuned to match Twitch
+> The streaming backend got a deep refactor. Playback now holds latency on par with Twitch's own player, and on channels that have low latency enabled you stay just a couple of seconds behind the broadcaster, in the solo player and in every Multi-Nook tile. New low-latency diagnostics and codec-aware resolution selection keep playback on the best stream and close to live, without the drift that creeps in over a long session.
+
+### 🎨 Interface
+> A wave of interface work across the app: the new Marketplace's clean app-store layout, clearer plugin badges (Official, Approved, and Installed), and polish throughout the UI.
+
+### 🐛 Bug Fixes
+- **Chat connections stay healthy**: Reworked how chat rooms are claimed so a closed tab or a reconnect can no longer pin a room and leave it stuck.
+- **Drops progress is accurate and steady**: The title-bar and overlay progress now show the reward you are actually on, including the right tier in a multi-reward campaign, and hold steady instead of flickering.
+
 ## [7.8.7] - 2026-06-12
 ### 🔧 Maintenance
 - **StreamNook is moving to its own GitHub organization**: The project is getting a proper home at github.com/StreamNook instead of living under a personal account. This update teaches the built-in updater to follow the project to its new address, so install it to keep receiving future releases automatically.
