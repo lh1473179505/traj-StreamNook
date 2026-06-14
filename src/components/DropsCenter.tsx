@@ -9,7 +9,7 @@ import { usePluginUiRegistry, selectSlot } from '../plugins-ui/registry';
 import { Dropdown } from './ui/Dropdown';
 import {
     UnifiedGame, DropCampaign, DropProgress, DropsStatistics,
-    MiningStatus, DropsDeviceCodeInfo, InventoryResponse, InventoryItem, CompletedDrop
+    DropProgressStatus, DropsDeviceCodeInfo, InventoryResponse, InventoryItem, CompletedDrop
 } from '../types';
 
 import LoadingWidget from './LoadingWidget';
@@ -17,7 +17,6 @@ import GameCard from './drops/GameCard';
 import GameDetailPanel from './drops/GameDetailPanel';
 import DropsStatsTab from './drops/DropsStatsTab';
 import DropsInventoryTab from './drops/DropsInventoryTab';
-import ChannelPickerModal from './drops/ChannelPickerModal';
 import { getAllUserBadgesWithEarned } from '../services/badgeService';
 import { Tooltip } from './ui/Tooltip';
 
@@ -68,11 +67,11 @@ export default function DropsCenter() {
     const [deviceCodeInfo, setDeviceCodeInfo] = useState<DropsDeviceCodeInfo | null>(null);
 
     // Mining State
-    const [miningStatus, setMiningStatus] = useState<MiningStatus | null>(null);
+    const [dropProgress, setDropProgress] = useState<DropProgressStatus | null>(null);
     // Id of a plugin that provides drops mining, or null. When set, the
     // cockpit's mine controls drive the plugin through the general hooks
     // instead of the built-in miner. Core never names the plugin.
-    const [pluginMiningId, setPluginMiningId] = useState<string | null>(null);
+    const [externalDropsProviderId, setExternalDropsProviderId] = useState<string | null>(null);
 
     // UI State
     const [activeTab, setActiveTab] = useState<Tab>('games');
@@ -94,15 +93,6 @@ export default function DropsCenter() {
 
 
     // Channel Picker State
-    const [channelPickerOpen, setChannelPickerOpen] = useState(false);
-    const [pendingCampaign, setPendingCampaign] = useState<{ id: string; name: string; gameName: string } | null>(null);
-
-    // Mine All Queue State - tracks sequential campaign mining for a game
-    const [mineAllQueue, setMineAllQueue] = useState<{
-        gameName: string;
-        campaignIds: string[];
-        currentIndex: number;
-    } | null>(null);
 
     // Settings State
     const [dropsSettings, setDropsSettings] = useState<DropsSettings | null>(null);
@@ -112,12 +102,6 @@ export default function DropsCenter() {
 
     // Track the previously mining game to detect when mining starts
     const prevMiningGameRef = useRef<string | null>(null);
-    
-    // Ref for Mine All queue to access current value in event listeners (avoids stale closure)
-    const mineAllQueueRef = useRef(mineAllQueue);
-    useEffect(() => {
-        mineAllQueueRef.current = mineAllQueue;
-    }, [mineAllQueue]);
 
     // Track previous campaign IDs for notification detection
     const prevCampaignIdsRef = useRef<Set<string>>(new Set());
@@ -127,10 +111,10 @@ export default function DropsCenter() {
         const favoriteGames = dropsSettings?.favorite_games || [];
         // The actively-mining game pins above everything, even favorites: it's
         // the one thing happening right now. Derived straight from live
-        // miningStatus so a reopened overlay restores the pin immediately,
+        // dropProgress so a reopened overlay restores the pin immediately,
         // not only after the next status push.
-        const miningGameName = (miningStatus?.is_mining
-            ? miningStatus.current_drop?.game_name || miningStatus.current_channel?.game_name
+        const progressGameName = (dropProgress?.active
+            ? dropProgress.current_drop?.game_name || dropProgress.current_channel?.game_name
             : null)?.toLowerCase() || null;
         let games = unifiedGames;
 
@@ -157,8 +141,8 @@ export default function DropsCenter() {
         // Sort: actively-mining game first, then still-mineable favorites, then by the selected sort mode.
         return [...games].sort((a, b) => {
             // Actively-mining game pinned at the very top, above favorites.
-            const aMining = miningGameName !== null && a.name.toLowerCase() === miningGameName;
-            const bMining = miningGameName !== null && b.name.toLowerCase() === miningGameName;
+            const aMining = progressGameName !== null && a.name.toLowerCase() === progressGameName;
+            const bMining = progressGameName !== null && b.name.toLowerCase() === progressGameName;
             if (aMining !== bMining) return aMining ? -1 : 1;
 
             // A favorite that's fully claimed is "done", so it drops out of the top
@@ -178,7 +162,7 @@ export default function DropsCenter() {
 
             // Recommended (default) relevance order:
             // Mining games next
-            if (a.is_mining !== b.is_mining) return a.is_mining ? -1 : 1;
+            if (a.active !== b.active) return a.active ? -1 : 1;
             // Completed games (all drops claimed) go to bottom
             if (a.all_drops_claimed !== b.all_drops_claimed) return a.all_drops_claimed ? 1 : -1;
             // Games with claimable drops next
@@ -189,7 +173,7 @@ export default function DropsCenter() {
             }
             return a.name.localeCompare(b.name);
         });
-    }, [unifiedGames, searchTerm, dropsSettings?.favorite_games, sortMode, miningStatus]);
+    }, [unifiedGames, searchTerm, dropsSettings?.favorite_games, sortMode, dropProgress]);
 
     // Fetch earned badges on mount for badge drop ownership verification
     useEffect(() => {
@@ -401,7 +385,7 @@ export default function DropsCenter() {
             // Re-sort with the same ordering loadDropsData uses, so a now fully-claimed
             // game sinks to the bottom without a reload.
             const sortGames = (a: UnifiedGame, b: UnifiedGame) => {
-                if (a.is_mining !== b.is_mining) return a.is_mining ? -1 : 1;
+                if (a.active !== b.active) return a.active ? -1 : 1;
                 if (a.all_drops_claimed !== b.all_drops_claimed) return a.all_drops_claimed ? 1 : -1;
                 if (a.has_claimable !== b.has_claimable) return a.has_claimable ? -1 : 1;
                 if (a.active_campaigns.length !== b.active_campaigns.length) {
@@ -420,17 +404,17 @@ export default function DropsCenter() {
         }
     };
 
-    // ---- Plugin-backed mining routing ----
-    // Track which plugin (if any) provides drops mining, so the mine controls
-    // route to it. A global PluginMiningBridge translates the plugin's status
-    // pushes into the native 'mining-status-update' event the cockpit consumes
-    // below, so there is nothing to translate here.
+    // ---- External drops provider routing ----
+    // Track whether an external provider (an opt-in plugin) is present, so the
+    // provider-only controls route to it. The global DropProgressController
+    // drives the 'drop-progress' event the cockpit consumes below (from native
+    // watch-to-earn or a provider), so there is nothing to translate here.
     useEffect(() => {
         let disposed = false;
         const refreshProvider = async () => {
             try {
                 const id = await invoke<string | null>('plugins_provides', { feature: 'drops.mining' });
-                if (!disposed) setPluginMiningId(id ?? null);
+                if (!disposed) setExternalDropsProviderId(id ?? null);
             } catch { /* plugin host unavailable */ }
         };
         refreshProvider();
@@ -451,102 +435,25 @@ export default function DropsCenter() {
         };
     }, []);
 
-    // These route to the plugin when one provides mining, else the built-in
-    // miner. Every mine control goes through them, so the cockpit feels native
-    // either way.
-    const mineAuto = async () => {
-        if (pluginMiningId) {
-            await invoke('plugins_invoke_action', { action: 'drops.mine-auto', args: {} });
-            return;
-        }
-        await invoke('start_auto_mining');
-    };
-    const mineCampaign = async (campaignId: string, channelId?: string | null) => {
-        if (pluginMiningId) {
-            await invoke('plugins_invoke_action', { action: 'drops.mine', args: { campaign_id: campaignId } });
-            return;
-        }
-        if (channelId) {
-            await invoke('start_campaign_mining_with_channel', { campaignId, channelId });
-            return;
-        }
-        await invoke('start_campaign_mining', { campaignId });
-    };
+    // Starting is native (the card's "Watch" link to the category) or the
+    // provider's own per-card control, so core issues no start action. Stop is
+    // the one provider-driven control core still issues, and only when a provider
+    // is present (the Stop button is hidden otherwise).
     const stopMining = async () => {
-        if (pluginMiningId) {
-            await invoke('plugins_invoke_action', { action: 'drops.stop', args: {} });
-            return;
-        }
-        await invoke('stop_auto_mining');
-    };
-
-    const handleStartMining = (campaignId: string, campaignName: string, gameName: string) => {
-        // With the plugin powering mining, it picks an eligible channel itself,
-        // so clicking a drop just starts it, no channel picker step.
-        if (pluginMiningId) {
-            // Light up the native mining UI at once (title bar badge, and this
-            // game shifting to the top) while the plugin resolves a channel and
-            // reports real progress through the bridge a moment later.
-            emit('mining-status-update', {
-                is_mining: true,
-                current_channel: null,
-                current_campaign: campaignId,
-                current_drop: {
-                    campaign_id: campaignId,
-                    campaign_name: campaignName,
-                    drop_id: campaignId,
-                    drop_name: '',
-                    required_minutes: 0,
-                    current_minutes: 0,
-                    game_name: gameName,
-                },
-                eligible_channels: [],
-                last_update: new Date().toISOString(),
-            } as MiningStatus).catch(() => {});
-            mineCampaign(campaignId)
-                .then(() => addToast('Started mining', 'success'))
-                .catch((err) => {
-                    Logger.error('Failed to start mining:', err);
-                    addToast('Failed to start mining', 'error');
-                });
-            return;
-        }
-        setPendingCampaign({ id: campaignId, name: campaignName, gameName });
-        setChannelPickerOpen(true);
-    };
-
-    const handleMiningFromModal = async (channelId: string | null) => {
-        setChannelPickerOpen(false);
-        if (!pendingCampaign) return;
-
-        try {
-            if (dropsSettings?.auto_mining_enabled) {
-                await updateDropsSettings({ auto_mining_enabled: false });
-            }
-
-            await mineCampaign(pendingCampaign.id, channelId);
-            addToast('Started mining campaign', 'success');
-        } catch (err) {
-            Logger.error('Failed to start mining:', err);
-            addToast('Failed to start mining', 'error');
-        } finally {
-            setPendingCampaign(null);
-        }
+        if (!externalDropsProviderId) return;
+        await invoke('plugins_invoke_action', { action: 'drops.stop', args: {} });
     };
 
     const handleStopMining = async () => {
         try {
             // Immediately update local state to reflect stopped mining
-            setMiningStatus(prev => prev ? {
+            setDropProgress(prev => prev ? {
                 ...prev,
-                is_mining: false,
+                active: false,
                 current_drop: null,
                 current_channel: null,
                 current_campaign: null
             } : null);
-
-            // Clear the mine all queue
-            setMineAllQueue(null);
 
             // Clear ALL in-progress entries to prevent stale data when switching games
             // We completely reset and let the new mining session repopulate fresh data
@@ -557,11 +464,6 @@ export default function DropsCenter() {
             addToast('Mining stopped', 'info');
         } catch (err) {
             Logger.error('Failed to stop mining:', err);
-            // If there was an error, refresh the status from backend
-            try {
-                const status = await invoke<MiningStatus>('get_mining_status');
-                setMiningStatus(status);
-            } catch { /* Mining status not available */ }
         }
     };
 
@@ -762,268 +664,6 @@ export default function DropsCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dropsSearchTerm, unifiedGames]);
 
-    // Mine All Game - starts mining all campaigns for a game sequentially
-    // Smart start: Skip campaigns that are already fully complete and start from the first incomplete one
-    const handleMineAllGame = async (gameName: string, campaignIds: string[]) => {
-        if (campaignIds.length === 0) {
-            addToast('No campaigns to mine for this game', 'info');
-            return;
-        }
-
-        Logger.debug(`[DropsCenter] Starting Mine All for ${gameName} with ${campaignIds.length} campaigns`);
-
-        // Find the game to check campaign completion status
-        const game = unifiedGames.find(g => g.name.toLowerCase() === gameName.toLowerCase());
-        
-        // IMPORTANT: Save current progress before any async operations that might clear it
-        const currentProgress = [...progress];
-        Logger.debug(`[DropsCenter] Saved progress state with ${currentProgress.length} entries`);
-        
-        // Filter out campaigns that are already fully complete (all drops claimed or 100% watched)
-        // and find the first incomplete campaign to start from
-        const incompleteCampaignIds: string[] = [];
-        
-        for (let i = 0; i < campaignIds.length; i++) {
-            const campaignId = campaignIds[i];
-            const campaign = game?.active_campaigns.find(c => c.id === campaignId);
-            
-            if (!campaign) {
-                // Campaign not found, include it just in case
-                Logger.debug(`[DropsCenter] Campaign ID ${campaignId} not found in active_campaigns, including anyway`);
-                incompleteCampaignIds.push(campaignId);
-                continue;
-            }
-            
-            // Also find the matching inventory item for this campaign (has better progress data)
-            const inventoryItem = game?.inventory_items.find(item => 
-                item.campaign.id === campaignId || 
-                item.campaign.name.toLowerCase() === campaign.name.toLowerCase()
-            );
-            
-            // Get drops from inventory if available (more accurate), otherwise from campaign
-            const dropsToCheck = inventoryItem?.campaign.time_based_drops || campaign.time_based_drops;
-            
-            Logger.debug(`[DropsCenter] Campaign "${campaign.name}": ${dropsToCheck.length} drops to check (from ${inventoryItem ? 'inventory' : 'campaign'})`);
-            
-            // If no drops, consider it incomplete (we can't determine completion status)
-            if (!dropsToCheck || dropsToCheck.length === 0) {
-                Logger.debug(`[DropsCenter] Campaign "${campaign.name}" has no drops, assuming incomplete`);
-                incompleteCampaignIds.push(campaignId);
-                continue;
-            }
-            
-            // Check if all drops in this campaign are complete (100% watched or claimed)
-            // We need to check multiple sources for completion:
-            // 1. The inventory item's drop progress (most reliable)
-            // 2. The campaign's drop progress field
-            // 3. The saved progress state array (from real-time updates)
-            let allDropsComplete = true;
-            
-            for (const drop of dropsToCheck) {
-                // First check: The drop's own progress field from the API (inventory or campaign)
-                const dropOwnProgress = drop.progress;
-                
-                if (dropOwnProgress?.is_claimed) {
-                    Logger.debug(`[DropsCenter] Drop "${drop.name}" is claimed`);
-                    continue; // This drop is complete
-                }
-                
-                // Check if 100% complete from drop's own progress
-                if (dropOwnProgress) {
-                    const isCompleteFromOwn = dropOwnProgress.current_minutes_watched >= dropOwnProgress.required_minutes_watched;
-                    if (isCompleteFromOwn) {
-                        Logger.debug(`[DropsCenter] Drop "${drop.name}" is 100% complete (${dropOwnProgress.current_minutes_watched}/${dropOwnProgress.required_minutes_watched})`);
-                        continue; // This drop is complete
-                    }
-                    // Has progress but not complete - this drop is incomplete
-                    Logger.debug(`[DropsCenter] Drop "${drop.name}" is in progress (${dropOwnProgress.current_minutes_watched}/${dropOwnProgress.required_minutes_watched})`);
-                    allDropsComplete = false;
-                    break; // Found an incomplete drop, no need to check more
-                }
-                
-                // Second check: The saved progress state array (NOT the current state which may be cleared)
-                const progressEntry = currentProgress.find(p => p.drop_id === drop.id);
-                if (progressEntry) {
-                    const isComplete = progressEntry.current_minutes_watched >= progressEntry.required_minutes_watched;
-                    const isClaimed = progressEntry.is_claimed;
-                    if (isComplete || isClaimed) {
-                        Logger.debug(`[DropsCenter] Drop "${drop.name}" complete from progress array`);
-                        continue; // This drop is complete
-                    }
-                    // Has progress but not complete
-                    Logger.debug(`[DropsCenter] Drop "${drop.name}" in progress from array (${progressEntry.current_minutes_watched}/${progressEntry.required_minutes_watched})`);
-                    allDropsComplete = false;
-                    break; // Found an incomplete drop
-                }
-                
-                // No progress data found at all - assume NOT complete (need to start mining)
-                Logger.debug(`[DropsCenter] Drop "${drop.name}" (ID: ${drop.id}) has no progress data, assuming incomplete`);
-                allDropsComplete = false;
-                break; // Found an incomplete drop
-            }
-            
-            // A campaign is incomplete if any drop is not complete
-            if (!allDropsComplete) {
-                incompleteCampaignIds.push(campaignId);
-                Logger.debug(`[DropsCenter] Campaign "${campaign.name}" is incomplete, including in queue`);
-            } else {
-                Logger.debug(`[DropsCenter] Campaign "${campaign.name}" is fully complete, skipping`);
-            }
-        }
-        
-        // If all campaigns are complete, notify the user
-        if (incompleteCampaignIds.length === 0) {
-            addToast(`All campaigns for ${gameName} are already complete!`, 'success');
-            return;
-        }
-        
-        const skippedCount = campaignIds.length - incompleteCampaignIds.length;
-        if (skippedCount > 0) {
-            Logger.debug(`[DropsCenter] Skipping ${skippedCount} completed campaigns, starting with ${incompleteCampaignIds.length} remaining`);
-        }
-
-        // SMART PRIORITIZATION: Sort incomplete campaigns to prioritize ones with existing progress
-        // This ensures we finish drops we've already started before moving to new ones
-        const sortedIncompleteCampaignIds = [...incompleteCampaignIds].sort((a, b) => {
-            const campaignA = game?.active_campaigns.find(c => c.id === a);
-            const campaignB = game?.active_campaigns.find(c => c.id === b);
-            
-            // Get inventory items for each campaign
-            const inventoryA = game?.inventory_items.find(item => 
-                item.campaign.id === a || 
-                (campaignA && item.campaign.name.toLowerCase() === campaignA.name.toLowerCase())
-            );
-            const inventoryB = game?.inventory_items.find(item => 
-                item.campaign.id === b || 
-                (campaignB && item.campaign.name.toLowerCase() === campaignB.name.toLowerCase())
-            );
-            
-            // Calculate progress percentage for each campaign
-            const getProgressPercent = (inventoryItem: typeof inventoryA, campaign: typeof campaignA) => {
-                const drops = inventoryItem?.campaign.time_based_drops || campaign?.time_based_drops || [];
-                if (drops.length === 0) return -1; // No drops = unknown, put last
-                
-                let totalProgress = 0;
-                for (const drop of drops) {
-                    const dropProgress = drop.progress;
-                    if (dropProgress) {
-                        const percent = dropProgress.required_minutes_watched > 0 
-                            ? (dropProgress.current_minutes_watched / dropProgress.required_minutes_watched) * 100 
-                            : 0;
-                        totalProgress += percent;
-                    }
-                    // Also check the saved progress array
-                    const progressEntry = currentProgress.find(p => p.drop_id === drop.id);
-                    if (progressEntry) {
-                        const percent = progressEntry.required_minutes_watched > 0 
-                            ? (progressEntry.current_minutes_watched / progressEntry.required_minutes_watched) * 100 
-                            : 0;
-                        totalProgress = Math.max(totalProgress, percent);
-                    }
-                }
-                return totalProgress;
-            };
-            
-            const progressA = getProgressPercent(inventoryA, campaignA);
-            const progressB = getProgressPercent(inventoryB, campaignB);
-            
-            // Sort by progress descending (highest progress first)
-            // Campaigns with -1 (no drops/unknown) go to the end
-            if (progressA === -1 && progressB === -1) return 0;
-            if (progressA === -1) return 1; // A goes to end
-            if (progressB === -1) return -1; // B goes to end
-            return progressB - progressA; // Higher progress first
-        });
-        
-        Logger.debug(`[DropsCenter] Sorted campaign order (by progress):`, sortedIncompleteCampaignIds.map(id => {
-            const campaign = game?.active_campaigns.find(c => c.id === id);
-            return campaign?.name || id;
-        }));
-
-        // When a plugin powers mining, it auto-progresses through eligible
-        // campaigns by priority, so Mine All maps to auto-mine and the built-in
-        // per-campaign queue below is skipped.
-        if (pluginMiningId) {
-            try {
-                await stopMining();
-                await mineAuto();
-                addToast(`Mining available campaigns for ${gameName}`, 'success');
-            } catch (err) {
-                Logger.error('Failed to start mining:', err);
-                addToast('Failed to start mining', 'error');
-            }
-            return;
-        }
-
-        // Stop any current mining first (AFTER checking completion status)
-        if (miningStatus?.is_mining) {
-            // Use a simpler stop that doesn't clear progress
-            try {
-                await invoke('stop_auto_mining');
-            } catch (err) {
-                Logger.error('Failed to stop mining:', err);
-            }
-            // Wait a moment for the stop to take effect
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        // Set up the mine all queue with sorted campaigns (highest progress first)
-        setMineAllQueue({
-            gameName,
-            campaignIds: sortedIncompleteCampaignIds,
-            currentIndex: 0
-        });
-
-        // Start mining the first campaign (the one with highest progress)
-        try {
-            if (dropsSettings?.auto_mining_enabled) {
-                await updateDropsSettings({ auto_mining_enabled: false });
-            }
-
-            await invoke('start_campaign_mining', { campaignId: sortedIncompleteCampaignIds[0] });
-            
-            // Show appropriate message
-            if (skippedCount > 0) {
-                addToast(`Mining ${incompleteCampaignIds.length} remaining campaigns for ${gameName} (${skippedCount} already complete)`, 'success');
-            } else {
-                addToast(`Mining all ${incompleteCampaignIds.length} campaigns for ${gameName}`, 'success');
-            }
-        } catch (err) {
-            Logger.error('Failed to start mine all:', err);
-            addToast('Failed to start mining', 'error');
-            setMineAllQueue(null);
-        }
-    };
-
-    // Start the next campaign in the mine all queue
-    const startNextCampaignInQueue = async () => {
-        if (!mineAllQueue) return;
-
-        const nextIndex = mineAllQueue.currentIndex + 1;
-
-        if (nextIndex >= mineAllQueue.campaignIds.length) {
-            // All campaigns done
-            Logger.debug(`[DropsCenter] Mine All complete for ${mineAllQueue.gameName}`);
-            addToast(`Finished mining all campaigns for ${mineAllQueue.gameName}!`, 'success');
-            setMineAllQueue(null);
-            return;
-        }
-
-        Logger.debug(`[DropsCenter] Moving to next campaign ${nextIndex + 1}/${mineAllQueue.campaignIds.length}`);
-
-        // Update the queue index
-        setMineAllQueue(prev => prev ? { ...prev, currentIndex: nextIndex } : null);
-
-        // Start the next campaign
-        try {
-            await invoke('start_campaign_mining', { campaignId: mineAllQueue.campaignIds[nextIndex] });
-            addToast(`Mining campaign ${nextIndex + 1} of ${mineAllQueue.campaignIds.length}`, 'info');
-        } catch (err) {
-            Logger.error('Failed to start next campaign:', err);
-            addToast('Failed to start next campaign', 'error');
-            setMineAllQueue(null);
-        }
-    };
 
     // ---- Data Loading & Merging Logic ----
     const loadDropsData = async () => {
@@ -1038,25 +678,21 @@ export default function DropsCenter() {
             // list, which makes the UI show 0 minutes for everything.
             //
             // So: fetch campaigns first, then fetch progress.
-            const [campaignsData, statsData, inventoryData, currentMiningStatus] = await Promise.all([
+            const [campaignsData, statsData, inventoryData] = await Promise.all([
                 invoke<DropCampaign[]>('get_active_drop_campaigns').catch(() => [] as DropCampaign[]),
                 invoke<DropsStatistics>('get_drops_statistics').catch(() => null),
                 invoke<InventoryResponse>('get_drops_inventory').catch(() => null),
-                invoke<MiningStatus>('get_mining_status').catch(() => null),
             ]);
 
             const progressData = await invoke<DropProgress[]>('get_drop_progress').catch(() => [] as DropProgress[]);
 
-            // Seed mining status. A plugin powering mining reports through the
-            // bridge into the store and keeps it there even while this overlay
-            // is closed, so prefer that live status over the built-in miner's
-            // (which reads idle in plugin mode). This is what makes a reopened
-            // overlay immediately show what is being mined.
-            const liveStatus = useAppStore.getState().liveMiningStatus;
+            // Seed mining status from the bridge-cached live status: a plugin
+            // powering mining reports through the bridge into the store and keeps
+            // it there even while this overlay is closed, so a reopened overlay
+            // immediately shows what is being mined.
+            const liveStatus = useAppStore.getState().liveDropProgress;
             if (liveStatus) {
-                setMiningStatus(liveStatus);
-            } else if (currentMiningStatus) {
-                setMiningStatus(currentMiningStatus);
+                setDropProgress(liveStatus);
             }
 
             if (progressData) setProgress(progressData);
@@ -1082,7 +718,7 @@ export default function DropsCenter() {
                         drops_in_progress: 0,
                         inventory_items: [],
                         total_claimed: 0,
-                        is_mining: false,
+                        active: false,
                         has_claimable: false,
                         all_drops_claimed: false
                     };
@@ -1175,10 +811,9 @@ export default function DropsCenter() {
 
             // Get the current mining game name (case-insensitive). Prefer the
             // freshly-read live status (set by the plugin bridge and held in the
-            // store while the overlay is closed) over the built-in miner's status
-            // (idle in plugin mode) and the stale component state.
-            const activeMiningStatus = liveStatus || currentMiningStatus || miningStatus;
-            const miningGameName = activeMiningStatus?.current_drop?.game_name?.toLowerCase() ||
+            // store while the overlay is closed) over the stale component state.
+            const activeMiningStatus = liveStatus || dropProgress;
+            const progressGameName = activeMiningStatus?.current_drop?.game_name?.toLowerCase() ||
                 activeMiningStatus?.current_channel?.game_name?.toLowerCase();
 
             // Drops the user has genuinely EARNED, from unambiguous sources only: the
@@ -1203,10 +838,10 @@ export default function DropsCenter() {
                 });
             });
 
-            // Update is_mining flag and calculate all_drops_claimed for each game
+            // Update active flag and calculate all_drops_claimed for each game
             gamesMap.forEach(game => {
-                if (activeMiningStatus?.is_mining && miningGameName) {
-                    game.is_mining = game.name.toLowerCase() === miningGameName;
+                if (activeMiningStatus?.active && progressGameName) {
+                    game.active = game.name.toLowerCase() === progressGameName;
                 }
 
                 // Check if all drops in all active campaigns have been claimed
@@ -1250,7 +885,7 @@ export default function DropsCenter() {
             // earned inventory, have nothing actionable here and live in the Inventory tab.
             setUnifiedGames(Array.from(gamesMap.values()).filter(g => g.active_campaigns.length > 0).sort((a, b) => {
                 // Mining games first
-                if (a.is_mining !== b.is_mining) return a.is_mining ? -1 : 1;
+                if (a.active !== b.active) return a.active ? -1 : 1;
                 // Completed games (all drops claimed) go to bottom
                 if (a.all_drops_claimed !== b.all_drops_claimed) return a.all_drops_claimed ? 1 : -1;
                 // Games with claimable drops next
@@ -1372,10 +1007,10 @@ export default function DropsCenter() {
             const auth = await checkAuthentication();
             if (auth) {
                 try {
-                    // Prefer the bridge-cached live status (a plugin mining)
-                    // over the built-in miner, so reopening mid-mining shows it.
-                    const liveStatus = useAppStore.getState().liveMiningStatus;
-                    setMiningStatus(liveStatus ?? await invoke<MiningStatus>('get_mining_status'));
+                    // Seed from the bridge-cached live status (a plugin mining),
+                    // so reopening mid-mining shows it.
+                    const liveStatus = useAppStore.getState().liveDropProgress;
+                    if (liveStatus) setDropProgress(liveStatus);
                     const settings = await invoke<DropsSettings>('get_drops_settings');
                     setDropsSettings(settings);
                 } catch (e) {
@@ -1395,155 +1030,17 @@ export default function DropsCenter() {
         let isMounted = true;
         let unlistenStatus: (() => void) | undefined;
         let unlistenProgress: (() => void) | undefined;
-        let unlistenComplete: (() => void) | undefined;
-        let unlistenNoChannels: (() => void) | undefined;
-        let unlistenRecovery: (() => void) | undefined;
 
         const setupListeners = async () => {
-            const uStatus = await listen<MiningStatus>('mining-status-update', (event) => {
-                // Single source of truth for mining status, whether it comes
-                // from the built-in miner or from a plugin (bridged into this
-                // same event by PluginMiningBridge).
+            const uStatus = await listen<DropProgressStatus>('drop-progress', (event) => {
+                // Single source of truth for mining status. A mining plugin
+                // reports through the bridge (PluginMiningBridge), which emits
+                // into this same event so the native UI lights up identically.
                 Logger.debug('[DropsCenter] Mining status update:', event.payload);
-                setMiningStatus(event.payload);
-                
-                // Update AppStore's isMiningActive based on the status
-                useAppStore.getState().setMiningActive(event.payload.is_mining);
+                setDropProgress(event.payload);
+                useAppStore.getState().setDropProgressActive(event.payload.active);
             });
             if (isMounted) unlistenStatus = uStatus; else uStatus();
-            
-            // Listen for mining complete events (drop reached 100%)
-            // This handles all 3 mining modes:
-            // 1. Single Campaign Mining - stop completely
-            // 2. Mine All Game - check if there are more campaigns in queue, start next if so
-            // 3. Auto-Mining - handled by backend's start_mining (doesn't use this event)
-            const uComplete = await listen<{ game_name: string; reason: string }>('mining-complete', async (event) => {
-                Logger.debug('[DropsCenter] Mining complete:', event.payload);
-                
-                // Check if we're in a Mine All queue (use ref to get current value, not stale closure)
-                const currentQueue = mineAllQueueRef.current;
-                
-                if (currentQueue) {
-                    // Mine All Game mode - check if there are more campaigns
-                    const nextIndex = currentQueue.currentIndex + 1;
-                    
-                    if (nextIndex < currentQueue.campaignIds.length) {
-                        // More campaigns to mine - start the next one
-                        Logger.debug(`[DropsCenter] Mine All: Starting campaign ${nextIndex + 1}/${currentQueue.campaignIds.length}`);
-                        
-                        // Update queue index
-                        setMineAllQueue(prev => prev ? { ...prev, currentIndex: nextIndex } : null);
-                        
-                        try {
-                            await invoke('start_campaign_mining', { campaignId: currentQueue.campaignIds[nextIndex] });
-                            addToast(`Campaign complete! Mining ${nextIndex + 1} of ${currentQueue.campaignIds.length}...`, 'info');
-                        } catch (err) {
-                            Logger.error('[DropsCenter] Failed to start next campaign:', err);
-                            addToast('Failed to start next campaign', 'error');
-                            setMineAllQueue(null);
-                            useAppStore.getState().setMiningActive(false);
-                        }
-                    } else {
-                        // All campaigns in queue complete - Mine All Game is done
-                        Logger.debug(`[DropsCenter] Mine All complete for ${currentQueue.gameName}`);
-                        addToast(`All campaigns for ${event.payload.game_name} complete!`, 'success');
-                        setMineAllQueue(null);
-                        // Queue exhausted: tear down like a manual stop (disconnect the drops
-                        // WebSocket + drop the progress listener) rather than leaving them idle.
-                        try {
-                            await invoke('stop_auto_mining');
-                        } catch (err) {
-                            Logger.error('[DropsCenter] stop_auto_mining after Mine All failed:', err);
-                        }
-                        useAppStore.getState().setMiningActive(false);
-                    }
-                } else {
-                    // Single Campaign Mining mode - stop completely
-                    Logger.debug('[DropsCenter] Single campaign complete - stopping');
-                    addToast(`Drops complete for ${event.payload.game_name}!`, 'success');
-                    // Backend completion soft-stops (halts the loops + clears status) but leaves the
-                    // drops WebSocket connected and the progress listener registered. Fire the real
-                    // stop so completion tears down exactly like a manual stop.
-                    try {
-                        await invoke('stop_auto_mining');
-                    } catch (err) {
-                        Logger.error('[DropsCenter] stop_auto_mining after completion failed:', err);
-                    }
-                    useAppStore.getState().setMiningActive(false);
-                }
-                
-                // Refresh data to show updated progress
-                loadDropsData();
-            });
-            if (isMounted) unlistenComplete = uComplete; else uComplete();
-
-            // Listen for mining stopped due to no channels available (all streams offline)
-            const uNoChannels = await listen<{ reason: string }>('mining-stopped-no-channels', async (event) => {
-                Logger.debug('[DropsCenter] Mining stopped - no channels:', event.payload);
-                
-                // Check if we're in a Mine All queue
-                const currentQueue = mineAllQueueRef.current;
-                
-                if (currentQueue) {
-                    // Try to advance to next campaign in queue
-                    const nextIndex = currentQueue.currentIndex + 1;
-                    
-                    if (nextIndex < currentQueue.campaignIds.length) {
-                        Logger.debug(`[DropsCenter] Channels offline - trying next campaign ${nextIndex + 1}/${currentQueue.campaignIds.length}`);
-                        addToast(`All streams offline - trying next campaign...`, 'warning');
-                        
-                        setMineAllQueue(prev => prev ? { ...prev, currentIndex: nextIndex } : null);
-                        
-                        // Start the next campaign after a brief delay
-                        setTimeout(async () => {
-                            try {
-                                await invoke('start_campaign_mining', { campaignId: currentQueue.campaignIds[nextIndex] });
-                            } catch (err) {
-                                Logger.error('[DropsCenter] Failed to start next campaign:', err);
-                                addToast('Failed to start next campaign', 'error');
-                                setMineAllQueue(null);
-                                useAppStore.getState().setMiningActive(false);
-                            }
-                        }, 2000);
-                    } else {
-                        // All campaigns tried - queue exhausted
-                        addToast('All campaigns have no available streams', 'warning');
-                        setMineAllQueue(null);
-                        // Tear down like a manual stop (the backend no-channels stop only halts
-                        // the loops + clears status, leaving the WebSocket/listener idle).
-                        try {
-                            await invoke('stop_auto_mining');
-                        } catch (err) {
-                            Logger.error('[DropsCenter] stop_auto_mining after no-channels failed:', err);
-                        }
-                        useAppStore.getState().setMiningActive(false);
-                    }
-                } else {
-                    // Single campaign mode - just notify and stop
-                    addToast(`${event.payload.reason || 'All streams offline - mining stopped'}`, 'warning');
-                    // Tear down like a manual stop (the backend no-channels stop only halts the
-                    // loops + clears status, leaving the WebSocket/listener idle).
-                    try {
-                        await invoke('stop_auto_mining');
-                    } catch (err) {
-                        Logger.error('[DropsCenter] stop_auto_mining after no-channels failed:', err);
-                    }
-                    useAppStore.getState().setMiningActive(false);
-                }
-                
-                // Refresh data
-                loadDropsData();
-            });
-            if (isMounted) unlistenNoChannels = uNoChannels; else uNoChannels();
-
-            // Listen for recovery-watchdog actions (auto-switch on offline / game-swap /
-            // stalled progress). Surfaced as a toast when "Notify on Recovery Actions" is on.
-            const uRecovery = await listen<{ title: string; message: string; type: string }>('mining-recovery-notification', (event) => {
-                Logger.debug('[DropsCenter] Mining recovery action:', event.payload);
-                const toastType = event.payload.type === 'error' ? 'error' : 'warning';
-                addToast(event.payload.message || event.payload.title || 'Mining recovery action', toastType);
-            });
-            if (isMounted) unlistenRecovery = uRecovery; else uRecovery();
 
             const uProgress = await listen<{ drop_id: string; current_minutes: number; required_minutes: number; timestamp: number; campaign_id?: string; }>('drops-progress-update', (event) => {
                 Logger.debug('[DropsCenter] Received drops-progress-update:', event.payload);
@@ -1579,13 +1076,13 @@ export default function DropsCenter() {
 
                 // Update the displayed drop's minutes IN PLACE when this event is
                 // for it. WHICH drop is shown (the one finishing first) is decided
-                // by the backend and pushed via 'mining-status-update', so we never
+                // by the backend and pushed via 'drop-progress', so we never
                 // re-select here. That single source of truth is what stops the
                 // percentage from flipping between rewards as their progress events
                 // arrive out of order, and it advances to the next reward the instant
                 // the current one completes.
-                setMiningStatus((prev) => {
-                    if (!prev || !prev.is_mining || !prev.current_drop) return prev;
+                setDropProgress((prev) => {
+                    if (!prev || !prev.active || !prev.current_drop) return prev;
                     if (prev.current_drop.drop_id !== event.payload.drop_id) return prev;
                     return {
                         ...prev,
@@ -1606,70 +1103,21 @@ export default function DropsCenter() {
             isMounted = false;
             if (unlistenStatus) unlistenStatus();
             if (unlistenProgress) unlistenProgress();
-            if (unlistenComplete) unlistenComplete();
-            if (unlistenNoChannels) unlistenNoChannels();
-            if (unlistenRecovery) unlistenRecovery();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [addToast]);
 
-    // Mine All Queue - detect campaign completion and start next campaign
+    // Update games' active flag when dropProgress changes
     useEffect(() => {
-        if (!mineAllQueue || !miningStatus?.is_mining) return;
+        if (!dropProgress || unifiedGames.length === 0) return;
 
-        // Find the current campaign being mined
-        const currentCampaignId = mineAllQueue.campaignIds[mineAllQueue.currentIndex];
+        const progressGameName = dropProgress?.current_drop?.game_name?.toLowerCase() ||
+            dropProgress?.current_channel?.game_name?.toLowerCase();
 
-        // Find the game that has this campaign
-        const gameWithCampaign = unifiedGames.find(g =>
-            g.name.toLowerCase() === mineAllQueue.gameName.toLowerCase()
-        );
-
-        if (!gameWithCampaign) return;
-
-        // Find the campaign
-        const currentCampaign = gameWithCampaign.active_campaigns.find(c => c.id === currentCampaignId);
-        if (!currentCampaign) {
-            Logger.debug(`[MineAll] Campaign ${currentCampaignId} not found, moving to next`);
-            startNextCampaignInQueue();
-            return;
-        }
-
-        // Check if all drops in the current campaign are complete (100%+ progress or claimed)
-        const allDropsComplete = currentCampaign.time_based_drops.every(drop => {
-            const dropProgress = progress.find(p => p.drop_id === drop.id);
-            if (!dropProgress) return false;
-
-            const isComplete = dropProgress.current_minutes_watched >= dropProgress.required_minutes_watched;
-            const isClaimed = dropProgress.is_claimed;
-
-            return isComplete || isClaimed;
-        });
-
-        if (allDropsComplete && currentCampaign.time_based_drops.length > 0) {
-            Logger.debug(`[MineAll] All drops complete for campaign "${currentCampaign.name}", moving to next campaign`);
-
-            // Small delay before starting next campaign
-            const timer = setTimeout(() => {
-                startNextCampaignInQueue();
-            }, 2000);
-
-            return () => clearTimeout(timer);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [mineAllQueue, progress, unifiedGames, miningStatus]);
-
-    // Update games' is_mining flag when miningStatus changes
-    useEffect(() => {
-        if (!miningStatus || unifiedGames.length === 0) return;
-
-        const miningGameName = miningStatus?.current_drop?.game_name?.toLowerCase() ||
-            miningStatus?.current_channel?.game_name?.toLowerCase();
-
-        Logger.debug('[DropsCenter] Updating is_mining flag. Mining:', miningStatus.is_mining, 'Game:', miningGameName);
+        Logger.debug('[DropsCenter] Updating active flag. Mining:', dropProgress.active, 'Game:', progressGameName);
 
         // Detect if mining just started for a new game (to trigger scroll)
-        const currentMiningGame = miningStatus.is_mining && miningGameName ? miningGameName : null;
+        const currentMiningGame = dropProgress.active && progressGameName ? progressGameName : null;
         const prevMiningGame = prevMiningGameRef.current;
 
         // If a new game started mining (different from previous), scroll to top
@@ -1692,15 +1140,15 @@ export default function DropsCenter() {
         setUnifiedGames(prevGames => {
             const updated = prevGames.map(game => ({
                 ...game,
-                is_mining: miningStatus.is_mining && miningGameName
-                    ? game.name.toLowerCase() === miningGameName
+                active: dropProgress.active && progressGameName
+                    ? game.name.toLowerCase() === progressGameName
                     : false
             }));
 
             // Re-sort with full sorting logic
             return updated.sort((a, b) => {
                 // Mining games first
-                if (a.is_mining !== b.is_mining) return a.is_mining ? -1 : 1;
+                if (a.active !== b.active) return a.active ? -1 : 1;
                 // Completed games (all drops claimed) go to bottom
                 if (a.all_drops_claimed !== b.all_drops_claimed) return a.all_drops_claimed ? 1 : -1;
                 // Games with claimable drops next
@@ -1712,7 +1160,7 @@ export default function DropsCenter() {
                 return a.name.localeCompare(b.name);
             });
         });
-    }, [miningStatus, unifiedGames.length]);
+    }, [dropProgress, unifiedGames.length]);
 
     // Notification effect: Detect new campaigns from favorite games
     useEffect(() => {
@@ -1800,7 +1248,7 @@ export default function DropsCenter() {
                         <div className="grid grid-cols-3 gap-4 mb-8 py-4 border-y border-borderLight/50">
                             <div className="text-center">
                                 <div className="text-accent font-semibold text-lg">Auto</div>
-                                <div className="text-textSecondary text-xs">Mining</div>
+                                <div className="text-textSecondary text-xs">Earning</div>
                             </div>
                             <div className="text-center border-x border-borderLight/50">
                                 <div className="text-accent font-semibold text-lg">Track</div>
@@ -1850,21 +1298,6 @@ export default function DropsCenter() {
     // ---- Render: Main UI ----
     return (
         <div className="flex flex-col h-full bg-background animate-in fade-in">
-            {/* Channel Picker Modal */}
-            {pendingCampaign && (
-                <ChannelPickerModal
-                    isOpen={channelPickerOpen}
-                    onClose={() => {
-                        setChannelPickerOpen(false);
-                        setPendingCampaign(null);
-                    }}
-                    campaignId={pendingCampaign.id}
-                    campaignName={pendingCampaign.name}
-                    gameName={pendingCampaign.gameName}
-                    onStartMining={handleMiningFromModal}
-                />
-            )}
-
             {/* Liquid-glass heart gradients for the favorite hearts on game cards. */}
             <svg width="0" height="0" className="absolute pointer-events-none">
                 <defs>
@@ -2045,14 +1478,13 @@ export default function DropsCenter() {
                                         game={game}
                                         allGames={unifiedGames}
                                         progress={progress}
-                                        miningStatus={miningStatus}
+                                        dropProgress={dropProgress}
                                         isSelected={selectedGame?.id === game.id}
                                         isFavorite={(dropsSettings?.favorite_games || []).some(
                                             pg => pg.toLowerCase() === game.name.toLowerCase()
                                         )}
                                         onClick={() => handleGameSelect(selectedGame?.id === game.id ? null : game)}
                                         onStopMining={handleStopMining}
-                                        onMineAllGame={handleMineAllGame}
                                         onToggleFavorite={handleToggleFavorite}
                                     />
                                 ))}
@@ -2067,12 +1499,11 @@ export default function DropsCenter() {
                                 completedDrops={completedDrops}
                                 progress={progress}
                                 earnedBadgeTitles={earnedBadgeTitles}
-                                miningStatus={miningStatus}
+                                dropProgress={dropProgress}
                                 onClaimDrop={handleClaimDrop}
 
                                 isOpen={!!selectedGame}
                                 onClose={() => setSelectedGame(null)}
-                                onStartMining={handleStartMining}
                                 onStopMining={handleStopMining}
                             />
                         )}
@@ -2097,7 +1528,7 @@ export default function DropsCenter() {
                                 statistics.drops_in_progress
                             ),
                         } : null}
-                        miningStatus={miningStatus}
+                        dropProgress={dropProgress}
                         onStopMining={handleStopMining}
                         onStreamClick={handleStreamClick}
                     />

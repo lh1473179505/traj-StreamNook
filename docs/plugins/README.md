@@ -21,6 +21,7 @@ The deliberate omission that makes this work: the host exposes no generic HTTP m
 
 | Document | Contents |
 |---|---|
+| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | Start-to-finish walkthrough: build a plugin of either kind, test it, sign and publish it. Start here |
 | [PROTOCOL.md](PROTOCOL.md) | Wire format, lifecycle, the full event and host-method list, error codes, versioning rules |
 | [MANIFEST.md](MANIFEST.md) | The `plugin.toml` schema every plugin ships, and the tier definitions |
 | [CAPABILITIES.md](CAPABILITIES.md) | The capability vocabulary, what each grants, and the exact consent language shown to users |

@@ -32,7 +32,7 @@ import { Tooltip } from './components/ui/Tooltip';
 import { SearchProfileModal } from './components/SearchProfileModal';
 import DropsOverlay from './components/DropsOverlay';
 import MarketplaceOverlay from './components/MarketplaceOverlay';
-import PluginMiningBridge from './components/plugins/PluginMiningBridge';
+import DropProgressController from './components/plugins/DropProgressController';
 import BadgesOverlay from './components/BadgesOverlay';
 import EmoteSetsOverlay from './components/EmoteSetsOverlay';
 import EmoteSpotlight from './components/EmoteSpotlight';
@@ -538,9 +538,9 @@ function App() {
       });
 
       // Listen for mining status updates (for title bar gift box animation)
-      await addListener<{ is_mining: boolean }>('mining-status-update', (event) => {
-        Logger.debug('[App] Mining status update:', event.payload.is_mining);
-        useAppStore.getState().setMiningActive(event.payload.is_mining);
+      await addListener<{ active: boolean }>('drop-progress', (event) => {
+        Logger.debug('[App] Mining status update:', event.payload.active);
+        useAppStore.getState().setDropProgressActive(event.payload.active);
       });
 
       // Listen for whisper import events (global listener so import works from any UI)
@@ -1609,7 +1609,7 @@ function App() {
       <PublicProfileOverlay />
       <DropsOverlay />
       <MarketplaceOverlay />
-      <PluginMiningBridge />
+      <DropProgressController />
       <EmoteSetsOverlay />
       <EmoteSpotlight />
 

@@ -1,6 +1,9 @@
-import { X, Gift, Package, Check, Pause, Play, Clock, Star, Ban, ExternalLink } from 'lucide-react';
-import type { UnifiedGame, DropProgress, MiningStatus, DropCampaign, TimeBasedDrop, InventoryItem, CompletedDrop } from '../../types';
+import { X, Gift, Package, Check, Pause, Clock, Star, Ban, ExternalLink, Tv } from 'lucide-react';
+import { useAppStore } from '../../stores/AppStore';
+import type { UnifiedGame, DropProgress, DropProgressStatus, DropCampaign, TimeBasedDrop, InventoryItem, CompletedDrop } from '../../types';
 import { Tooltip } from '../ui/Tooltip';
+import { usePluginUiRegistry, selectSlot } from '../../plugins-ui/registry';
+import { DROPS_CARD_ACTION_SLOT, type DropCardActionContext } from '../../plugins-ui/types';
 
 import { Logger } from '../../utils/logger';
 // Helper to check if a drop is mineable
@@ -117,18 +120,17 @@ interface GameDetailPanelProps {
     progress: DropProgress[];
     completedDrops: CompletedDrop[]; // List of all completed drops from inventory
     earnedBadgeTitles: Set<string>; // Set of earned badge titles (lowercase) for name-based matching
-    miningStatus: MiningStatus | null;
+    dropProgress: DropProgressStatus | null;
 
     isOpen: boolean;
     onClose: () => void;
-    onStartMining: (campaignId: string, campaignName: string, gameName: string) => void;
     onStopMining: () => void;
     onClaimDrop: (dropId: string, dropInstanceId?: string) => void;
 }
 
 // Helper to merge progress from inventory into campaigns
 // This ensures we show the most accurate progress data even if the progress array doesn't have it
-function mergeProgressFromInventory(
+export function mergeProgressFromInventory(
     campaign: DropCampaign,
     inventoryItems: InventoryItem[],
     progressArray: DropProgress[]
@@ -180,14 +182,16 @@ export default function GameDetailPanel({
     progress,
     completedDrops,
     earnedBadgeTitles,
-    miningStatus,
+    dropProgress,
 
     isOpen,
     onClose,
-    onStartMining,
     onStopMining,
-    onClaimDrop
+    onClaimDrop,
 }: GameDetailPanelProps) {
+    // A provider (opt-in plugin) is present: only then is there anything to
+    // "stop". Native watch-to-earn is stopped simply by not watching.
+    const externalDropsProvider = useAppStore((s) => s.externalDropsProvider);
     // Merge inventory progress into active campaigns for accurate display
     const campaignsWithMergedProgress = game.active_campaigns.map(campaign =>
         mergeProgressFromInventory(campaign, game.inventory_items, progress)
@@ -234,9 +238,9 @@ export default function GameDetailPanel({
     };
     // Check if mining this game
     // Use current_drop.game_name OR current_channel.game_name as fallback (current_drop may not be set immediately)
-    const isMiningThisGame = miningStatus?.is_mining && (
-        miningStatus.current_drop?.game_name?.toLowerCase() === game.name?.toLowerCase() ||
-        miningStatus.current_channel?.game_name?.toLowerCase() === game.name?.toLowerCase()
+    const isProgressingThisGame = dropProgress?.active && (
+        dropProgress.current_drop?.game_name?.toLowerCase() === game.name?.toLowerCase() ||
+        dropProgress.current_channel?.game_name?.toLowerCase() === game.name?.toLowerCase()
     );
 
     // Transform box art URL to higher resolution
@@ -273,12 +277,12 @@ export default function GameDetailPanel({
     let miningCurrentMins = 0;
     let miningRequiredMins = 0;
 
-    if (isMiningThisGame && miningStatus?.current_drop) {
-        const { drop_id, drop_name } = miningStatus.current_drop;
+    if (isProgressingThisGame && dropProgress?.current_drop) {
+        const { drop_id, drop_name } = dropProgress.current_drop;
         const liveProgress = progress.find(p => p.drop_id === drop_id);
 
-        miningCurrentMins = liveProgress ? liveProgress.current_minutes_watched : (miningStatus.current_drop.current_minutes ?? 0);
-        miningRequiredMins = liveProgress ? liveProgress.required_minutes_watched : (miningStatus.current_drop.required_minutes ?? 1);
+        miningCurrentMins = liveProgress ? liveProgress.current_minutes_watched : (dropProgress.current_drop.current_minutes ?? 0);
+        miningRequiredMins = liveProgress ? liveProgress.required_minutes_watched : (dropProgress.current_drop.required_minutes ?? 1);
 
         miningProgress = miningRequiredMins > 0 ? (miningCurrentMins / miningRequiredMins) * 100 : 0;
         miningDropName = drop_name || '';
@@ -479,8 +483,8 @@ export default function GameDetailPanel({
 
                     {/* Currently Mining Section - Shows ONLY drops from the specific campaign being mined */}
                     {(() => {
-                        // Get the current campaign being mined (from miningStatus)
-                        const currentCampaignName = miningStatus?.current_campaign;
+                        // Get the current campaign being mined (from dropProgress)
+                        const currentCampaignName = dropProgress?.current_campaign;
                         
                         // Get ALL drops from this game's campaigns
                         const dropsFromCampaigns = game.active_campaigns.flatMap(c => c.time_based_drops);
@@ -624,7 +628,7 @@ export default function GameDetailPanel({
 
                         // Only show "Currently Mining" section if we are actually mining THIS specific game
                         // This prevents showing the mining UI when viewing a different game's panel
-                        if (!isMiningThisGame) return null;
+                        if (!isProgressingThisGame) return null;
 
                         // Don't show section if no drops with progress for this game
                         if (dropsWithProgress.length === 0) return null;
@@ -637,14 +641,16 @@ export default function GameDetailPanel({
                                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                                             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
                                         </span>
-                                        Currently Mining
+                                        Currently earning
                                         {dropsWithProgress.length > 0 && (
                                             <span className="text-[10px] font-mono text-green-300 bg-green-500/20 px-1.5 py-0.5 rounded">
                                                 {dropsWithProgress.length} drop{dropsWithProgress.length !== 1 ? 's' : ''}
                                             </span>
                                         )}
                                     </div>
-                                    {isMiningThisGame && (
+                                    {/* Stop only makes sense when a provider is driving; native
+                                        watch-to-earn is stopped by not watching. */}
+                                    {externalDropsProvider && (
                                         <button
                                             onClick={onStopMining}
                                             className="glass-button px-2.5 py-1.5 text-xs font-medium text-red-400 flex items-center gap-1.5"
@@ -961,9 +967,7 @@ export default function GameDetailPanel({
                                             progress={progress}
                                             completedDropIds={completedDropIds}
                                             completedBenefitIds={completedBenefitIds}
-                                            miningStatus={miningStatus}
-                                            onStartMining={() => onStartMining(campaign.id, campaign.name, game.name)}
-                                            onClaimDrop={onClaimDrop}
+                                            dropProgress={dropProgress}                                            onClaimDrop={onClaimDrop}
                                         />
                                     ))}
                                 </div>
@@ -1024,9 +1028,7 @@ export default function GameDetailPanel({
                                             inventoryItems={game.inventory_items}
                                             progress={progress}
                                             completedBenefitIds={completedBenefitIds}
-                                            miningStatus={miningStatus}
-                                            onStartMining={() => onStartMining(campaign.id, campaign.name, game.name)}
-                                            onClaimDrop={onClaimDrop}
+                                            dropProgress={dropProgress}                                            onClaimDrop={onClaimDrop}
                                         />
                                     ))}
                                 </div>
@@ -1408,8 +1410,7 @@ interface CampaignCardProps {
     progress: DropProgress[];
     completedDropIds?: Set<string>; // IDs of completed drops (from inventory progress)
     completedBenefitIds?: Set<string>; // IDs of completed benefits (from gameEventDrops)
-    miningStatus: MiningStatus | null;
-    onStartMining: () => void;
+    dropProgress: DropProgressStatus | null;
     onClaimDrop: (dropId: string, dropInstanceId?: string) => void;
 }
 
@@ -1419,10 +1420,14 @@ function CampaignCard({
     progress,
     completedDropIds,
     completedBenefitIds,
-    miningStatus,
-    onStartMining,
-    onClaimDrop
+    dropProgress,
+    onClaimDrop,
 }: CampaignCardProps) {
+    // Per-campaign controls are contributed by a provider (an opt-in plugin)
+    // into a generic slot; core renders whatever is hung there and passes the
+    // campaign context. With no provider this is empty and the card just shows
+    // native progress.
+    const cardActions = usePluginUiRegistry(selectSlot(DROPS_CARD_ACTION_SLOT));
     // Prefer embedded progress (drop.progress) and fall back to the global progress[] state.
     const resolveDropProgress = (dropId: string, embedded?: DropProgress) => {
         return progress.find(p => p.drop_id === dropId) || embedded || null;
@@ -1441,8 +1446,8 @@ function CampaignCard({
         return required > 0 && current > 0 && current < required && !dropProgress.is_claimed;
     });
     
-    const isMiningThisCampaign = miningStatus?.current_campaign === campaign.name && 
-        miningStatus?.is_mining && 
+    const isProgressingThisCampaign = dropProgress?.current_campaign === campaign.name && 
+        dropProgress?.active && 
         hasActivelyMiningDrops; // Only show "Mining" if there are drops still being mined
     
     // Check if this campaign is mineable (has time-based drops with watch time requirements)
@@ -1518,32 +1523,48 @@ function CampaignCard({
                         </span>
                     )}
                 </div>
-                {/* Only show Mine button if campaign is mineable (has time-based drops) */}
-                {!isMiningThisCampaign && isMineable && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onStartMining();
-                        }}
-                        className="glass-button px-3 py-1.5 text-xs font-semibold text-accent flex items-center gap-1.5"
-                    >
-                        <Play size={12} fill="currentColor" />
-                        Mine
-                    </button>
+                {/* Per-campaign control. By default core's way to earn a drop is
+                    to go watch the category, so we show a "Watch" link that opens
+                    it. A provider (opt-in plugin) can hang its own control in the
+                    drops.card-action slot to take this over (e.g. earn without
+                    watching), in which case we render that instead. */}
+                {!isProgressingThisCampaign && isMineable && (
+                    cardActions.length > 0
+                        ? cardActions.map((c) => {
+                            const Control = c.Component as React.ComponentType<DropCardActionContext>;
+                            return (
+                                <Control
+                                    key={`${c.pluginId}:${c.id}`}
+                                    campaignId={campaign.id}
+                                    campaignName={campaign.name}
+                                    gameName={campaign.game_name}
+                                    earnable={isMineable}
+                                    progressing={false}
+                                />
+                            );
+                        })
+                        : (
+                            <Tooltip content={`Watch ${campaign.game_name} to earn this drop`} side="top">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        useAppStore.getState().navigateToCategoryByName(campaign.game_name);
+                                    }}
+                                    className="glass-button px-3 py-1.5 text-xs font-semibold text-accent flex items-center gap-1.5"
+                                >
+                                    <Tv size={12} />
+                                    Watch
+                                </button>
+                            </Tooltip>
+                        )
                 )}
-                {/* Show "Not Mineable" label for non-time-based campaigns */}
-                {!isMiningThisCampaign && !isMineable && (
-                    <span className="text-[10px] text-textMuted italic shrink-0">
-                        Not mineable
-                    </span>
-                )}
-                {isMiningThisCampaign && (
+                {isProgressingThisCampaign && (
                     <span className="text-xs text-green-400 font-semibold flex items-center gap-1.5 bg-green-500/10 px-2 py-1 rounded">
                         <span className="relative flex h-2 w-2">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                             <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
                         </span>
-                        Mining
+                        Earning
                     </span>
                 )}
             </div>
@@ -1587,7 +1608,7 @@ function CampaignCard({
                         <div className="relative h-3">
                             <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-background border border-borderLight overflow-hidden">
                                 <div
-                                    className={`h-full rounded-full ${isMiningThisCampaign ? 'bg-accent animate-progress-shimmer' : 'bg-accent'}`}
+                                    className={`h-full rounded-full ${isProgressingThisCampaign ? 'bg-accent animate-progress-shimmer' : 'bg-accent'}`}
                                     style={{ width: `${fillPercent}%` }}
                                 />
                             </div>

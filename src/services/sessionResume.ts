@@ -25,8 +25,8 @@ export async function captureResumeSnapshot(): Promise<void> {
     stream_login: login,
     media_type: s.currentMediaType,
     original_media_url: s.originalMediaUrl ?? null,
-    was_mining: s.isMiningActive,
-    mining_campaign_id: s.liveMiningStatus?.current_campaign ?? null,
+    was_mining: s.dropProgressActive,
+    mining_campaign_id: s.liveDropProgress?.current_campaign ?? null,
   };
 
   try {

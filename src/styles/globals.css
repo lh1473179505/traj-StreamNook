@@ -431,6 +431,23 @@ body {
   transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.25);
 }
 
+/* Telemetry HUD over live video. Readability here must NOT ride the global
+   Glassiness slider (that slider is for app chrome): a near-transparent stats
+   panel is unreadable against a bright moving stream. So this keeps a
+   deterministic, near-opaque tertiary surface at every slider position, with the
+   same no-glow inset bevel as glass-panel. Theme-aware, so it tracks light/dark
+   themes alongside the textPrimary/textSecondary it carries. */
+.stats-hud {
+  background-color: color-mix(in srgb, var(--color-background-tertiary) 94%, transparent);
+  backdrop-filter: blur(16px);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  box-shadow:
+    inset 1px 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset -1px -1px 0 0 rgba(0, 0, 0, 0.25),
+    0 8px 24px -8px rgba(0, 0, 0, 0.6);
+}
+
 /* Display tile — for content that is FOR SHOW, not pressable (profile stat
    tiles, emote tiles, the spend card). Depth comes from directional top light +
    layering, never the pressed/raised button bevel: a top-lit gradient, a single

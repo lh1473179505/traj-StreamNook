@@ -202,9 +202,9 @@ const PlayerStatsOverlay = ({ hlsRef, videoRef, open, onToggle, onGoLive, adSour
   const showGoLive = metrics.latency != null && metrics.latency > goLiveFloor;
 
   return (
-    <div className="absolute bottom-16 left-4 z-50 w-52 pointer-events-auto">
-      <div className="glass-panel rounded-lg border border-white/10 bg-background/95 backdrop-blur-md px-3 py-2.5 text-xs">
-        <div className="flex items-center justify-between mb-2">
+    <div className="absolute bottom-16 left-4 z-50 w-56 pointer-events-auto">
+      <div className="stats-hud px-3.5 py-3 text-xs text-textPrimary">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-1.5">
             <Activity size={13} className="text-accent" />
             <span className="text-textPrimary font-semibold tracking-wide">Stream Stats</span>
@@ -214,12 +214,17 @@ const PlayerStatsOverlay = ({ hlsRef, videoRef, open, onToggle, onGoLive, adSour
           </button>
         </div>
 
-        <div className="space-y-1">
-          <Row
-            label="Behind live"
-            value={metrics.latency != null ? `${metrics.latency.toFixed(1)}s` : '-'}
-            valueClass={latencyClass(metrics.latency, metrics.syncTarget)}
-          />
+        {/* Behind-live is the headline metric, so it leads as a large readout
+            instead of one more row in the list. */}
+        <div className="flex items-end justify-between mb-3">
+          <span className="text-[10px] uppercase tracking-wider text-textSecondary">Behind live</span>
+          <span className={`text-2xl font-semibold tabular-nums leading-none ${latencyClass(metrics.latency, metrics.syncTarget)}`}>
+            {metrics.latency != null ? metrics.latency.toFixed(1) : '-'}
+            {metrics.latency != null && <span className="text-sm font-medium text-textSecondary ml-0.5">s</span>}
+          </span>
+        </div>
+
+        <div className="space-y-1.5">
           <Row
             label="Speed"
             value={metrics.playbackRate != null ? `${metrics.playbackRate.toFixed(2)}x` : '-'}
@@ -250,8 +255,7 @@ const PlayerStatsOverlay = ({ hlsRef, videoRef, open, onToggle, onGoLive, adSour
         {showGoLive && (
           <button
             onClick={onGoLive}
-            className="mt-2.5 w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md glass-button text-white font-medium hover:bg-white/10 transition-colors"
-            style={{ backdropFilter: 'blur(16px)' }}
+            className="mt-3 w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md glass-button text-white font-medium hover:bg-white/10 transition-colors"
           >
             <Radio size={13} className="text-red-400" />
             Go Live

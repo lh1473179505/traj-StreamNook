@@ -4,7 +4,8 @@ use crate::models::user::{ChannelInfo, UserInfo};
 use crate::services::account_store::AccountStore;
 use crate::services::drops_auth_service::DropsAuthService;
 use crate::services::twitch_service::{
-    twitch_web_profile_dir, DeviceCodeInfo, TokenHealthStatus, TwitchService,
+    adopt_pending_web_profile, twitch_pending_web_profile_dir, twitch_web_profile_dir,
+    DeviceCodeInfo, TokenHealthStatus, TwitchService,
 };
 use crate::services::whisper_history_service::{
     WhisperHistoryService, WhisperMessage, WhisperThread,
@@ -12,6 +13,7 @@ use crate::services::whisper_history_service::{
 use crate::services::whisper_service::WhisperService;
 use anyhow::Result;
 use log::{debug, error};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex as TokioMutex;
@@ -682,30 +684,43 @@ pub async fn clear_webview_data(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The WebView2 profile holding the active account's twitch.tv web session.
+///
+/// Both the login window and the subscribe window resolve through here so they
+/// can never disagree about which session to show. When an account is linked
+/// it's that account's own profile (adopting a freshly-staged first login if
+/// one is waiting); before any account is recorded it's the staging profile the
+/// login window writes to, which the first per-account window later adopts.
+fn active_twitch_web_profile_dir() -> Result<PathBuf, String> {
+    if let Some(primary) = AccountStore::primary() {
+        adopt_pending_web_profile(&primary.user_id);
+        twitch_web_profile_dir(&primary.user_id).map_err(|e| e.to_string())
+    } else {
+        twitch_pending_web_profile_dir().map_err(|e| e.to_string())
+    }
+}
+
 /// Open the device-code activation page in the embedded login window, isolated
 /// to the active account's Twitch web profile. A per-account profile means a
 /// re-login lands on the same account (its web session persists) and can never
 /// silently authorize whichever account a shared browser session happened to be
-/// holding. Falls back to the default profile only when no account is linked yet
-/// (the very first sign-in).
+/// holding. Before the first account is linked the session is captured in a
+/// staging profile, which the first per-account window adopts once Twitch
+/// reports who signed in.
 #[tauri::command]
 pub async fn open_twitch_login_window(app: AppHandle, url: String) -> Result<(), String> {
     let parsed = url
         .parse()
         .map_err(|e| format!("Invalid login URL: {}", e))?;
 
-    let mut builder = WebviewWindowBuilder::new(&app, "twitch-login", WebviewUrl::External(parsed))
+    let builder = WebviewWindowBuilder::new(&app, "twitch-login", WebviewUrl::External(parsed))
         .title("Log in to Twitch")
         .inner_size(500.0, 700.0)
         .center()
         .resizable(true)
         .minimizable(true)
-        .maximizable(false);
-
-    if let Some(primary) = AccountStore::primary() {
-        builder = builder
-            .data_directory(twitch_web_profile_dir(&primary.user_id).map_err(|e| e.to_string())?);
-    }
+        .maximizable(false)
+        .data_directory(active_twitch_web_profile_dir()?);
 
     builder
         .build()
@@ -734,18 +749,14 @@ pub async fn open_subscribe_window(
         .parse()
         .map_err(|e| format!("Invalid subscribe URL: {}", e))?;
 
-    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
         .title(title.unwrap_or_else(|| format!("Subscribe to {}", channel_login)))
         .inner_size(800.0, 900.0)
         .center()
         .resizable(true)
         .minimizable(true)
-        .maximizable(true);
-
-    if let Some(primary) = AccountStore::primary() {
-        builder = builder
-            .data_directory(twitch_web_profile_dir(&primary.user_id).map_err(|e| e.to_string())?);
-    }
+        .maximizable(true)
+        .data_directory(active_twitch_web_profile_dir()?);
 
     builder
         .build()

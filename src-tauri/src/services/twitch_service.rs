@@ -7,7 +7,7 @@ use crate::services::cookie_jar_service::CookieJarService;
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
 use keyring::Entry;
-use log::{debug, error};
+use log::{debug, error, warn};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,93 @@ pub(crate) fn twitch_web_profile_dir(account_id: &str) -> Result<PathBuf> {
     path.push(account_id);
     fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+/// Staging WebView2 profile for a login whose account id isn't known yet. The
+/// device-code web session has to be captured somewhere before Twitch tells us
+/// who signed in; a single fixed folder is safe because only one login is ever
+/// in flight at once. `adopt_pending_web_profile` moves this into the account's
+/// own profile once the id is known, so the subscribe window (and every other
+/// per-account twitch webview) sees the same session the user logged into.
+pub(crate) fn twitch_pending_web_profile_dir() -> Result<PathBuf> {
+    let mut path = get_app_data_dir()?;
+    path.push("twitch_web_profiles");
+    path.push("_pending");
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+/// True when a WebView2 profile folder holds a twitch.tv session (its cookie
+/// store has been written at least once).
+fn web_profile_has_session(dir: &PathBuf) -> bool {
+    dir.join("EBWebView")
+        .join("Default")
+        .join("Network")
+        .join("Cookies")
+        .exists()
+}
+
+/// Adopt a freshly-staged login session into `account_id`'s own web profile.
+///
+/// First sign-in captures the web session in the `_pending` staging profile
+/// (the account id isn't known until the device-code grant completes). Once the
+/// account is recorded, the next per-account twitch window calls this to move
+/// that staged session into the account's own profile, so the login window and
+/// the subscribe window stop disagreeing about which profile holds the session.
+///
+/// No-ops unless there's a staged session to adopt and the target doesn't
+/// already have its own. Best-effort: a failure just leaves the user to
+/// re-login, it never breaks the window.
+pub(crate) fn adopt_pending_web_profile(account_id: &str) {
+    let base = match get_app_data_dir() {
+        Ok(b) => b.join("twitch_web_profiles"),
+        Err(_) => return,
+    };
+    let pending = base.join("_pending");
+    let target = base.join(account_id);
+
+    // Nothing staged -> nothing to adopt.
+    if !web_profile_has_session(&pending) {
+        return;
+    }
+    // Target already owns a session -> keep it, discard the stale stage.
+    if web_profile_has_session(&target) {
+        let _ = fs::remove_dir_all(&pending);
+        return;
+    }
+    // Move the staged session into place. Clear the empty placeholder first so
+    // the rename has a clean destination (Windows rename fails if it exists).
+    if target.exists() {
+        let _ = fs::remove_dir_all(&target);
+    }
+    if let Err(e) = fs::rename(&pending, &target) {
+        // Rename can fail if the staged profile is still locked or lives on a
+        // different volume; fall back to a recursive copy so the session isn't
+        // stranded, then drop the stage.
+        debug!("[twitch-web] adopt rename failed ({e}); copying instead");
+        if let Err(e) = copy_dir_recursive(&pending, &target) {
+            warn!("[twitch-web] could not adopt staged login session: {e}");
+            return;
+        }
+        let _ = fs::remove_dir_all(&pending);
+    }
+}
+
+/// Minimal recursive directory copy (std has no equivalent). Only used as the
+/// rename fallback in `adopt_pending_web_profile`.
+fn copy_dir_recursive(from: &PathBuf, to: &PathBuf) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort removal of an account's Twitch web profile (called when the

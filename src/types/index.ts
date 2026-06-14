@@ -94,7 +94,7 @@ export interface DropsSettings {
   recovery_settings?: RecoverySettings;
 }
 
-export interface MiningChannel {
+export interface DropChannel {
   id: string;
   name: string;
   display_name: string;
@@ -123,12 +123,12 @@ export interface DropsDeviceCodeInfo {
   expires_in: number;
 }
 
-export interface MiningStatus {
-  is_mining: boolean;
-  current_channel: MiningChannel | null;
+export interface DropProgressStatus {
+  active: boolean;
+  current_channel: DropChannel | null;
   current_campaign: string | null;
   current_drop: CurrentDropInfo | null;
-  eligible_channels: MiningChannel[];
+  eligible_channels: DropChannel[];
   last_update: string;
 }
 
@@ -817,7 +817,7 @@ export interface UnifiedGame {
   total_claimed: number;               // Total claimed drops for this game
 
   // Status
-  is_mining: boolean;                  // Currently mining this game
+  active: boolean;                  // Currently mining this game
   has_claimable: boolean;              // Has drops ready to claim
   all_drops_claimed: boolean;          // All available drops have been claimed (game complete)
 }

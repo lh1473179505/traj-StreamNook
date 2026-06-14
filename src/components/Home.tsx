@@ -23,7 +23,7 @@ interface DropCampaign {
     game_name: string;
 }
 
-interface MiningChannel {
+interface DropChannel {
     id: string;
     name: string;
     display_name: string;
@@ -43,12 +43,12 @@ interface CurrentDropInfo {
     game_name: string;
 }
 
-interface MiningStatus {
-    is_mining: boolean;
-    current_channel: MiningChannel | null;
+interface DropProgressStatus {
+    active: boolean;
+    current_channel: DropChannel | null;
     current_campaign: string | null;
     current_drop: CurrentDropInfo | null;
-    eligible_channels: MiningChannel[];
+    eligible_channels: DropChannel[];
     last_update: string;
 }
 
@@ -361,6 +361,7 @@ const Home = () => {
         videosPeriod, setVideosPeriod,
         mediaSearchQuery, setMediaSearchQuery,
     } = useAppStore();
+    const externalDropsProvider = useAppStore((s) => s.externalDropsProvider);
 
     const [isLoadingOfflineChannels, setIsLoadingOfflineChannels] = useState(false);
     const [offlineChannelsFetched, setOfflineChannelsFetched] = useState(false);
@@ -644,16 +645,17 @@ const Home = () => {
                 setDropsGameNames(dropsNameMap);
                 Logger.debug(`[Home] Found ${dropsIdMap.size} categories with active drops`);
 
-                // Also check current mining status to sync state
+                // Also sync the active-mining highlight from the bridge-cached
+                // status (a plugin powering mining reports through it).
                 try {
-                    const miningStatus = await invoke<MiningStatus>('get_mining_status');
-                    if (miningStatus.is_mining) {
+                    const dropProgress = useAppStore.getState().liveDropProgress;
+                    if (dropProgress?.active) {
                         // Find campaign ID by matching game_name from current_drop or current_channel
-                        const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-                            miningStatus.current_channel?.game_name?.toLowerCase();
-                        if (miningGameName) {
+                        const progressGameName = dropProgress.current_drop?.game_name?.toLowerCase() ||
+                            dropProgress.current_channel?.game_name?.toLowerCase();
+                        if (progressGameName) {
                             for (const campaign of campaigns) {
-                                if (campaign.game_name?.toLowerCase() === miningGameName) {
+                                if (campaign.game_name?.toLowerCase() === progressGameName) {
                                     Logger.debug(`[Home] Already mining campaign: ${campaign.name}`);
                                     setActiveMiningIds(prev => new Set(prev).add(campaign.id));
                                     break;
@@ -715,17 +717,17 @@ const Home = () => {
     // visible.
     const syncMiningStatus = useCallback(async () => {
         try {
-            const miningStatus = await invoke<MiningStatus>('get_mining_status');
+            const dropProgress = useAppStore.getState().liveDropProgress;
 
-            if (miningStatus.is_mining) {
+            if (dropProgress?.active) {
                 // Find campaign ID by matching game_name from current_drop or current_channel
-                const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-                    miningStatus.current_channel?.game_name?.toLowerCase();
+                const progressGameName = dropProgress.current_drop?.game_name?.toLowerCase() ||
+                    dropProgress.current_channel?.game_name?.toLowerCase();
 
-                if (miningGameName) {
+                if (progressGameName) {
                     let foundCampaignId: string | null = null;
                     dropsGameNames.forEach((campaign, gameName) => {
-                        if (gameName === miningGameName) {
+                        if (gameName === progressGameName) {
                             foundCampaignId = campaign.id;
                         }
                     });
@@ -760,7 +762,7 @@ const Home = () => {
         const setupListener = async () => {
             try {
                 const { listen } = await import('@tauri-apps/api/event');
-                const unlistenFn = await listen('mining-status-changed', syncMiningStatus);
+                const unlistenFn = await listen('drop-progress', syncMiningStatus);
                 if (isMounted) {
                     unlisten = unlistenFn;
                 } else {
@@ -795,10 +797,14 @@ const Home = () => {
 
         const isCurrentlyMining = activeMiningIds.has(campaign.id);
 
+        // Farming is plugin-powered; this control only renders when a plugin
+        // provides mining, so route start/stop to it.
+        if (!useAppStore.getState().externalDropsProvider) return;
+
         if (isCurrentlyMining) {
             // Stop mining
             try {
-                await invoke('stop_auto_mining');
+                await invoke('plugins_invoke_action', { action: 'drops.stop', args: {} });
                 Logger.debug(`[Home] Stopped mining drops for ${campaign.name}`);
                 setActiveMiningIds(new Set()); // Clear all mining IDs
                 useAppStore.getState().addToast(`Stopped mining drops for ${campaign.game_name}`, 'info');
@@ -815,7 +821,7 @@ const Home = () => {
             const centerY = rect.top + rect.height / 2;
 
             try {
-                await invoke('start_campaign_mining', { campaignId: campaign.id });
+                await invoke('plugins_invoke_action', { action: 'drops.mine', args: { campaign_id: campaign.id } });
                 Logger.debug(`[Home] Started mining drops for ${campaign.name}`);
 
                 // Add to active mining set
@@ -1405,7 +1411,7 @@ const Home = () => {
                             </div>
                         </div>
                     )}
-                    {hasDrops && (
+                    {hasDrops && externalDropsProvider && (
                         <Tooltip content={activeMiningIds.has(dropsCampaign.id) ? `Click to stop mining ${dropsCampaign.name}` : `Start mining ${dropsCampaign.name}`} side="top">
                         <button
                             onClick={(e) => handleToggleMining(e, dropsCampaign)}

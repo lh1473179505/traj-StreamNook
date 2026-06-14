@@ -40,6 +40,25 @@ export interface SlotContribution {
   Component: React.ComponentType;
 }
 
+/**
+ * Context the host passes to a per-campaign control rendered in the
+ * `drops.card-action` slot. A provider contributes a component here to hang its
+ * own control (e.g. a start/stop button) on each Drops-center campaign card; the
+ * host stays generic and renders whatever the provider hangs there, passing the
+ * campaign it belongs to. The component does its work through its own actions —
+ * the host neither knows nor names them.
+ */
+export const DROPS_CARD_ACTION_SLOT = 'drops.card-action';
+export interface DropCardActionContext {
+  campaignId: string;
+  campaignName: string;
+  gameName: string;
+  /** True when this campaign has time-earned drops (vs event/badge-only). */
+  earnable: boolean;
+  /** True when this campaign is the one currently progressing. */
+  progressing: boolean;
+}
+
 /** A command palette row supplied by a plugin provider. */
 export interface PluginPaletteItem {
   id: string;

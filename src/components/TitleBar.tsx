@@ -12,8 +12,8 @@ import { captureResumeSnapshot } from '../services/sessionResume';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getSelectedCompactViewPreset } from '../constants/compactViewPresets';
-import type { MiningStatus, DropsSettings, DropProgress } from '../types';
-import { deriveMiningDisplay } from '../utils/miningDisplay';
+import type { DropProgressStatus, DropsSettings, DropProgress } from '../types';
+import { deriveDropProgressDisplay } from '../utils/dropProgressDisplay';
 
 
 import { Logger } from '../utils/logger';
@@ -42,7 +42,7 @@ const getUpdateStageProgress = (stage: string | null): number => {
 const TitleBar = () => {
   const store = useAppStore();
 
-  const { openSettings, setShowDropsOverlay, setShowMarketplaceOverlay, setShowBadgesOverlay, setShowWhispersOverlay, isAuthenticated, currentUser, isMiningActive, isTheaterMode, toggleTheaterMode, streamUrl, settings, whisperImportState, updateInfo } = store;
+  const { openSettings, setShowDropsOverlay, setShowMarketplaceOverlay, setShowBadgesOverlay, setShowWhispersOverlay, isAuthenticated, currentUser, dropProgressActive, isTheaterMode, toggleTheaterMode, streamUrl, settings, whisperImportState, updateInfo } = store;
   // Count of installed plugins with an update available, for the Marketplace badge.
   const pluginUpdateCount = usePluginUpdates((s) => s.ids.length);
   // Update flow: 'idle' → 'installing' (download/extract) → 'installed' (staged;
@@ -54,10 +54,10 @@ const TitleBar = () => {
   const [, setShowSplash] = useState(false);
   const [dropsSettings, setDropsSettings] = useState<DropsSettings | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
-  const prevMiningActive = useRef(isMiningActive);
+  const prevDropProgressActive = useRef(dropProgressActive);
   
   // Mining status state for progress badge and hover preview
-  const [miningStatus, setMiningStatus] = useState<MiningStatus | null>(null);
+  const [dropProgress, setDropProgress] = useState<DropProgressStatus | null>(null);
   // Live per-drop progress, accumulated from 'drops-progress-update' events. The
   // backend's current_drop carries minutes that only move on its slower poll, so
   // the badge percentage is derived from this fresher stream instead — the same
@@ -113,20 +113,15 @@ const TitleBar = () => {
   }, [loadDropsSettings]);
   useVisibleInterval(loadDropsSettings, 60 * 60 * 1000);
 
-  // Load and subscribe to mining status updates for progress badge
-  const loadMiningStatus = useCallback(async () => {
-    try {
-      const status = await invoke<MiningStatus>('get_mining_status');
-      // This reads the built-in miner and is only a stale-protection backup;
-      // live updates arrive on the 'mining-status-update' event. When mining is
-      // driven by another source (a plugin, surfaced through that same event)
-      // the built-in miner reads idle, so don't let this backup wipe a live
-      // session's progress back to the no-progress (gift) state.
-      if (!status.is_mining && useAppStore.getState().isMiningActive) return;
-      setMiningStatus(status);
-    } catch {
-      // Silently fail - not critical for title bar
-    }
+  // Seed the progress badge from the bridge-cached mining status (a plugin
+  // powering mining reports through it). Live updates arrive on the
+  // 'drop-progress' event; this is just a stale-protection backup, so
+  // don't let it wipe an active session back to the no-progress (gift) state.
+  const loadMiningStatus = useCallback(() => {
+    const status = useAppStore.getState().liveDropProgress;
+    if (!status) return;
+    if (!status.active && useAppStore.getState().dropProgressActive) return;
+    setDropProgress(status);
   }, []);
 
   useEffect(() => {
@@ -136,11 +131,11 @@ const TitleBar = () => {
 
     const setupListeners = async () => {
       // Listen for mining status updates
-      const uStatus = await listen<MiningStatus>('mining-status-update', (event) => {
-        setMiningStatus(event.payload);
+      const uStatus = await listen<DropProgressStatus>('drop-progress', (event) => {
+        setDropProgress(event.payload);
         // Drop the accumulated per-drop progress once mining stops so a finished
         // session's numbers can't leak into the next one's fallback derivation.
-        if (!event.payload.is_mining) setLiveProgress([]);
+        if (!event.payload.active) setLiveProgress([]);
       });
       if (isMounted) unlistenStatus = uStatus;
       else uStatus();
@@ -150,7 +145,7 @@ const TitleBar = () => {
         const { drop_id: dropId, current_minutes: currentMinutes, required_minutes: requiredMinutes } = event.payload;
 
         // Keep a live, per-drop progress map. The badge percentage is derived
-        // from this (via deriveMiningDisplay) so it tracks the freshest minutes
+        // from this (via deriveDropProgressDisplay) so it tracks the freshest minutes
         // and can still show a value when current_drop hasn't been set yet.
         setLiveProgress((prev) => {
           const idx = prev.findIndex((p) => p.drop_id === dropId);
@@ -171,12 +166,12 @@ const TitleBar = () => {
           return [...prev, entry];
         });
 
-        setMiningStatus((prev) => {
-          if (!prev || !prev.is_mining) return prev;
+        setDropProgress((prev) => {
+          if (!prev || !prev.active) return prev;
 
           // Only update the displayed drop in place when this event is for it.
           // WHICH drop is shown (the one closest to completion) is decided by
-          // the backend and delivered via 'mining-status-update'. Ignoring
+          // the backend and delivered via 'drop-progress'. Ignoring
           // other drops' progress events here is what stops the percentage from
           // flipping between rewards (e.g. the 60-min vs the 180-min reward).
           if (prev.current_drop && prev.current_drop.drop_id === dropId) {
@@ -273,8 +268,8 @@ const TitleBar = () => {
   // falls back to the drop finishing first when current_drop isn't set yet (so
   // the badge shows a number instead of reverting to the plain gift icon).
   const progressPercent = useMemo(
-    () => deriveMiningDisplay(miningStatus, liveProgress)?.percent ?? 0,
-    [miningStatus, liveProgress],
+    () => deriveDropProgressDisplay(dropProgress, liveProgress)?.percent ?? 0,
+    [dropProgress, liveProgress],
   );
 
   // Handle hover preview show/hide with delay
@@ -283,7 +278,7 @@ const TitleBar = () => {
       clearTimeout(previewTimeoutRef.current);
     }
     previewTimeoutRef.current = setTimeout(() => {
-      if (isMiningActive && miningStatus?.current_drop) {
+      if (dropProgressActive && dropProgress?.current_drop) {
         setShowDropsPreview(true);
       }
     }, 300); // 300ms delay before showing preview
@@ -323,12 +318,12 @@ const TitleBar = () => {
 
   useEffect(() => {
     // Detect when mining stops
-    if (prevMiningActive.current && !isMiningActive) {
+    if (prevDropProgressActive.current && !dropProgressActive) {
       queueMicrotask(() => setShowSplash(true));
       setTimeout(() => setShowSplash(false), 600);
     }
-    prevMiningActive.current = isMiningActive;
-  }, [isMiningActive]);
+    prevDropProgressActive.current = dropProgressActive;
+  }, [dropProgressActive]);
 
   const handleMinimize = async () => {
     const window = Window.getCurrent();
@@ -425,12 +420,12 @@ const TitleBar = () => {
             onMouseLeave={handleDropsMouseLeave}
           >
             {(() => {
-              const isChannelPointsMining = dropsSettings?.auto_claim_channel_points ?? false;
-              const isBothActive = isMiningActive && isChannelPointsMining;
+              const channelPointsActive = dropsSettings?.auto_claim_channel_points ?? false;
+              const isBothActive = dropProgressActive && channelPointsActive;
               // While drops mining is active the indicator is the drop's
               // percentage (even at 0%), like it has always been, never a
               // placeholder gift. The gift shimmer is only for points-only.
-              const showProgressBadge = isMiningActive;
+              const showProgressBadge = dropProgressActive;
 
               // Determine gift box color/shimmer class
               // Silver = channel points only, Gold = drops only, Iridescent = both
@@ -440,15 +435,15 @@ const TitleBar = () => {
               if (isBothActive) {
                 giftClass = 'gift-shimmer-iridescent';
                 title = 'Drops & Points (Both Active)';
-              } else if (isMiningActive) {
+              } else if (dropProgressActive) {
                 giftClass = 'gift-shimmer-gold';
-                title = `Drops Mining: ${progressPercent}%`;
-              } else if (isChannelPointsMining) {
+                title = `Drops progress: ${progressPercent}%`;
+              } else if (channelPointsActive) {
                 giftClass = 'gift-shimmer-silver';
                 title = 'Drops & Points (Channel Points Active)';
               }
 
-              const isAnyMiningActive = isMiningActive || isChannelPointsMining;
+              const isAnyMiningActive = dropProgressActive || channelPointsActive;
 
               return (
                 <Tooltip content={title} delay={200}>
@@ -471,7 +466,7 @@ const TitleBar = () => {
             })()}
 
             {/* Hover Preview Card - portalled to body, positioned under the drops button */}
-            {showDropsPreview && isMiningActive && miningStatus?.current_drop && createPortal(
+            {showDropsPreview && dropProgressActive && dropProgress?.current_drop && createPortal(
               <div
                 className="drops-preview-card-right"
                 style={{ position: 'fixed', top: previewPos.top, left: previewPos.left, zIndex: 9999 }}
@@ -485,7 +480,7 @@ const TitleBar = () => {
                   <div className="p-1.5 rounded-md bg-accent/20">
                     <Pickaxe size={14} className="text-accent" />
                   </div>
-                  <span className="text-xs font-semibold text-textPrimary">Mining Drop</span>
+                  <span className="text-xs font-semibold text-textPrimary">Drop progress</span>
                 </div>
 
                 {/* Game & Drop Info */}
@@ -493,20 +488,20 @@ const TitleBar = () => {
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-textMuted">Game:</span>
                     <span className="text-textPrimary font-medium truncate max-w-[140px]">
-                      {miningStatus.current_drop.game_name}
+                      {dropProgress.current_drop.game_name}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-textMuted">Drop:</span>
                     <span className="text-textPrimary font-medium truncate max-w-[140px]">
-                      {miningStatus.current_drop.drop_name || '…'}
+                      {dropProgress.current_drop.drop_name || '…'}
                     </span>
                   </div>
-                  {miningStatus.current_channel && (
+                  {dropProgress.current_channel && (
                     <div className="flex items-center gap-2 text-xs">
                       <Tv size={10} className="text-textMuted" />
                       <span className="text-textSecondary truncate max-w-[160px]">
-                        {miningStatus.current_channel.display_name}
+                        {dropProgress.current_channel.display_name}
                       </span>
                     </div>
                   )}
@@ -528,8 +523,8 @@ const TitleBar = () => {
                     />
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-textMuted mt-1">
-                    <span>{miningStatus.current_drop.current_minutes} min</span>
-                    <span>{miningStatus.current_drop.required_minutes} min</span>
+                    <span>{dropProgress.current_drop.current_minutes} min</span>
+                    <span>{dropProgress.current_drop.required_minutes} min</span>
                   </div>
                 </div>
 

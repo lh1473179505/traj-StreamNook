@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import type { Settings, TwitchUser, TwitchStream, UserInfo, TwitchCategory, HypeTrainData, TwitchVideo, ModLogEvent, MiningStatus } from '../types';
+import type { Settings, TwitchUser, TwitchStream, UserInfo, TwitchCategory, HypeTrainData, TwitchVideo, ModLogEvent, DropProgressStatus } from '../types';
 import { trackActivity } from '../services/logService';
 import { Logger, setDiagnosticsEnabled } from '../utils/logger';
 // Direct import (not via the keybindings index) to avoid a storecommands cycle.
@@ -262,14 +262,20 @@ interface AppState {
   isHomeActive: boolean;
   isAuthenticated: boolean;
   currentUser: TwitchUser | null;
-  isMiningActive: boolean;
-  setMiningActive: (active: boolean) => void;
-  // Latest live mining status, written by the always-mounted PluginMiningBridge
-  // when a plugin powers mining. It survives the Drops overlay closing, so a
-  // reopened overlay can immediately show what is being mined. Null when no
-  // plugin is mining (the built-in miner's status is read on demand instead).
-  liveMiningStatus: MiningStatus | null;
-  setLiveMiningStatus: (status: MiningStatus | null) => void;
+  dropProgressActive: boolean;
+  setDropProgressActive: (active: boolean) => void;
+  // True when an external provider (an opt-in plugin) is registered for the
+  // generic drops feature. Set by the always-mounted DropProgressController.
+  // Provider-only controls render only when this is true; on its own core just
+  // earns natively on the channel you watch, with no extra controls.
+  externalDropsProvider: boolean;
+  setExternalDropsProvider: (available: boolean) => void;
+  // Latest live drop-progress status, written by the DropProgressController
+  // (native watch-to-earn, or an external provider). It survives the Drops
+  // overlay closing, so a reopened overlay can immediately show current
+  // progress. Null when nothing is currently progressing a drop.
+  liveDropProgress: DropProgressStatus | null;
+  setLiveDropProgress: (status: DropProgressStatus | null) => void;
   isTheaterMode: boolean;
   originalChatPlacement: string | null;
   toasts: Toast[];
@@ -489,10 +495,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   isHomeActive: true,
   isAuthenticated: false,
   currentUser: null,
-  isMiningActive: false,
-  setMiningActive: (active: boolean) => set({ isMiningActive: active }),
-  liveMiningStatus: null,
-  setLiveMiningStatus: (status: MiningStatus | null) => set({ liveMiningStatus: status }),
+  dropProgressActive: false,
+  setDropProgressActive: (active: boolean) => set({ dropProgressActive: active }),
+  externalDropsProvider: false,
+  setExternalDropsProvider: (available: boolean) => set({ externalDropsProvider: available }),
+  liveDropProgress: null,
+  setLiveDropProgress: (status: DropProgressStatus | null) => set({ liveDropProgress: status }),
   isTheaterMode: false,
   originalChatPlacement: null,
   toasts: [],

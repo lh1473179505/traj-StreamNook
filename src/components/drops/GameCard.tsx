@@ -1,8 +1,9 @@
 import { useRef, useEffect, useState } from 'react';
-import { Check, Clock, Package, Square, Play, Heart, DollarSign } from 'lucide-react';
-import type { UnifiedGame, DropProgress, MiningStatus, DropCampaign } from '../../types';
+import { Check, Clock, Package, Square, Heart, DollarSign } from 'lucide-react';
+import type { UnifiedGame, DropProgress, DropProgressStatus, DropCampaign } from '../../types';
 import { Tooltip } from '../ui/Tooltip';
-import { deriveMiningDisplay } from '../../utils/miningDisplay';
+import { deriveDropProgressDisplay } from '../../utils/dropProgressDisplay';
+import { useAppStore } from '../../stores/AppStore';
 
 // Helper to check if a campaign is mineable (has time-based drops that require watching)
 function isCampaignMineable(campaign: DropCampaign): boolean {
@@ -29,12 +30,11 @@ interface GameCardProps {
     game: UnifiedGame;
     allGames: UnifiedGame[]; // All games for global drop metadata lookup
     progress: DropProgress[];
-    miningStatus: MiningStatus | null;
+    dropProgress: DropProgressStatus | null;
     isSelected: boolean;
     isFavorite: boolean;
     onClick: () => void;
     onStopMining?: () => void;
-    onMineAllGame?: (gameName: string, campaignIds: string[]) => void;
     onToggleFavorite?: (gameName: string) => void;
 }
 
@@ -53,23 +53,26 @@ export default function GameCard({
     game,
     allGames,
     progress,
-    miningStatus,
+    dropProgress,
     isSelected,
     isFavorite,
     onClick,
     onStopMining,
     onToggleFavorite
 }: GameCardProps) {
+    // Stop only applies when a provider is driving; native watch-to-earn stops
+    // by not watching.
+    const externalDropsProvider = useAppStore((s) => s.externalDropsProvider);
     const titleRef = useRef<HTMLHeadingElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [fontSize, setFontSize] = useState(14); // Start with default size in px
 
     // Check if this game is currently being mined
-    // Use case-insensitive comparison and also check the game's is_mining flag
-    const isMining = miningStatus?.is_mining && (
-        game.is_mining ||
-        miningStatus.current_drop?.game_name?.toLowerCase() === game.name?.toLowerCase() ||
-        miningStatus.current_channel?.game_name?.toLowerCase() === game.name?.toLowerCase()
+    // Use case-insensitive comparison and also check the game's active flag
+    const isDropProgressing = dropProgress?.active && (
+        game.active ||
+        dropProgress.current_drop?.game_name?.toLowerCase() === game.name?.toLowerCase() ||
+        dropProgress.current_channel?.game_name?.toLowerCase() === game.name?.toLowerCase()
     );
 
     // Build a global drop map from ALL games for metadata lookup
@@ -102,8 +105,8 @@ export default function GameCard({
     // copy. Image/name still resolve through the global drop map when the live
     // data doesn't carry them (live value -> campaign metadata -> generic).
     const bestDrop = (() => {
-        if (!isMining) return null;
-        const display = deriveMiningDisplay(miningStatus, progress);
+        if (!isDropProgressing) return null;
+        const display = deriveDropProgressDisplay(dropProgress, progress);
         if (!display) return null;
         const metadata = globalDropMap.get(display.dropId);
         return {
@@ -116,7 +119,7 @@ export default function GameCard({
     })();
 
     // Mining progress from best drop
-    const miningProgress = isMining && bestDrop
+    const miningProgress = isDropProgressing && bestDrop
         ? {
             current: bestDrop.current,
             required: bestDrop.required,
@@ -125,7 +128,7 @@ export default function GameCard({
 
     // Get the benefit image/name from best drop
     const miningDropBenefitImage = bestDrop?.benefitImage;
-    const miningDropBenefitName = bestDrop?.benefitName || miningStatus?.current_drop?.drop_name || 'Drop';
+    const miningDropBenefitName = bestDrop?.benefitName || dropProgress?.current_drop?.drop_name || 'Drop';
 
     // Transform box art URL to high resolution (1200x1600)
     // GQL API returns URLs with fixed dimensions (e.g., "52x72"), not placeholders
@@ -245,7 +248,7 @@ export default function GameCard({
             onClick={onClick}
             className={`glass-panel cursor-pointer hover:bg-glass-hover transition-all duration-200 group overflow-hidden relative
                 ${isSelected ? 'ring-2 ring-accent' : 'hover:ring-1 hover:ring-accent/40'}
-                ${isMining ? 'ring-2 ring-accent-neon mining-shimmer-overlay' : ''}
+                ${isDropProgressing ? 'ring-2 ring-accent-neon mining-shimmer-overlay' : ''}
             `}
         >
             {/* Image Container */}
@@ -313,7 +316,7 @@ export default function GameCard({
                 </div>
 
                 {/* Mining State: Show progress info with drop reward */}
-                {isMining ? (
+                {isDropProgressing ? (
                     <div className="mt-1.5 space-y-1.5">
                         {/* Drop reward info row */}
                         <div className="flex items-center gap-2">
@@ -340,8 +343,9 @@ export default function GameCard({
                                             style={{ width: `${progressPercent}%` }}
                                         />
                                     </div>
-                                    {/* Stop button */}
-                                    <Tooltip content="Stop mining" delay={200} side="top">
+                                    {/* Stop button — only when a provider is driving. */}
+                                    {externalDropsProvider && (
+                                    <Tooltip content="Stop" delay={200} side="top">
                                         <button
                                             onClick={(e) => {
                                                 e.stopPropagation();
@@ -352,6 +356,7 @@ export default function GameCard({
                                             <Square size={10} className="text-red-400" fill="currentColor" />
                                         </button>
                                     </Tooltip>
+                                    )}
                                 </div>
                             </div>
                         </div>

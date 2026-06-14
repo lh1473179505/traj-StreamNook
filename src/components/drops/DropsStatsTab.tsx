@@ -1,20 +1,24 @@
 import { Pause, Pickaxe, Gift, TrendingUp, Clock, Award } from 'lucide-react';
-import type { DropsStatistics, MiningStatus } from '../../types';
+import type { DropsStatistics, DropProgressStatus } from '../../types';
 import ChannelPointsLeaderboard from '../ChannelPointsLeaderboard';
+import { useAppStore } from '../../stores/AppStore';
 
 interface DropsStatsTabProps {
     statistics: DropsStatistics | null;
-    miningStatus: MiningStatus | null;
+    dropProgress: DropProgressStatus | null;
     onStopMining: () => void;
     onStreamClick: (channelName: string) => void;
 }
 
 export default function DropsStatsTab({
     statistics,
-    miningStatus,
+    dropProgress,
     onStopMining,
     onStreamClick
 }: DropsStatsTabProps) {
+    // Stop only applies when a provider is driving; native watch-to-earn stops
+    // by not watching.
+    const externalDropsProvider = useAppStore((s) => s.externalDropsProvider);
     if (!statistics) {
         return (
             <div className="flex items-center justify-center h-full">
@@ -61,7 +65,7 @@ export default function DropsStatsTab({
                 </div>
 
                 {/* Active Mining Status Card */}
-                {miningStatus?.is_mining && miningStatus.current_channel && (
+                {dropProgress?.active && dropProgress.current_channel && (
                     <div className="glass-panel p-6 border border-green-500/30 bg-green-500/5 relative overflow-hidden group">
                         {/* Background decoration */}
                         <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
@@ -81,27 +85,27 @@ export default function DropsStatsTab({
                             <div className="flex justify-between items-center border-b border-green-500/10 pb-3">
                                 <span className="text-textSecondary">Channel</span>
                                 <span className="text-textPrimary font-medium font-mono">
-                                    {miningStatus.current_channel.display_name || miningStatus.current_channel.name}
+                                    {dropProgress.current_channel.display_name || dropProgress.current_channel.name}
                                 </span>
                             </div>
 
                             {/* Campaign */}
-                            {miningStatus.current_campaign && (
+                            {dropProgress.current_campaign && (
                                 <div className="flex justify-between items-center border-b border-green-500/10 pb-3">
                                     <span className="text-textSecondary">Campaign</span>
                                     <span className="text-textPrimary font-medium font-mono truncate max-w-[200px]">
-                                        {miningStatus.current_campaign}
+                                        {dropProgress.current_campaign}
                                     </span>
                                 </div>
                             )}
 
                             {/* Current Drop */}
-                            {miningStatus.current_drop && (
+                            {dropProgress.current_drop && (
                                 <>
                                     <div className="flex justify-between items-center border-b border-green-500/10 pb-3">
                                         <span className="text-textSecondary">Current Drop</span>
                                         <span className="text-textPrimary font-medium font-mono truncate max-w-[200px]">
-                                            {miningStatus.current_drop.drop_name}
+                                            {dropProgress.current_drop.drop_name}
                                         </span>
                                     </div>
 
@@ -110,7 +114,7 @@ export default function DropsStatsTab({
                                         <div className="flex justify-between text-xs text-textSecondary mb-2">
                                             <span>Progress</span>
                                             <span className="font-mono text-green-400">
-                                                {miningStatus.current_drop.current_minutes}/{miningStatus.current_drop.required_minutes}m
+                                                {dropProgress.current_drop.current_minutes}/{dropProgress.current_drop.required_minutes}m
                                             </span>
                                         </div>
                                         <div className="h-2.5 w-full bg-black/30 rounded-full overflow-hidden">
@@ -118,7 +122,7 @@ export default function DropsStatsTab({
                                                 className="h-full rounded-full animate-progress-shimmer"
                                                 style={{
                                                     width: `${Math.min(
-                                                        (miningStatus.current_drop.current_minutes / miningStatus.current_drop.required_minutes) * 100,
+                                                        (dropProgress.current_drop.current_minutes / dropProgress.current_drop.required_minutes) * 100,
                                                         100
                                                     )}%`
                                                 }}
@@ -129,25 +133,27 @@ export default function DropsStatsTab({
                             )}
                         </div>
 
-                        {/* Stop Button */}
+                        {/* Stop Button — only when a provider is driving. */}
+                        {externalDropsProvider && (
                         <div className="mt-4 flex justify-end">
                             <button
                                 onClick={onStopMining}
                                 className="glass-button px-4 py-2 text-xs font-semibold text-red-300 flex items-center gap-2"
                             >
                                 <Pause size={14} />
-                                Stop Mining
+                                Stop
                             </button>
                         </div>
+                        )}
                     </div>
                 )}
 
                 {/* Not Mining State */}
-                {!miningStatus?.is_mining && (
+                {!dropProgress?.active && (
                     <div className="glass-panel p-6 border border-dashed border-borderLight text-center">
                         <Pickaxe size={32} className="mx-auto text-textSecondary opacity-40 mb-3" />
                         <p className="text-sm text-textSecondary">
-                            Not currently mining any drops. Select a game to start mining!
+                            Not currently earning any drops. Pick a game and watch to earn.
                         </p>
                     </div>
                 )}

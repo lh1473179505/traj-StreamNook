@@ -14,7 +14,7 @@ const ChannelPointsIcon = ({ className = "", size = 14 }: { className?: string; 
     <path fillRule="evenodd" d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm11 9a9 9 0 1 1 0-18 9 9 0 0 1 0 18Z" clipRule="evenodd"></path>
   </svg>
 );
-import { MiningStatus } from '../types';
+import { DropProgressStatus } from '../types';
 import { useTwitchChat } from '../hooks/useTwitchChat';
 import { useChannelEmotes, ensureChannelEmotes, getChannelEmotes, refreshChannelEmotes } from '../stores/chatConnectionStore';
 import { useAppStore } from '../stores/AppStore';
@@ -501,6 +501,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   // only when these specific fields change, not on every unrelated store tick.
   const rawCurrentStream = useAppStore((s) => s.currentStream);
   const currentUser = useAppStore((s) => s.currentUser);
+  const externalDropsProvider = useAppStore((s) => s.externalDropsProvider);
   const currentHypeTrain = useAppStore((s) => s.currentHypeTrain);
   const currentMediaType = useAppStore((s) => s.currentMediaType);
   const isMultiNookActive = usemultiNookStore((s) => s.isMultiNookActive);
@@ -851,7 +852,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
 
   // Drops mining state
   const [dropsCampaign, setDropsCampaign] = useState<{ id: string; name: string; game_name: string } | null>(null);
-  const [isMining, setIsMining] = useState(false);
+  const [isDropProgressing, setIsDropProgressing] = useState(false);
   const [isLoadingDrops, setIsLoadingDrops] = useState(false);
 
   // Channel points state
@@ -1683,7 +1684,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     const loadDropsForStream = async () => {
       if (!currentStream?.game_name) {
         setDropsCampaign(null);
-        setIsMining(false);
+        setIsDropProgressing(false);
         return;
       }
       setIsLoadingDrops(true);
@@ -1698,18 +1699,19 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
           );
           if (matchingCampaign) {
             setDropsCampaign(matchingCampaign);
-            // Check if already mining this game (check by game_name, not campaign name)
-            const miningStatus = await invoke<MiningStatus>('get_mining_status');
-            const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-              miningStatus.current_channel?.game_name?.toLowerCase();
-            setIsMining(miningStatus.is_mining && miningGameName === gameName);
+            // Reflect whether a mining plugin is already mining this game, from
+            // the bridge-cached status (check by game_name, not campaign name).
+            const dropProgress = useAppStore.getState().liveDropProgress;
+            const progressGameName = dropProgress?.current_drop?.game_name?.toLowerCase() ||
+              dropProgress?.current_channel?.game_name?.toLowerCase();
+            setIsDropProgressing(!!dropProgress?.active && progressGameName === gameName);
           } else {
             setDropsCampaign(null);
-            setIsMining(false);
+            setIsDropProgressing(false);
           }
         } else {
           setDropsCampaign(null);
-          setIsMining(false);
+          setIsDropProgressing(false);
         }
       } catch (err) {
         Logger.warn('[ChatWidget] Could not load drops data:', err);
@@ -1725,17 +1727,13 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
   // Real-time updates arrive via the `mining-status-changed` event listener;
   // the polling fallback is just a stale-protection net so we use a 60-min
   // cadence (aligned with the TitleBar backup poll) and visibility-gate it.
-  const handleMiningStatusChange = useCallback(async () => {
+  const handleDropProgressChange = useCallback(async () => {
     if (!dropsCampaign || !currentStream?.game_name) return;
-    try {
-      const miningStatus = await invoke<MiningStatus>('get_mining_status');
-      const gameName = currentStream.game_name.toLowerCase();
-      const miningGameName = miningStatus.current_drop?.game_name?.toLowerCase() ||
-        miningStatus.current_channel?.game_name?.toLowerCase();
-      setIsMining(miningStatus.is_mining && miningGameName === gameName);
-    } catch (err) {
-      Logger.warn('[ChatWidget] Failed to check mining status:', err);
-    }
+    const dropProgress = useAppStore.getState().liveDropProgress;
+    const gameName = currentStream.game_name.toLowerCase();
+    const progressGameName = dropProgress?.current_drop?.game_name?.toLowerCase() ||
+      dropProgress?.current_channel?.game_name?.toLowerCase();
+    setIsDropProgressing(!!dropProgress?.active && progressGameName === gameName);
   }, [dropsCampaign, currentStream?.game_name]);
 
   useEffect(() => {
@@ -1745,7 +1743,7 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
     const setupListener = async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        const unlistenFn = await listen('mining-status-changed', handleMiningStatusChange);
+        const unlistenFn = await listen('drop-progress', handleDropProgressChange);
         if (isMounted) {
           unlisten = unlistenFn;
         } else {
@@ -1761,42 +1759,32 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
       isMounted = false;
       if (unlisten) unlisten();
     };
-  }, [handleMiningStatusChange]);
+  }, [handleDropProgressChange]);
 
-  useVisibleInterval(handleMiningStatusChange, 60 * 60 * 1000);
+  useVisibleInterval(handleDropProgressChange, 60 * 60 * 1000);
 
-  // Handler to toggle mining drops for current channel
+  // Handler to toggle mining drops for current channel. Farming is plugin-
+  // powered; this control only renders when a plugin provides mining, so route
+  // start/stop to it.
   const handleToggleMining = async () => {
     if (!dropsCampaign) return;
+    if (!useAppStore.getState().externalDropsProvider) return;
 
-    if (isMining) {
+    if (isDropProgressing) {
       // Stop mining
       try {
-        await invoke('stop_auto_mining');
-        setIsMining(false);
+        await invoke('plugins_invoke_action', { action: 'drops.stop', args: {} });
+        setIsDropProgressing(false);
         useAppStore.getState().addToast(`Stopped mining drops for ${dropsCampaign.game_name}`, 'info');
       } catch (err) {
         Logger.error('[ChatWidget] Failed to stop mining:', err);
         useAppStore.getState().addToast('Failed to stop mining drops', 'error');
       }
     } else {
-      // Start mining
+      // Start mining (the plugin resolves an eligible channel itself)
       try {
-        // Try to start mining with channel preference (use current channel's user_id)
-        // If the channel is eligible for this campaign, it will use it
-        // Otherwise, the backend will fall back to recommended channel
-        if (currentStream?.user_id) {
-          await invoke('start_campaign_mining_with_channel', {
-            campaignId: dropsCampaign.id,
-            channelId: currentStream.user_id
-          });
-        } else {
-          // Fall back to automatic channel selection
-          await invoke('start_campaign_mining', {
-            campaignId: dropsCampaign.id
-          });
-        }
-        setIsMining(true);
+        await invoke('plugins_invoke_action', { action: 'drops.mine', args: { campaign_id: dropsCampaign.id } });
+        setIsDropProgressing(true);
         useAppStore.getState().addToast(`Started mining drops for ${dropsCampaign.game_name}`, 'success');
       } catch (err) {
         Logger.error('[ChatWidget] Failed to start mining:', err);
@@ -4220,18 +4208,20 @@ const ChatWidget = ({ channelOverride }: ChatWidgetProps = {}) => {
                     />
                   )}
                 </div>
-                {/* Drops mining button - only shows if current game has active drops */}
-                {dropsCampaign && (
-                  <Tooltip content={isMining ? `Stop mining drops for ${dropsCampaign.game_name}` : `Start mining drops for ${dropsCampaign.game_name}`} side="top">
+                {/* Drops mining button: only when a drops-mining plugin is installed
+                    and the current game has active drops. Without the plugin, core
+                    earns natively on the watched channel with no farming control. */}
+                {dropsCampaign && externalDropsProvider && (
+                  <Tooltip content={isDropProgressing ? `Stop mining drops for ${dropsCampaign.game_name}` : `Start mining drops for ${dropsCampaign.game_name}`} side="top">
                   <button
                     onClick={handleToggleMining}
                     disabled={isLoadingDrops}
-                    className={`group flex-shrink-0 flex items-center justify-center self-center w-9 h-9 transition-all duration-200 ${isMining
+                    className={`group flex-shrink-0 flex items-center justify-center self-center w-9 h-9 transition-all duration-200 ${isDropProgressing
                       ? 'text-green-400 hover:text-red-400'
                       : 'text-textSecondary hover:text-accent'
                       }`}
                   >
-                    <Pickaxe size={18} className={`transition-all duration-200 group-hover:drop-shadow-[0_0_6px_rgba(200,224,232,0.85)] ${isMining ? 'animate-pulse' : ''}`} />
+                    <Pickaxe size={18} className={`transition-all duration-200 group-hover:drop-shadow-[0_0_6px_rgba(200,224,232,0.85)] ${isDropProgressing ? 'animate-pulse' : ''}`} />
                   </button>
                   </Tooltip>
                 )}

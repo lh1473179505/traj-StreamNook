@@ -1,4 +1,4 @@
-import type { MiningStatus, DropProgress } from '../types';
+import type { DropProgressStatus, DropProgress } from '../types';
 
 export interface MiningDisplay {
   dropId: string;
@@ -18,12 +18,12 @@ export interface MiningDisplay {
  * the title-bar badge, the overlay game cards, and the game detail panel. Each
  * used to derive the number its own way, so they drifted apart — most visibly,
  * the detail panel (which reads the live progress[] array) stayed current while
- * the card and title bar (which read miningStatus.current_drop directly) lagged
+ * the card and title bar (which read dropProgress.current_drop directly) lagged
  * or showed nothing. This helper is the shared rule they all run through.
  *
  * Rule:
  *  - WHICH drop is shown is the backend's call, delivered via
- *    miningStatus.current_drop (the reward finishing first). We only derive the
+ *    dropProgress.current_drop (the reward finishing first). We only derive the
  *    drop ourselves when current_drop is missing or points at a non-mineable
  *    (0-minute) reward.
  *  - HOW FAR along always prefers the freshest per-drop value from the live
@@ -34,18 +34,18 @@ export interface MiningDisplay {
  *
  * Returns null when nothing is being mined (or no progress is known yet).
  */
-export function deriveMiningDisplay(
-  miningStatus: MiningStatus | null,
+export function deriveDropProgressDisplay(
+  dropProgress: DropProgressStatus | null,
   progress: DropProgress[],
 ): MiningDisplay | null {
-  if (!miningStatus?.is_mining) return null;
+  if (!dropProgress?.active) return null;
 
   const liveFor = (dropId: string) =>
     progress.find((p) => p.drop_id === dropId) || null;
 
   // PRIMARY: the backend already chose the drop to display. Trust that choice,
   // but take its minutes from the live progress[] entry when we have one.
-  const cd = miningStatus.current_drop;
+  const cd = dropProgress.current_drop;
   if (cd && cd.required_minutes > 0) {
     const live = liveFor(cd.drop_id);
     const required = live?.required_minutes_watched || cd.required_minutes;
