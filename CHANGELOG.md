@@ -1,3 +1,7 @@
+## [8.0.1] - 2026-06-13
+### 🔧 Maintenance
+- **Update checks are downgrade-safe**: The built-in updater now compares versions properly and only offers a newer build, so a momentary hiccup in the update service can never prompt you to "update" to an older version.
+
 ## [8.0.0] - 2026-06-14
 ## 🎉 New: A built-in Marketplace, and StreamNook is now modular
 > The features you know no longer all live in one binary. StreamNook 8.0 introduces a real plugin system with a Marketplace built right in: familiar add-ons that used to be part of the core app now ship as opt-in plugins you install in one click, so the app stays lean and you run only what you want. Best of all it is open. The community can build and submit their own plugins, so what is available keeps growing beyond the ones we make.
