@@ -374,6 +374,28 @@ jobs:
             --remote
           if ($LASTEXITCODE -ne 0) { throw "wrangler r2 upload failed (exit $LASTEXITCODE)" }
           Write-Host "Uploaded StreamNook.7z (v$version) to R2 - live at https://streamnook.app/download"
+
+          # Build and upload the update manifest the desktop client reads at
+          # streamnook.app/api/v1/update (served from R2 as latest.json). Without
+          # this, installed clients keep seeing the previous version and either
+          # miss the update or get prompted to "update" to an older build.
+          $manifest = [ordered]@{
+            version       = $version
+            download_url  = "https://streamnook.app/download"
+            bundle_name   = $bundleName
+            sha256        = (Get-FileHash "$bundleName" -Algorithm SHA256).Hash.ToLower()
+            size          = (Get-Item "$bundleName").Length
+            notes         = (Get-Content ./changelog_section.md -Raw).TrimEnd()
+            min_supported = "0.0.0"
+            published_at  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Out-File -FilePath ./latest.json -Encoding utf8 -NoNewline
+          npx --yes wrangler@4 r2 object put "streamnook-downloads/latest.json" `
+            --file="latest.json" `
+            --content-type="application/json" `
+            --remote
+          if ($LASTEXITCODE -ne 0) { throw "wrangler r2 manifest upload failed (exit $LASTEXITCODE)" }
+          Write-Host "Uploaded latest.json (v$version) to R2 - live at https://streamnook.app/api/v1/update"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
