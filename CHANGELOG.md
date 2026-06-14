@@ -1,3 +1,13 @@
+## [8.0.2] - 2026-06-14
+### 🐛 Bug Fixes
+- Drops campaigns that only run on specific channels now offer a channel picker, so you can choose a participating live channel straight from the campaign and start watching.
+- Drop rewards now show a clear Badge, Emote, or Item label, so you can tell at a glance what each reward actually is.
+- The stream stats panel can now be dragged anywhere over the player, and it remembers where you left it.
+- Event and special-event drops now track progress correctly when you watch a participating channel, even when that channel's category doesn't match the campaign.
+- Earned badges now count toward a campaign's "earned" tally consistently, instead of sometimes reading zero while the badge sits claimed in your collection.
+- The post-update changelog popup now opens on the version you just installed, instead of occasionally sticking on an older release from a stale cache.
+- The frosted glass on pop-up dialogs now follows your Glassiness setting, going fully solid at the lowest setting like the rest of the app.
+
 ## [8.0.1] - 2026-06-13
 ### 🔧 Maintenance
 - **Update checks are downgrade-safe**: The built-in updater now compares versions properly and only offers a newer build, so a momentary hiccup in the update service can never prompt you to "update" to an older version.
