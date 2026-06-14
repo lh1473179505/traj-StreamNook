@@ -283,7 +283,9 @@ const ChangelogOverlay = ({ version, onClose }: ChangelogOverlayProps) => {
   const [error, setError] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
-  const didDefaultRef = useRef(false);
+  // Set once the user picks a version from the switcher, so the auto-default
+  // below stops overriding their choice.
+  const userPickedRef = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -318,16 +320,18 @@ const ChangelogOverlay = ({ version, onClose }: ChangelogOverlayProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version]);
 
-  // Default to the most recent release once the list is available (a post-update
-  // changelog should open on what you just updated to). Runs once, so the user's
-  // later picks from the switcher aren't reset.
+  // Default the open changelog to what you just updated to (the `version` prop is
+  // the installed version, i.e. the most recent release). If that exact tag isn't
+  // in the fetched list, fall back to the newest release available. Re-evaluates
+  // whenever the list changes — crucially when the fresh fetch replaces a stale
+  // cache — so a stale cache can't pin the popup to an older release. Skips once
+  // the user has manually picked a version from the switcher.
   useEffect(() => {
-    if (!didDefaultRef.current && releases && releases.length) {
-      didDefaultRef.current = true;
-      setSelectedTag(normalizeTag(releases[0].tag_name));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [releases]);
+    if (userPickedRef.current || !releases || !releases.length) return;
+    const wanted = normalizeTag(version);
+    const hasWanted = releases.some((r) => normalizeTag(r.tag_name) === wanted);
+    setSelectedTag(hasWanted ? wanted : normalizeTag(releases[0].tag_name));
+  }, [releases, version]);
 
   // Close the version menu on an outside click.
   useEffect(() => {
@@ -440,6 +444,7 @@ const ChangelogOverlay = ({ version, onClose }: ChangelogOverlayProps) => {
                       <button
                         key={r.tag_name}
                         onClick={() => {
+                          userPickedRef.current = true;
                           setSelectedTag(tag);
                           setMenuOpen(false);
                         }}
