@@ -55,7 +55,7 @@ once_cell = "1.21.3"
 sevenz-rust = "0.6"
 cosmic-text = "0.15.0"
 scopeguard = "1.2"
-phf = "0.11"
+phf = "0.13"
 lru = "0.12"
 
 # Plugin host: manifest parsing, version gating, artifact verification and unpack
